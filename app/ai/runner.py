@@ -1,0 +1,660 @@
+"""AI runner — orchestrates agent execution and persists results to DB."""
+import asyncio
+import logging
+import re
+import time
+from datetime import datetime
+
+from agents import Runner
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.ai.agents import build_sales_agent
+from app.ai.anthropic_runner import run_with_cache
+from app.ai.audio import is_audio_url, transcribe_audio_url
+from app.ai.cost import (
+    CACHE_READ_MULT_BY_MODEL,
+    DEFAULT_CACHE_READ_MULT,
+    calculate_cost,
+    get_model_pricing,
+)
+from app.ai.prompts import get_system_prompt, format_statuses_block
+from app.ai.run_log import log_failed_run, usage_from_result
+from app.ai.tools import fetch_client_tags
+from app.ai.providers import get_model_name
+from app.ai.schemas import AgentOutput
+from app.config import settings
+from app.utils.media import is_image_url, is_sticker_url, is_video_url
+from app.ai.feedback import load_active_feedback_rules
+from app.ai.funnel_agent import detect_stage, format_stage_block
+from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole
+from app.utils.text import normalize_dashes
+
+logger = logging.getLogger(__name__)
+
+# Cap history sent to the model — older turns rarely change the reply but cost input tokens.
+_HISTORY_MAX_MESSAGES = 100
+
+
+OBJECTION_KEYWORDS = [
+    "дорого", "дорог", "expensive", "цена высок", "много стоит",
+    "подумаю", "подумать", "думать", "need to think",
+    "конкурент", "дешевле", "другая компания",
+    "качество", "не уверен", "сомневаюсь",
+    "долго", "сроки", "быстрее",
+]
+
+
+def _is_objection(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw in lowered for kw in OBJECTION_KEYWORDS)
+
+
+_normalize_dashes = normalize_dashes
+
+# Free-form replies (source_script_id=None) have no code-level anti-repeat guard, and
+# prompt rules alone don't hold: see client 8474931 — the model re-sent its own previous
+# message verbatim when the client merely confirmed the proposed size. Threshold is on
+# normalized text; 0.85 catches near-verbatim copies but not a routine same-topic reply.
+_DUP_SIMILARITY_THRESHOLD = 0.85
+# Short acks («Хорошо, жду фото 😊») legitimately repeat — only long replies are checked.
+_DUP_MIN_LENGTH = 80
+
+_DUP_RETRY_INSTRUCTION = (
+    "[Служебное] Твой ответ выше почти дословно повторяет сообщение, которое менеджер "
+    "УЖЕ отправил клиенту (см. историю диалога). Клиент его уже читал. Напиши ДРУГОЙ "
+    "ответ: не пересказывай уже отправленное, отреагируй на последнее сообщение клиента "
+    "и продвинь диалог на следующий шаг текущей стадии воронки."
+)
+
+
+# Все платёжные ссылки проекта содержат «pay» в URL (monro-book-payment.online,
+# monro-statue-payment.online, параметр ?pay=1000); фото/CDN-ссылки — нет.
+_PAYMENT_LINK_RE = re.compile(r"https?://\S*pay", re.IGNORECASE)
+
+
+def _normalize_for_dup(text: str) -> str:
+    return re.sub(r"[\W_]+", " ", (text or "").lower()).strip()
+
+
+def _find_duplicate_reply(reply: str, manager_texts: list[str]) -> str | None:
+    """Return the already-sent manager message the reply near-duplicates, else None."""
+    from difflib import SequenceMatcher
+
+    norm_reply = _normalize_for_dup(reply)
+    if len(norm_reply) < _DUP_MIN_LENGTH:
+        return None
+    for prev in manager_texts:
+        norm_prev = _normalize_for_dup(prev)
+        if len(norm_prev) < _DUP_MIN_LENGTH:
+            continue
+        if SequenceMatcher(None, norm_reply, norm_prev).ratio() >= _DUP_SIMILARITY_THRESHOLD:
+            return prev
+    return None
+
+
+def _attachment_content(text: str, files: list[str]) -> list[dict]:
+    """Собирает multimodal-контент сообщения клиента: текст + вложения.
+
+    Не-изображения превращаются в текстовые плейсхолдеры ([Стикер] и т.п.).
+    Плейсхолдер не дублируется, если он уже есть в тексте сообщения
+    (adapter подставляет его же вместо пустого текста).
+    """
+    content: list[dict] = [{"type": "input_text", "text": text}]
+    seen_placeholders = {text}
+    for url in files:
+        if is_sticker_url(url):
+            placeholder = "[Стикер]"
+        elif is_audio_url(url):
+            placeholder = "[голосовое сообщение]"
+        elif is_video_url(url):
+            placeholder = "[видео]"
+        else:
+            content.append({"type": "input_image", "image_url": url, "detail": "auto"})
+            continue
+        if placeholder not in seen_placeholders:
+            seen_placeholders.add(placeholder)
+            content.append({"type": "input_text", "text": placeholder})
+    return content
+
+
+async def run_ai(
+    db: AsyncSession,
+    dialog: Dialog,
+    client_message: Message,
+) -> tuple[AgentOutput, AIRun]:
+    """Run the appropriate agent and persist AIRun record."""
+    text = client_message.text
+
+    type_id: int | None = getattr(dialog, "type_id", None)
+
+    client = await db.get(Client, dialog.client_id)
+    vk_user_id = client.vk_user_id if client else None
+    ctx = f"vk_user={vk_user_id}" if vk_user_id else f"dialog={dialog.id}"
+
+    logger.info(
+        "[%s] run_ai start | type_id=%s | msg_id=%s | text=%r",
+        ctx, type_id, client_message.id, text[:80],
+    )
+
+    logger.info("[%s] loading system prompt | type_id=%s", ctx, type_id)
+    instructions = await get_system_prompt(db, type_id=type_id)
+    logger.info("[%s] system prompt loaded | len=%d chars", ctx, len(instructions))
+
+    # Load active statuses and inject them into the prompt
+    active_statuses_result = await db.execute(
+        select(DialogStatusConfig).where(DialogStatusConfig.is_active == True).order_by(DialogStatusConfig.id)
+    )
+    active_statuses = active_statuses_result.scalars().all()
+    statuses_block = format_statuses_block(active_statuses)
+    if statuses_block:
+        instructions = instructions + "\n\n" + statuses_block
+
+    # Per-turn dynamic context goes into user messages (NOT the system prompt) so the
+    # system prompt stays byte-stable and the Anthropic prompt cache hits every turn.
+    # These messages are appended right before the current client message and kept in the
+    # uncached tail (see cache_uncached_tail below).
+    dynamic_context: list[str] = []
+
+    # FunnelAgent: detect the current sales-script stage BEFORE the SalesAgent runs, so
+    # the reply is grounded in where the conversation actually stands. Persisted on the
+    # dialog so the async PingAgent can reuse the last-detected stage. On failure we keep
+    # the previous stage rather than blocking the reply.
+    stage = await detect_stage(db, dialog)
+    if stage:
+        dialog.funnel_stage = stage
+    stage_block = format_stage_block(dialog.funnel_stage)
+    if stage_block:
+        dynamic_context.append(stage_block)
+        logger.info("[%s] funnel stage injected | stage=%s", ctx, dialog.funnel_stage)
+
+    feedback_rules = await load_active_feedback_rules(db, type_id)
+    if feedback_rules:
+        items = []
+        for r in feedback_rules:
+            items.append(f"Сообщение ИИ: «{r['message_text']}»\nОшибка: {r['rule_text']}")
+        rules_block = "\n\n".join(items)
+        dynamic_context.append("[Разбор ошибок — учти и не повторяй]\n" + rules_block)
+        logger.info("[%s] feedback rules injected | count=%d", ctx, len(feedback_rules))
+
+    # The script used in the previous AI reply is excluded from list_scripts so the model
+    # physically can't send the same phrase twice in a row (prompt-level «не
+    # повторяйся» rules proved unreliable — see dialog 8457478, same phrase sent 3x).
+    last_script_id = await db.scalar(
+        select(AIRun.source_script_id)
+        .where(AIRun.dialog_id == dialog.id, AIRun.source_script_id.isnot(None))
+        .order_by(AIRun.id.desc())
+        .limit(1)
+    )
+    exclude_script_ids: set[int] | None = {last_script_id} if last_script_id else None
+    if exclude_script_ids:
+        logger.info("[%s] excluding last used script | script_id=%s", ctx, last_script_id)
+
+    dialog_provider = getattr(dialog, "ai_provider", None) or settings.AI_PROVIDER
+    agent = build_sales_agent(
+        instructions,
+        type_id=type_id,
+        provider=dialog_provider,
+        client_id=client.id if client else None,
+        funnel_stage=dialog.funnel_stage,
+        exclude_script_ids=exclude_script_ids,
+    )
+    logger.info(
+        "[%s] agent built | model=%s | provider=%s",
+        ctx, get_model_name(dialog_provider), dialog_provider,
+    )
+
+    audio_urls: list[str] = (client_message.msg_metadata or {}).get("audio_urls", [])
+    if audio_urls:
+        logger.info("[%s] transcribing %d audio message(s)", ctx, len(audio_urls))
+        transcripts: list[str] = []
+        for url in audio_urls:
+            t = await transcribe_audio_url(url)
+            if t:
+                transcripts.append(t)
+        if transcripts:
+            combined = " ".join(transcripts)
+            logger.info("[%s] audio transcribed | total_chars=%d", ctx, len(combined))
+            text = f"[Голосовое сообщение]\n{combined}"
+        else:
+            logger.warning("[%s] all audio transcriptions failed", ctx)
+
+    input_messages: list[dict] = []
+
+    ctx_lines: list[str] = []
+    if vk_user_id:
+        ctx_lines.append(f"VK ID клиента: {vk_user_id}")
+    client_name = (client.name or "").strip() if client else ""
+    if client_name:
+        ctx_lines.append(f"Имя клиента: {client_name}")
+    client_tags = await fetch_client_tags(client.id if client else None)
+    if client_tags:
+        ctx_lines.append("Маркетинговые теги клиента: " + ", ".join(sorted(client_tags)))
+    if ctx_lines:
+        input_messages.append({"role": "user", "content": "[Контекст сессии]\n" + "\n".join(ctx_lines)})
+        input_messages.append({"role": "assistant", "content": "Принял."})
+
+    # Recent manager/AI messages already sent to the client — the duplicate-reply guard
+    # compares the fresh reply against these after the agent call.
+    manager_history_texts: list[str] = []
+
+    # Вся история диалога живёт локально (CRM больше нет) — подаём её моделью
+    # как чередование user/assistant, свежие _HISTORY_MAX_MESSAGES сообщений.
+    local_history_result = await db.execute(
+        select(Message)
+        .where(Message.dialog_id == dialog.id, Message.id != client_message.id)
+        .order_by(Message.created_at.desc())
+        .limit(_HISTORY_MAX_MESSAGES)
+    )
+    local_msgs = list(reversed(local_history_result.scalars().all()))
+    logger.info("[%s] local history loaded | messages=%d", ctx, len(local_msgs))
+    for msg in local_msgs:
+        if msg.role == MessageRole.client:
+            files = (msg.msg_metadata or {}).get("files", [])
+            if files:
+                input_messages.append({"role": "user", "content": _attachment_content(msg.text, files)})
+            else:
+                input_messages.append({"role": "user", "content": msg.text})
+        elif msg.role in (MessageRole.ai, MessageRole.curator):
+            input_messages.append({"role": "assistant", "content": msg.text})
+            if msg.text:
+                manager_history_texts.append(msg.text)
+
+    # Dynamic per-turn context (funnel stage, feedback rules) as separate user messages,
+    # placed right before the current client message so they sit in the uncached tail and
+    # don't bust the cached system prompt / history prefix.
+    for block in dynamic_context:
+        input_messages.append({"role": "user", "content": block})
+
+    files = (client_message.msg_metadata or {}).get("files", [])
+    if files:
+        image_files = [url for url in files if is_image_url(url)]
+        sticker_files = [url for url in files if is_sticker_url(url)]
+        logger.info("[%s] current message has files | images=%d stickers=%d", ctx, len(image_files), len(sticker_files))
+        input_messages.append({"role": "user", "content": _attachment_content(text, files)})
+    else:
+        input_messages.append({"role": "user", "content": text})
+
+    logger.info(
+        "[%s] calling agent | provider=%s | model=%s | context_turns=%d",
+        ctx, dialog_provider, get_model_name(dialog_provider), len(input_messages),
+    )
+    full_context: dict | None = None
+    # Anthropic prompt-cache tokens; the openai-agents path leaves these at 0.
+    cache_read_tokens = 0
+    cache_write_tokens = 0
+    # Attempt 2 is the duplicate-reply retry: the first reply plus a service correction
+    # are appended to input_messages, so the tail grows by 2 uncached messages.
+    # The provider bills every attempt, so token/cost metrics accumulate across them.
+    acc_input = acc_output = acc_cache_read = acc_cache_write = 0
+    dup_match: str | None = None
+    for dup_attempt in (1, 2):
+        uncached_tail = 1 + len(dynamic_context) + 2 * (dup_attempt - 1)
+        result = None  # set on the openai-agents path; read by the failure logger
+        attempt_t0 = time.time()
+        try:
+            if dialog_provider == "anthropic":
+                output, input_tokens, output_tokens, elapsed_ms, full_context, cache_read_tokens, cache_write_tokens = await asyncio.wait_for(
+                    run_with_cache(
+                        instructions=instructions,
+                        input_messages=input_messages,
+                        type_id=type_id,
+                        client_id=client.id if client else None,
+                        cache_uncached_tail=uncached_tail,
+                        funnel_stage=dialog.funnel_stage,
+                        exclude_script_ids=exclude_script_ids,
+                    ),
+                    timeout=settings.AI_RUNNER_TIMEOUT,
+                )
+            elif dialog_provider == "minimax":
+                # MiniMax via its Anthropic-compatible endpoint — same runner as Anthropic,
+                # just pointed at MiniMax's base_url/key/model. Avoids the OpenAI-endpoint
+                # tool-call-as-text bug that made M3 loop until the turn budget ran out.
+                async def _run_minimax(minimax_model, allow_salvage):
+                    return await asyncio.wait_for(
+                        run_with_cache(
+                            instructions=instructions,
+                            input_messages=input_messages,
+                            type_id=type_id,
+                            client_id=client.id if client else None,
+                            api_key=settings.MINIMAX_API_KEY,
+                            base_url=settings.MINIMAX_ANTHROPIC_BASE_URL,
+                            model=minimax_model,
+                            allow_salvage=allow_salvage,
+                            cache_uncached_tail=uncached_tail,
+                            funnel_stage=dialog.funnel_stage,
+                            exclude_script_ids=exclude_script_ids,
+                        ),
+                        timeout=settings.AI_RUNNER_TIMEOUT,
+                    )
+
+                try:
+                    # Primary model with salvage disabled: a broken/empty reply raises instead of
+                    # returning low-quality salvaged text, so we get a clean shot at the fallback model.
+                    output, input_tokens, output_tokens, elapsed_ms, full_context, cache_read_tokens, cache_write_tokens = await _run_minimax(
+                        settings.MINIMAX_MODEL_NAME, allow_salvage=False,
+                    )
+                except RuntimeError as e:
+                    logger.warning(
+                        "[%s] primary minimax (%s) failed: %s — retrying via %s",
+                        ctx, settings.MINIMAX_MODEL_NAME, e, settings.MINIMAX_MODEL_NAME_FALLBACK,
+                    )
+                    # Fallback model with salvage enabled: last resort, take any text it produces.
+                    output, input_tokens, output_tokens, elapsed_ms, full_context, cache_read_tokens, cache_write_tokens = await _run_minimax(
+                        settings.MINIMAX_MODEL_NAME_FALLBACK, allow_salvage=True,
+                    )
+            else:
+                start_ms = int(time.time() * 1000)
+                result = await asyncio.wait_for(
+                    Runner.run(agent, input_messages),
+                    timeout=settings.AI_RUNNER_TIMEOUT,
+                )
+                elapsed_ms = int(time.time() * 1000) - start_ms
+                # qwen drops output_type (response_format kills tool_calls), so final_output is a
+                # raw JSON string — parse it by hand. Other providers return a validated AgentOutput.
+                if dialog_provider == "qwen":
+                    from app.ai.providers import parse_agent_output
+                    try:
+                        output: AgentOutput = parse_agent_output(result.final_output)
+                    except Exception as parse_err:
+                        # qwen occasionally ignores the JSON instruction and answers the
+                        # client in plain prose (client 8548093: perfectly good reply lost,
+                        # клиент не получил ответа). If the output is prose — no JSON braces
+                        # at all — send it flagged for curator review instead of failing.
+                        raw_text = re.sub(
+                            r"<think>.*?</think>", "", result.final_output or "", flags=re.DOTALL
+                        ).strip()
+                        if raw_text and "{" not in raw_text:
+                            logger.warning(
+                                "[%s] qwen returned plain prose instead of JSON — salvaging | err=%s",
+                                ctx, parse_err,
+                            )
+                            output: AgentOutput = AgentOutput(
+                                reply_text=raw_text,
+                                confidence_score=0.5,
+                                need_curator=True,
+                                curator_reason="qwen вернул текст вместо JSON — ответ отправлен как есть, нужна проверка",
+                            )
+                        else:
+                            raise
+                else:
+                    output: AgentOutput = result.final_output
+                input_tokens = sum(r.usage.input_tokens for r in result.raw_responses)
+                output_tokens = sum(r.usage.output_tokens for r in result.raw_responses)
+                # OpenAI's input_tokens INCLUDES cached tokens. Capture the cached count so
+                # the cost calc can bill that portion at the discounted cache-read rate
+                # instead of full price (cached can be >60% of the prompt). input_tokens
+                # itself stays full for storage/reporting. cache_write stays 0 — OpenAI
+                # cache writes are free.
+                cache_read_tokens = sum(
+                    r.usage.input_tokens_details.cached_tokens for r in result.raw_responses
+                )
+                # openai-agents SDK path: capture the full accumulated turn list incl. tool calls.
+                try:
+                    full_context = {"system": instructions, "messages": result.to_input_list()}
+                except Exception:
+                    full_context = {"system": instructions, "messages": input_messages}
+        except asyncio.TimeoutError:
+            logger.error("[%s] agent timed out after %ds", ctx, settings.AI_RUNNER_TIMEOUT)
+            # The request keeps burning provider tokens server-side; usage is
+            # unrecoverable client-side, but the run must exist for reconciliation.
+            await log_failed_run(
+                dialog_id=dialog.id, provider=dialog_provider,
+                model=get_model_name(dialog_provider),
+                error=f"timeout after {settings.AI_RUNNER_TIMEOUT}s", status="timeout",
+                input_tokens=acc_input, output_tokens=acc_output,
+                cache_read_tokens=acc_cache_read, cache_write_tokens=acc_cache_write,
+                elapsed_ms=int((time.time() - attempt_t0) * 1000),
+                input_message_id=client_message.id,
+            )
+            raise
+        except Exception as e:
+            logger.exception("[%s] agent failed", ctx)
+            # A parse error happens AFTER the API returned — its usage sits on
+            # `result` and was billed; a transport error leaves result=None.
+            p_in, p_out, p_cached = usage_from_result(result)
+            await log_failed_run(
+                dialog_id=dialog.id, provider=dialog_provider,
+                model=get_model_name(dialog_provider), error=e,
+                input_tokens=acc_input + p_in, output_tokens=acc_output + p_out,
+                cache_read_tokens=acc_cache_read + p_cached,
+                cache_write_tokens=acc_cache_write,
+                elapsed_ms=int((time.time() - attempt_t0) * 1000),
+                input_message_id=client_message.id,
+            )
+            raise
+
+        acc_input += input_tokens
+        acc_output += output_tokens
+        acc_cache_read += cache_read_tokens
+        acc_cache_write += cache_write_tokens
+
+        dup_match = _find_duplicate_reply(output.reply_text, manager_history_texts)
+        if not dup_match or dup_attempt == 2:
+            break
+        logger.warning(
+            "[%s] reply duplicates an already-sent manager message — retrying | dup_head=%r",
+            ctx, dup_match[:100],
+        )
+        input_messages.append({"role": "assistant", "content": output.reply_text})
+        input_messages.append({"role": "user", "content": _DUP_RETRY_INSTRUCTION})
+
+    if dup_match:
+        logger.warning("[%s] duplicate reply survived the retry — escalating to curator", ctx)
+        output = output.model_copy(update={
+            "need_curator": True,
+            "curator_reason": "Дубль: ответ почти дословно повторяет сообщение, уже отправленное клиенту",
+        })
+    # Billed totals across all attempts, not just the last one.
+    input_tokens, output_tokens = acc_input, acc_output
+    cache_read_tokens, cache_write_tokens = acc_cache_read, acc_cache_write
+    total_tokens = input_tokens + output_tokens
+
+    model_name = get_model_name(dialog_provider)
+    in_price, out_price = get_model_pricing(model_name)
+    # Anthropic/MiniMax: input_tokens is already uncached (cache tokens reported
+    # separately) and the read rate is the 0.1x default. OpenAI: input_tokens still
+    # includes cache_read_tokens, so subtract them before pricing and use the
+    # per-family cached multiplier.
+    if dialog_provider in ("anthropic", "minimax"):
+        billable_input = input_tokens
+        cache_read_mult = DEFAULT_CACHE_READ_MULT
+    else:
+        billable_input = input_tokens - cache_read_tokens
+        cache_read_mult = CACHE_READ_MULT_BY_MODEL.get(model_name, DEFAULT_CACHE_READ_MULT)
+    cost = calculate_cost(
+        billable_input, output_tokens, in_price, out_price,
+        cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+        cache_read_mult=cache_read_mult,
+    )
+
+    logger.info(
+        "[%s] Runner.run complete | latency_ms=%d | input_tokens=%d | output_tokens=%d | cache_read=%d | cache_write=%d | total_tokens=%d | cost_usd=%.6f | confidence=%.3f | need_curator=%s | action=%s",
+        ctx, elapsed_ms, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost,
+        output.confidence_score, output.need_curator, output.action_hint,
+    )
+
+    confidence = output.confidence_score
+    need_curator = output.need_curator or (confidence < settings.CONFIDENCE_THRESHOLD)
+    if need_curator and not output.need_curator:
+        logger.info(
+            "[%s] need_curator set by low confidence | %.3f < %.3f",
+            ctx, confidence, settings.CONFIDENCE_THRESHOLD,
+        )
+        output = output.model_copy(update={
+            "need_curator": True,
+            "curator_reason": f"Low confidence: {confidence:.3f} < {settings.CONFIDENCE_THRESHOLD}",
+        })
+
+    # Get current status name for logging
+    status_before_name = None
+    if dialog.current_status_id:
+        status_before_obj = await db.get(DialogStatusConfig, dialog.current_status_id)
+        status_before_name = status_before_obj.name if status_before_obj else None
+
+    # Update dialog status based on AI output
+    if output.need_curator and output.next_status == "ЧС":
+        logger.info("[%s] need_curator cleared — status ЧС is terminal", ctx)
+        output = output.model_copy(update={"need_curator": False, "curator_reason": None})
+
+    if output.need_curator and not output.next_status:
+        output = output.model_copy(update={"next_status": "Нужен куратор"})
+
+    # Жёсткий гейт: из «Горячий клиент» единственный разрешённый переход —
+    # «Ждем предоплату». Любой другой next_status сбрасываем (статус не меняется);
+    # need_curator при этом сохраняется — уведомление куратора работает как раньше.
+    if (
+        status_before_name == "Горячий клиент"
+        and output.next_status
+        and output.next_status not in ("Горячий клиент", "Ждем предоплату")
+    ):
+        output = output.model_copy(update={"next_status": None})
+
+    # «Ждем предоплату» = ссылка на оплату/реквизиты уже отправлены.
+    if (
+        output.next_status == "Ждем предоплату"
+        and status_before_name
+        not in ("Есть расчет", "Горячий клиент", "Ждем предоплату", "Заказ оформлен")
+    ):
+        logger.info(
+            "[%s] blocked next_status 'Ждем предоплату' — status_before=%r too early",
+            ctx, status_before_name,
+        )
+        output = output.model_copy(update={"next_status": None})
+
+    # Стадия подходящая — но статус требует РЕАЛЬНО отправленной ссылки на оплату.
+    # Модель ставит «Ждем предоплату» после собственного призыва «внесите предоплату»
+    # без всякой ссылки, даже в ответ на отказ клиента (клиент 8522740) — и диалог
+    # улетает в пинг-воронку after_payment. Ссылку ищем в текущем ответе и во всех
+    # уже отправленных сообщениях менеджера/ИИ.
+    if (
+        output.next_status == "Ждем предоплату"
+        and status_before_name != "Ждем предоплату"
+        and not _PAYMENT_LINK_RE.search(output.reply_text or "")
+    ):
+        _sent_res = await db.execute(
+            select(Message.id).where(
+                Message.dialog_id == dialog.id,
+                Message.role.in_((MessageRole.ai, MessageRole.curator)),
+                Message.text.op("~*")(r"https?://[^[:space:]]*pay"),
+            ).limit(1)
+        )
+        if _sent_res.first() is None:
+            logger.info(
+                "[%s] blocked next_status 'Ждем предоплату' — no payment link sent in dialog",
+                ctx,
+            )
+            output = output.model_copy(update={"next_status": None})
+
+    if output.next_status:
+        matching = next((s for s in active_statuses if s.name == output.next_status), None)
+        if matching:
+            if matching.id != dialog.current_status_id:
+                logger.info(
+                    "[%s] status updated | %s -> %s",
+                    ctx, status_before_name, output.next_status,
+                )
+                dialog.current_status_id = matching.id
+                # Статус меняется только локально — внешней системы статусов больше нет.
+                if output.next_status == "Ждем предоплату":
+                    # Trust the model's «Ждем предоплату» only when the dialog actually
+                    # reached the price stage. With an early client photo the FunnelAgent
+                    # can jump to contacts and the model asks for prepayment on the FIRST
+                    # message (client 8465497) — forcing the after_payment ping funnel
+                    # then nags a client who never saw a price.
+                    _advanced_statuses = {"Есть расчет", "Горячий клиент", "Ждем предоплату", "Заказ оформлен"}
+                    if status_before_name in _advanced_statuses:
+                        from app.ping.worker import force_ping_funnel
+                        from app.utils.time import msk_now
+                        await force_ping_funnel(db, dialog, "after_payment", msk_now())
+                    else:
+                        logger.info(
+                            "[%s] skip force after_payment — status_before=%r too early, funnel left to detect_funnel_with_ai",
+                            ctx, status_before_name,
+                        )
+                elif output.next_status == "Заказ оформлен":
+                    from app.db.models import DialogPingState
+                    _ps_res = await db.execute(select(DialogPingState).where(DialogPingState.dialog_id == dialog.id))
+                    _ps = _ps_res.scalar_one_or_none()
+                    if _ps:
+                        _ps.is_completed = True
+                        logger.info("[%s] ping stopped — order placed", ctx)
+        else:
+            logger.warning(
+                "[%s] unknown next_status from AI: %r", ctx, output.next_status
+            )
+
+    ai_run = AIRun(
+        dialog_id=dialog.id,
+        input_message_id=client_message.id,
+        provider=dialog_provider,
+        model=get_model_name(dialog_provider),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        cost_amount=cost,
+        cost_currency="USD",
+        cost_estimated=(input_tokens == 0),
+        latency_ms=elapsed_ms,
+        confidence_score=confidence,
+        need_curator=output.need_curator,
+        curator_reason=output.curator_reason,
+        selected_script=output.selected_script,
+        source_script_id=output.source_script_id,
+        status_before=status_before_name,
+        status_after=output.next_status,
+        raw_response=output.model_dump(),
+        full_context=full_context,
+    )
+    db.add(ai_run)
+    await db.flush()
+
+    reply_text = output.reply_text
+    image_urls: list[str] = []
+    images_match = re.search(r"\n*<<<IMAGES>>>\n?(.*?)\n?<<<END_IMAGES>>>", reply_text, re.DOTALL)
+    if images_match:
+        image_urls = [u.strip() for u in images_match.group(1).splitlines() if u.strip()]
+        reply_text = reply_text[: images_match.start()].rstrip()
+    else:
+        url_pattern = re.compile(r'https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\S*)?', re.IGNORECASE)
+        image_urls = url_pattern.findall(reply_text)
+        if image_urls:
+            reply_text = url_pattern.sub('', reply_text).strip()
+            reply_text = re.sub(r'\n{3,}', '\n\n', reply_text).strip()
+
+    reply_text = _normalize_dashes(reply_text)
+
+    # Hash the final attachment set so future turns dedup by content, not URL.
+    file_hashes: list[str] = []
+    if image_urls:
+        from app.utils.media import hash_image_urls
+        file_hashes = list((await hash_image_urls(image_urls)).values())
+
+    ai_message = Message(
+        dialog_id=dialog.id,
+        role=MessageRole.ai,
+        text=reply_text,
+        msg_metadata={
+            "ai_run_id": ai_run.id,
+            "confidence": confidence,
+            "need_curator": output.need_curator,
+            "files": image_urls,
+            "file_hashes": file_hashes,
+        },
+    )
+    db.add(ai_message)
+    await db.flush()
+
+    ai_run.output_message_id = ai_message.id
+
+    await db.commit()
+    await db.refresh(ai_run)
+
+    logger.info(
+        "[%s] run_ai done | ai_run_id=%s | ai_message_id=%s | need_curator=%s | selected_script=%s",
+        ctx, ai_run.id, ai_message.id, output.need_curator, output.selected_script,
+    )
+
+    return output, ai_run, image_urls, reply_text
