@@ -4,6 +4,8 @@ import logging
 from agents import function_tool
 
 from app.sales.scripts import ScriptService
+from app.sales.products import ProductService
+from app.sales.embeddings import find_similar
 from app.db.session import AsyncSessionLocal
 from app.vk.spintax import resolve_spintax
 
@@ -184,3 +186,80 @@ def make_list_scripts(
             exclude_script_ids=exclude_script_ids,
         )
     return list_scripts
+
+
+def format_products_list(products) -> str:
+    if not products:
+        return "Товары не найдены."
+    lines = []
+    for p in products:
+        price = f"{p.price:g}₽" if p.price is not None else "?"
+        min_price = f" (акционная: {p.min_price:g}₽)" if p.min_price is not None else ""
+        size = f" | размерная сетка: {p.size_chart}" if p.size_chart else ""
+        lines.append(f"- {p.name}: {price}{min_price}{size}")
+    return "\n".join(lines)
+
+
+def make_search_products(type_id: int | None):
+    """Return a search_products tool scoped to a specific dialog type.
+
+    Товарная матрица отдельно от list_scripts: тут только факты (цена, сетка, фото),
+    без готовых формулировок — финальный текст клиенту агент строит сам.
+    """
+    @function_tool
+    async def search_products(query: str) -> str:
+        """Найти товары по (части) названия — например "свитшот" или "худи черный".
+        Возвращает цену, акционную цену (если есть) и размерную сетку. Используй перед
+        тем как называть клиенту точную цену или размерную сетку конкретного товара,
+        если в list_scripts() нет готовой фразы с этой информацией.
+        """
+        logger.info("[tool] search_products called | type_id=%s | query=%r", type_id, query)
+        async with AsyncSessionLocal() as db:
+            products = await ProductService(db).search(query, type_id=type_id)
+        return format_products_list(products)
+    return search_products
+
+
+def make_get_product_photo(type_id: int | None):
+    """Return a get_product_photo tool scoped to a specific dialog type."""
+    @function_tool
+    async def get_product_photo(product_name: str) -> str:
+        """Найти фото товара по названию (см. search_products) и получить токен для
+        вставки в reply_text. Скопируй результат буквально в текст ответа клиенту —
+        при отправке система сама превратит его в настоящее фото-вложение. Не
+        вставляй сырой URL фото в reply_text без этого токена."""
+        logger.info("[tool] get_product_photo called | type_id=%s | product_name=%r", type_id, product_name)
+        async with AsyncSessionLocal() as db:
+            products = await ProductService(db).search(product_name, type_id=type_id, limit=1)
+        if not products or not products[0].photo_url:
+            return "Фото не найдено для этого товара."
+        return f"[photo-{products[0].photo_url}]"
+    return get_product_photo
+
+
+def format_similar_examples(rows) -> str:
+    if not rows:
+        return "Похожих примеров не найдено."
+    lines = []
+    for r in rows:
+        lines.append(f"Клиент: {r.client_text}\nМенеджер: {r.manager_text}")
+    return "\n---\n".join(lines)
+
+
+def make_find_similar_examples(type_id: int | None):
+    """Return a find_similar_examples tool scoped to a specific dialog type."""
+    @function_tool
+    async def find_similar_examples(query: str) -> str:
+        """Найти похожие вопросы клиентов из реальных диалогов и как на них отвечал
+        менеджер — семантический поиск, не точное совпадение. Используй как референс
+        тона и аргументации для нестандартных вопросов, на которые нет готового
+        скрипта в list_scripts(). НЕ копируй найденный ответ дословно — только
+        подход и аргументы, текст строй сам по правилам тона из промпта.
+        """
+        logger.info("[tool] find_similar_examples called | type_id=%s | query=%r", type_id, query)
+        if type_id is None:
+            return "Направление не определено."
+        async with AsyncSessionLocal() as db:
+            rows = await find_similar(db, type_id, query)
+        return format_similar_examples(rows)
+    return find_similar_examples

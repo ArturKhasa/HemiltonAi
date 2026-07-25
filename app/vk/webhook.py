@@ -329,6 +329,15 @@ async def process_event(group_pk: int, payload: dict) -> None:
         logger.exception("vk event %s processing failed | group_pk=%s", event_type, group_pk)
 
 
+# asyncio.create_task() держит только слабую ссылку на таску в event loop — без
+# сильной ссылки где-то ещё таска может быть собрана GC ДО завершения, вместе с
+# необработанным исключением (даже до его except-блока). Сет ниже держит ссылку,
+# пока таска не завершится, чтобы process_event().except всегда успевал отработать.
+_background_tasks: set[asyncio.Task] = set()
+
+
 def schedule_event(group_pk: int, payload: dict) -> None:
     """Запуск обработки события в фоне (роутер должен ответить «ok» мгновенно)."""
-    asyncio.create_task(process_event(group_pk, payload))
+    task = asyncio.create_task(process_event(group_pk, payload))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)

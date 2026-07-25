@@ -618,7 +618,13 @@ async def run_ai(
         image_urls = [u.strip() for u in images_match.group(1).splitlines() if u.strip()]
         reply_text = reply_text[: images_match.start()].rstrip()
     else:
-        url_pattern = re.compile(r'https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\S*)?', re.IGNORECASE)
+        # (?<!\[photo-) / (?<!\[video-) — не трогать URL внутри "[photo-URL]"/"[video-URL]"
+        # токенов: их разбирает app.vk.sender.extract_and_resolve_attachments (перезалив
+        # на своё сообщество), а не эта голая-ссылка-текстом ветка.
+        url_pattern = re.compile(
+            r'(?<!\[photo-)(?<!\[video-)https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\S*)?',
+            re.IGNORECASE,
+        )
         image_urls = url_pattern.findall(reply_text)
         if image_urls:
             reply_text = url_pattern.sub('', reply_text).strip()

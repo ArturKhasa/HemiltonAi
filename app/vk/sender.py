@@ -6,6 +6,7 @@ HTTP 200 от ВК не значит успех — ошибка приходи�
 """
 import asyncio
 import logging
+import re
 import uuid
 
 import httpx
@@ -20,6 +21,54 @@ VK_API_BASE = "https://api.vk.com/method"
 # Лимит ВК на длину одного сообщения; более длинные тексты режутся на части.
 MAX_MESSAGE_LEN = 4096
 _REQUEST_TIMEOUT = 15.0
+# VK messages.send принимает максимум 10 attachment-объектов на сообщение.
+_MAX_ATTACHMENTS = 10
+
+# Готовые фразы (импортированные из старой CRM/бот-платформы) хранят вложения прямо
+# в тексте, в двух формах:
+# 1) "[photo-<owner_id>_<media_id>]" / "[video-<id>_<id>]" / "[audio_message-<id>_<id>]"
+#    — уже готовый VK attachment токен чужого сообщества/аккаунта. VK принимает
+#    attachment только на объекты, принадлежащие ТОКЕНУ отправителя (своему
+#    сообществу) или загруженные через его upload-сервер — чужой ID тихо
+#    игнорируется (без ошибки в ответе, просто не прикрепляется). Восстановить
+#    нечем (нет прямой ссылки на файл) — вырезается как мусорный текст.
+# 2) "[photo-https://...]" (например store.wazzup24.com) — реальная скачиваемая
+#    ссылка на файл. Перезаливается на СВОЁ сообщество через
+#    app.vk.photo_upload.resolve_attachment (с кэшем), см. extract_and_resolve_attachments.
+_DEAD_ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|video|audio_message)-?\d+_\d+\]")
+_PHOTO_URL_TOKEN_RE = re.compile(r"\[photo-(https?://[^\]]+)\]")
+_VIDEO_URL_TOKEN_RE = re.compile(r"\[video-(https?://[^\]]+)\]")
+
+
+async def extract_and_resolve_attachments(
+    db: AsyncSession, group: VkGroup, text: str,
+) -> tuple[str, str | None]:
+    """Разбирает вложения в тексте фразы перед отправкой в VK:
+    - "[photo-<url>]" — скачивает и перезаливает на СВОЁ сообщество (с кэшем),
+      добавляет в attachment; если перезалить не удалось — просто вырезается.
+    - "[video-<url>]" — полноценная перезаливка видео не реализована, ссылка
+      остаётся голым текстом (VK сам разворачивает превью).
+    - "[photo/video/audio_message-<id>_<id>]" — мёртвый чужой VK ID, вырезается.
+
+    Возвращает (текст без токенов, attachment-строка для messages.send через
+    запятую, или None если вложений нет).
+    """
+    from app.vk.photo_upload import resolve_attachment  # local: avoids import cycle (photo_upload imports vk_api_call from here)
+
+    attachments: list[str] = []
+    for m in _PHOTO_URL_TOKEN_RE.finditer(text or ""):
+        att = await resolve_attachment(db, group, m.group(1))
+        if att:
+            attachments.append(att)
+    cleaned = _PHOTO_URL_TOKEN_RE.sub("", text or "")
+    cleaned = _VIDEO_URL_TOKEN_RE.sub(lambda m: m.group(1), cleaned)
+    cleaned = _DEAD_ATTACHMENT_TOKEN_RE.sub("", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+    if len(attachments) > _MAX_ATTACHMENTS:
+        logger.warning("extract_and_resolve_attachments: %d attachments, capping at %d", len(attachments), _MAX_ATTACHMENTS)
+        attachments = attachments[:_MAX_ATTACHMENTS]
+    return cleaned, (",".join(attachments) if attachments else None)
 
 # 900 — клиент в ЧС сообщества; 901/902 — сообщения от сообщества запрещены настройками.
 _FORBIDDEN_CODES = frozenset({900, 901, 902})
@@ -105,29 +154,36 @@ async def send_message(
     peer_id: int,
     text: str,
     vk_group_id: int | None = None,
+    attachment: str | None = None,
 ) -> int | None:
     """Отправка текста в ЛС пользователю от имени сообщества.
 
-    Длинный текст уходит несколькими сообщениями. Возвращает VK message id
-    последней отправленной части (None, если текст пуст).
+    Длинный текст уходит несколькими сообщениями. attachment (если задан) уходит
+    вместе с ПОСЛЕДНИМ чанком — обычно фразы, на которые ссылаются вложения,
+    заканчиваются ими. Возвращает VK message id последней отправленной части
+    (None, если текст пуст и вложений нет).
     """
     chunks = split_text(text)
-    if not chunks:
+    if not chunks and not attachment:
         return None
+    if not chunks:
+        chunks = [""]
     sem = _group_semaphore(vk_group_id or 0)
     last_id: int | None = None
     async with sem:
-        for chunk in chunks:
-            last_id = await vk_api_call(
-                access_token,
-                "messages.send",
-                {"peer_id": peer_id, "message": chunk, "random_id": make_random_id()},
-            )
+        for i, chunk in enumerate(chunks):
+            params = {"peer_id": peer_id, "message": chunk, "random_id": make_random_id()}
+            if attachment and i == len(chunks) - 1:
+                params["attachment"] = attachment
+            last_id = await vk_api_call(access_token, "messages.send", params)
     return last_id
 
 
 async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> int | None:
     """Отправка в диалог: находит клиента и его группу, шлёт от её имени.
+
+    Вложения из фраз ("[photo-url]" и т.п., см. extract_and_resolve_attachments)
+    перезаливаются/вырезаются и уходят как VK attachment, а не сырой текст.
 
     На 900/901/902 помечает диалог vk_blocked и пробрасывает
     VkMessagesForbiddenError — вызывающий не должен ретраить.
@@ -141,9 +197,11 @@ async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> int | N
     group = await db.get(VkGroup, client.vk_group_id)
     if not group or not group.access_token:
         raise ValueError(f"vk group {client.vk_group_id} not found or has no token")
+    text, attachment = await extract_and_resolve_attachments(db, group, text)
     try:
         return await send_message(
-            group.access_token, int(client.vk_user_id), text, vk_group_id=group.id,
+            group.access_token, int(client.vk_user_id), text,
+            vk_group_id=group.id, attachment=attachment,
         )
     except VkMessagesForbiddenError as e:
         dialog.vk_blocked = True

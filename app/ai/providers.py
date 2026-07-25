@@ -129,9 +129,13 @@ def pick_ai_provider(client_id: int) -> str:
     client_id % 10 in 0..6 → openai (70%), 7..9 → qwen (30%). Deterministic per
     client, so all of a client's dialogs stay on one provider; across many
     clients the split is ~70/30.
-    """
 
-    return "openai" if client_id % 10 < 7 else "qwen"
+    ВРЕМЕННО ОТКЛЮЧЕНО (100% openai): QWEN_API_KEY в .env пустой — каждый диалог,
+    попавший в qwen-корзину, падал на построении клиента без единого ответа
+    клиенту. Раскомментировать split ниже, когда появится рабочий ключ.
+    """
+    return "openai"
+    # return "openai" if client_id % 10 < 7 else "qwen"
 
 
 def get_model_string(provider: str | None = None, model_name: str | None = None) -> str:

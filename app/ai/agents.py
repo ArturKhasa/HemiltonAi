@@ -5,6 +5,9 @@ from app.ai.schemas import AgentOutput
 from app.ai.tools import (
     get_script_phrase,
     make_list_scripts,
+    make_search_products,
+    make_get_product_photo,
+    make_find_similar_examples,
 )
 
 # qwen3-max can't combine tools with response_format: setting json_schema OR json_object
@@ -43,6 +46,9 @@ def build_sales_agent(
             exclude_script_ids=exclude_script_ids,
         ),
         get_script_phrase,
+        make_search_products(type_id),
+        make_get_product_photo(type_id),
+        make_find_similar_examples(type_id),
     ]
 
     from app.config import settings

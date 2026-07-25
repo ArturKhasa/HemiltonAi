@@ -57,6 +57,45 @@ _TOOLS: list[dict] = [
             "required": ["script_id"],
         },
     },
+    {
+        "name": "search_products",
+        "description": (
+            "Find products by (partial) name, e.g. 'свитшот' or 'худи черный'. "
+            "Returns price, promo price (if any) and size chart. Use before quoting an "
+            "exact price or size chart if list_scripts has no ready phrase with that info."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Product name or part of it"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_product_photo",
+        "description": (
+            "Find a product's photo by name (see search_products) and get a token to "
+            "paste literally into reply_text — the system turns it into a real photo "
+            "attachment on send. Do not paste a raw photo URL into reply_text without it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"product_name": {"type": "string", "description": "Product name or part of it"}},
+            "required": ["product_name"],
+        },
+    },
+    {
+        "name": "find_similar_examples",
+        "description": (
+            "Semantic search over real past dialogs for similar client questions and how "
+            "the manager answered. Use as a tone/argument reference for questions with no "
+            "ready script in list_scripts — do NOT copy the found answer verbatim."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "The client's question or message"}},
+            "required": ["query"],
+        },
+    },
 ]
 
 _OUTPUT_TOOL: dict = {
@@ -135,6 +174,30 @@ async def _run_tool(
     if name == "get_script_phrase":
         from app.ai.tools import get_script_phrase_text
         return await get_script_phrase_text(args["script_id"])
+    if name == "search_products":
+        from app.sales.products import ProductService
+        from app.db.session import AsyncSessionLocal
+        from app.ai.tools import format_products_list
+        async with AsyncSessionLocal() as db:
+            products = await ProductService(db).search(args["query"], type_id=type_id)
+        return format_products_list(products)
+    if name == "get_product_photo":
+        from app.sales.products import ProductService
+        from app.db.session import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            products = await ProductService(db).search(args["product_name"], type_id=type_id, limit=1)
+        if not products or not products[0].photo_url:
+            return "Фото не найдено для этого товара."
+        return f"[photo-{products[0].photo_url}]"
+    if name == "find_similar_examples":
+        from app.sales.embeddings import find_similar
+        from app.db.session import AsyncSessionLocal
+        from app.ai.tools import format_similar_examples
+        if type_id is None:
+            return "Направление не определено."
+        async with AsyncSessionLocal() as db:
+            rows = await find_similar(db, type_id, args["query"])
+        return format_similar_examples(rows)
     return f"Unknown tool: {name}"
 
 
@@ -304,7 +367,7 @@ async def run_with_cache(
             messages.append({"role": "assistant", "content": response.content})
             forced = await _create(tool_choice={"type": "tool", "name": "generate_reply"})
             usage = forced.usage
-            total_input += getattr(usage, "input_tokens", 0)
+            total_inputв += getattr(usage, "input_tokens", 0)
             total_output += getattr(usage, "output_tokens", 0)
             total_cache_read += getattr(usage, "cache_read_input_tokens", 0)
             total_cache_write += getattr(usage, "cache_creation_input_tokens", 0)

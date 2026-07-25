@@ -17,7 +17,7 @@ RUN uv pip install --system --no-build-isolation \
     fastapi uvicorn[standard] sqlalchemy[asyncio] alembic asyncpg \
     pydantic[email] pydantic-settings bcrypt python-jose[cryptography] \
     openai-agents litellm openai anthropic tiktoken \
-    python-multipart websockets aioboto3
+    python-multipart websockets aioboto3 pgvector
 
 COPY . .
 COPY --from=frontend-build /frontend/dist ./frontend/dist

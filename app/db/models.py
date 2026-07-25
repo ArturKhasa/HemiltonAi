@@ -9,6 +9,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
+from pgvector.sqlalchemy import Vector
+
+EMBEDDING_DIM = 1536  # OpenAI text-embedding-3-small
 
 
 class Base(DeclarativeBase):
@@ -109,7 +112,7 @@ class Dialog(Base):
     # Клиент запретил сообщения от сообщества (ошибки ВК 901/902) — не ретраить отправку.
     vk_blocked = Column(Boolean, default=False, nullable=False, server_default="false")
     ai_provider = Column(String(32), nullable=False, default="openai", server_default="openai")
-    # Стадия скрипта продаж (greeting/format/calculation/timing/photo/contacts/prepayment/paid).
+    # Стадия скрипта продаж (greeting/pricing/options/sizing/design/checkout/payment_link/post_payment/paid).
     # Детектится FunnelAgent на каждое сообщение клиента ПЕРЕД SalesAgent. Ортогональна
     # funnel_type (температура лида) и status (CRM-статусов больше нет, статусы локальные). Оба агента (Sales, Ping) читают это поле.
     funnel_stage = Column(String(32), nullable=True)
@@ -175,6 +178,51 @@ class AIRun(Base):
     status = Column(String(16), nullable=False, default="ok", server_default="ok")
     created_at = Column(DateTime, default=msk_now)
 
+
+
+class VkAttachmentCache(Base):
+    """Кэш перезаливки чужих фото на СВОЁ сообщество: VK принимает attachment в
+    messages.send только на объекты, принадлежащие токену отправителя, поэтому
+    ссылки на фото из внешних источников (Wazzup24, товарная матрица) один раз
+    скачиваются и перезаливаются через photos.getMessagesUploadServer, а результат
+    кэшируется здесь по (vk_group_id, source_url), чтобы не перезаливать повторно."""
+    __tablename__ = "vk_attachment_cache"
+    id = Column(Integer, primary_key=True)
+    vk_group_id = Column(Integer, ForeignKey("vk_groups.id", ondelete="CASCADE"), nullable=False)
+    source_url = Column(Text, nullable=False)
+    attachment = Column(String(128), nullable=False)
+    created_at = Column(DateTime, default=msk_now)
+    __table_args__ = (UniqueConstraint("vk_group_id", "source_url", name="uq_attachment_cache_group_url"),)
+
+
+class DialogExampleEmbedding(Base):
+    """Пары (реплика клиента → ответ менеджера) из реальных диалогов с эмбеддингом
+    client_text — семантический поиск похожих вопросов для инструмента
+    find_similar_examples (RAG поверх исторических переписок, не жёсткий скрипт)."""
+    __tablename__ = "dialog_example_embeddings"
+    id = Column(Integer, primary_key=True)
+    type_id = Column(Integer, ForeignKey("dialog_types.id", ondelete="CASCADE"), nullable=False)
+    client_text = Column(Text, nullable=False)
+    manager_text = Column(Text, nullable=False)
+    source = Column(String(64), nullable=True)
+    embedding = Column(Vector(EMBEDDING_DIM), nullable=False)
+    model = Column(String(128), nullable=False)
+    created_at = Column(DateTime, default=msk_now)
+
+
+class Product(Base):
+    """Товарная матрица: справочник товаров с ценой и размерной сеткой для
+    инструмента search_products (агент подбирает точную цену/сетку по названию)."""
+    __tablename__ = "products"
+    id = Column(Integer, primary_key=True)
+    type_id = Column(Integer, ForeignKey("dialog_types.id"), nullable=True, server_default="1")
+    name = Column(String(255), nullable=False)
+    price = Column(Numeric(10, 2), nullable=True)
+    min_price = Column(Numeric(10, 2), nullable=True)
+    size_chart = Column(String(255), nullable=True)
+    photo_url = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=msk_now)
 
 
 class Script(Base):
