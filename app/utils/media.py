@@ -47,13 +47,27 @@ def is_sticker_url(url: str) -> bool:
     return any(pat in lower for pat in _STICKER_HOSTS)
 
 
+# Документы (VK attachment type "doc") — чеки/файлы, которые клиент прислал не как
+# фото. Не все расширения — картинки (см. is_image_url), но URL всё равно нужно
+# сохранить в msg_metadata.files, чтобы куратор мог открыть файл вручную.
+_DOCUMENT_EXTENSIONS = frozenset([
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".zip", ".rar", ".7z", ".txt", ".csv",
+])
+
+
+def is_document_url(url: str) -> bool:
+    lower = url.lower().split("?")[0]
+    return any(lower.endswith(ext) for ext in _DOCUMENT_EXTENSIONS)
+
+
 def is_image_url(url: str) -> bool:
     """True только для URL, безопасных для vision-модели как input_image.
 
-    Исключает стикеры, аудио (голосовые) и видео — такие вложения vision-модели
-    отклоняют с 'invalid image content'.
+    Исключает стикеры, аудио (голосовые), видео и документы (pdf/doc/...) — такие
+    вложения vision-модели отклоняют с 'invalid image content'.
     """
-    return not (is_sticker_url(url) or is_audio_url(url) or is_video_url(url))
+    return not (is_sticker_url(url) or is_audio_url(url) or is_video_url(url) or is_document_url(url))
 
 
 async def _hash_one(client: httpx.AsyncClient, url: str) -> str | None:

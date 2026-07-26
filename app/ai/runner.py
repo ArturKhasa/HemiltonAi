@@ -24,7 +24,7 @@ from app.ai.tools import fetch_client_tags
 from app.ai.providers import get_model_name
 from app.ai.schemas import AgentOutput
 from app.config import settings
-from app.utils.media import is_image_url, is_sticker_url, is_video_url
+from app.utils.media import is_document_url, is_image_url, is_sticker_url, is_video_url
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
 from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole
@@ -109,6 +109,8 @@ def _attachment_content(text: str, files: list[str]) -> list[dict]:
             placeholder = "[голосовое сообщение]"
         elif is_video_url(url):
             placeholder = "[видео]"
+        elif is_document_url(url):
+            placeholder = "[файл]"
         else:
             content.append({"type": "input_image", "image_url": url, "detail": "auto"})
             continue

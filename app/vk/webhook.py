@@ -78,6 +78,13 @@ def parse_message_event(payload: dict) -> VkIncomingMessage | None:
             placeholders.append("[Стикер]")
         elif att_type == "video":
             placeholders.append("[видео]")
+        elif att_type == "doc":
+            doc = att.get("doc") or {}
+            url = doc.get("url")
+            if url:
+                files.append(url)  # чек/файл — попадёт в msg_metadata.files для куратора
+            title = doc.get("title")
+            placeholders.append(f"[файл: {title}]" if title else "[файл]")
 
     if not text:
         if audio_urls or "[голосовое сообщение]" in placeholders:
