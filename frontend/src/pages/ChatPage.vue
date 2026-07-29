@@ -226,7 +226,23 @@
                       : 'bg-white border rounded-bl-sm text-gray-800',
                 msg.need_curator ? 'border-orange-400 border-2' : '',
               ]">
-                <p class="leading-relaxed whitespace-pre-wrap">{{ msg.text }}</p>
+                <template v-for="(part, pi) in parseMessageParts(msg.text)" :key="pi">
+                  <p v-if="part.type === 'text'" class="leading-relaxed whitespace-pre-wrap">{{ part.value }}</p>
+                  <img
+                    v-else-if="part.type === 'image'"
+                    :src="part.value"
+                    class="mt-1 rounded-lg max-w-full max-h-64 object-contain"
+                    loading="lazy"
+                  />
+                  <a
+                    v-else-if="part.type === 'link'"
+                    :href="part.value"
+                    target="_blank"
+                    rel="noopener"
+                    class="block mt-1 text-blue-600 underline break-all"
+                  >{{ part.value }}</a>
+                  <span v-else class="inline-block mt-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 text-xs">{{ part.value }}</span>
+                </template>
                 <p v-if="msg.role === 'ai' && msg.selected_script" class="mt-1 text-xs text-gray-400">{{ msg.selected_script }}</p>
                 <p v-if="msg.role === 'ai' && msg.source_script_id" class="mt-1 text-xs text-gray-400">script #{{ msg.source_script_id }}</p>
                 <div v-if="msg.files && msg.files.length" class="mt-2 flex flex-col gap-2">
@@ -1544,6 +1560,34 @@ async function scrollBottom() {
 function isAudioUrl(url) {
   const lower = (url || '').toLowerCase().split('?')[0]
   return ['.mp3', '.ogg', '.wav', '.m4a', '.aac', '.oga', '.opus', '.flac'].some(ext => lower.endsWith(ext))
+}
+
+// Разбирает текст фразы на сегменты текст/фото для красивого отображения в
+// тестовом чате: "[photo-<url>]" -> реальная картинка, "[photo/video/audio_message-
+// <id>_<id>]" (чужой VK ID без прямой ссылки, см. app/vk/sender.py) -> плейсхолдер.
+const ATTACHMENT_TOKEN_RE = /\[(photo|video|audio_message)-([^\]]+)\]/g
+
+function parseMessageParts(text) {
+  const parts = []
+  let lastIndex = 0
+  let match
+  ATTACHMENT_TOKEN_RE.lastIndex = 0
+  while ((match = ATTACHMENT_TOKEN_RE.exec(text || '')) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ type: 'text', value: text.slice(lastIndex, match.index) })
+    }
+    const [, kind, payload] = match
+    if (/^https?:\/\//i.test(payload)) {
+      parts.push({ type: kind === 'photo' ? 'image' : 'link', value: payload })
+    } else {
+      parts.push({ type: 'placeholder', value: kind === 'photo' ? '📷 фото' : kind === 'video' ? '🎬 видео' : '🎤 голосовое' })
+    }
+    lastIndex = match.index + match[0].length
+  }
+  if (lastIndex < (text || '').length) {
+    parts.push({ type: 'text', value: text.slice(lastIndex) })
+  }
+  return parts.filter(p => p.type !== 'text' || p.value.trim())
 }
 
 function formatDate(d) {
