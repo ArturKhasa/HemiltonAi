@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEPLOY_DIR="/var/www/MonroAI"
+DEPLOY_DIR="/opt/hemilton"
 COMPOSE_FILE="docker-compose.prod.yml"
 LOG_TAG="[deploy]"
 
