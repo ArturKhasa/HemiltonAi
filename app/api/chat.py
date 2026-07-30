@@ -26,6 +26,9 @@ class ChatStartRequest(BaseModel):
     client_name: str | None = None
     type_id: int | None = None
     ai_provider: str = settings.AI_PROVIDER
+    # Аналог ref-метки из ВК: без неё в тестовом чате не проверить приветствия,
+    # привязанные к тегу рекламной ссылки (sweetgold, ПАВЕЛ_ПАТРИОТ_1, ...).
+    marketing_tag: str | None = None
 
 
 class ChatMessageRequest(BaseModel):
@@ -467,13 +470,19 @@ async def start_chat(
         )
     )
     client = result.scalar_one_or_none()
+    tag = (body.marketing_tag or "").strip() or None
     if not client:
         client = Client(
             vk_user_id=body.vk_user_id,
             name=body.client_name or str(body.vk_user_id),
             source="test_chat",
+            marketing_tags=[tag] if tag else None,
         )
         db.add(client)
+        await db.flush()
+    elif tag and client.marketing_tags != [tag]:
+        # Тестировщик перезапускает того же клиента под другой рекламной меткой.
+        client.marketing_tags = [tag]
         await db.flush()
 
     # Resolve effective type_id: use provided or fall back to first active type
@@ -565,13 +574,16 @@ async def send_message(
     await db.commit()
 
     from app.ai.runner import run_ai
-    output, ai_run, _image_urls, _reply_text = await run_ai(db, dialog, client_message)
+    output, ai_run, parts = await run_ai(db, dialog, client_message)
 
+    # Реплика клиента + все реплики хода: связка скриптов даёт больше одной
+    # (приветствие, следом вопрос про имя/фамилию), и тестировщик должен увидеть
+    # ровно то, что ушло бы клиенту в ВК.
     result = await db.execute(
         select(Message)
         .where(Message.dialog_id == dialog_id)
-        .order_by(Message.created_at.desc())
-        .limit(2)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(1 + len(parts))
     )
     messages = list(reversed(result.scalars().all()))
 

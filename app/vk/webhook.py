@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 INITIAL_STATUS_NAME = "Поинтересовался"
 
+# Пауза между репликами одного хода (связка скриптов, см. ReplyPart).
+FOLLOW_UP_DELAY_SECONDS = 2.0
+
 
 @dataclass
 class VkIncomingMessage:
@@ -35,6 +38,9 @@ class VkIncomingMessage:
     files: list[str] = field(default_factory=list)
     audio_urls: list[str] = field(default_factory=list)
     admin_author_id: int | None = None
+    # Метка рекламной ссылки, по которой пришёл клиент (vk.me/club123?ref=sweetgold).
+    # ВК присылает её только в ПЕРВОМ сообщении диалога.
+    ref: str | None = None
 
 
 def _largest_photo_url(photo: dict) -> str | None:
@@ -96,8 +102,14 @@ def parse_message_event(payload: dict) -> VkIncomingMessage | None:
         else:
             return None  # нечего обрабатывать (пересланное без текста и т.п.)
 
+    # ref живёт на самом сообщении; на старых версиях Callback API объект события
+    # и был сообщением, поэтому смотрим оба уровня.
+    ref = msg.get("ref") or obj.get("ref")
+    ref = str(ref).strip() if ref else None
+
     message_id = msg.get("id") or msg.get("conversation_message_id")
     return VkIncomingMessage(
+        ref=ref or None,
         vk_user_id=int(from_id),
         peer_id=int(peer_id),
         text=text,
@@ -124,7 +136,9 @@ async def _resolve_dialog_type(db: AsyncSession, group: VkGroup) -> tuple[int | 
     return None, "default"
 
 
-async def _get_or_create_client(db: AsyncSession, group: VkGroup, vk_user_id: int) -> Client:
+async def _get_or_create_client(
+    db: AsyncSession, group: VkGroup, vk_user_id: int, ref: str | None = None,
+) -> Client:
     client = await db.scalar(
         select(Client).where(
             Client.vk_group_id == group.id,
@@ -132,9 +146,25 @@ async def _get_or_create_client(db: AsyncSession, group: VkGroup, vk_user_id: in
         )
     )
     if not client:
-        client = Client(vk_user_id=vk_user_id, vk_group_id=group.id, source=f"vk:{group.group_id}")
+        client = Client(
+            vk_user_id=vk_user_id,
+            vk_group_id=group.id,
+            source=f"vk:{group.group_id}",
+            # Тег ref-ссылки = marketing_tag скриптов ('sweetgold', 'ПАВЕЛ_ПАТРИОТ_1'),
+            # по нему list_scripts отбирает приветствие под конкретную рекламу.
+            # Сравнение в format_scripts_list точное — сохраняем как прислал ВК.
+            marketing_tags=[ref] if ref else None,
+        )
         db.add(client)
         await db.flush()
+        if ref:
+            logger.info("[vk=%s/%s] client tagged by ref=%r", group.group_id, vk_user_id, ref)
+    elif ref and not client.marketing_tags:
+        # Клиент уже заведён, но без тега (пришёл до подключения ref-ссылок либо
+        # первое сообщение потерялось) — проставляем задним числом.
+        client.marketing_tags = [ref]
+        await db.flush()
+        logger.info("[vk=%s/%s] client back-tagged by ref=%r", group.group_id, vk_user_id, ref)
     return client
 
 
@@ -166,7 +196,7 @@ async def _get_or_create_dialog(
 
 async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMessage) -> None:
     """Входящее сообщение пользователя: сохранить, запустить ИИ, отправить ответ."""
-    client = await _get_or_create_client(db, group, msg.vk_user_id)
+    client = await _get_or_create_client(db, group, msg.vk_user_id, ref=msg.ref)
     type_id, type_name = await _resolve_dialog_type(db, group)
     current_dialog_type.set(type_name)
     dialog = await _get_or_create_dialog(db, client, type_id)
@@ -236,40 +266,52 @@ async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMe
         return
 
     from app.ai.runner import run_ai
-    output, ai_run, image_urls, reply_text = await run_ai(db, dialog, client_message)
+    output, ai_run, parts = await run_ai(db, dialog, client_message)
 
     if output.need_curator:
         logger.info("[%s] need_curator=True — reply held for review", ctx)
         return
-    if not reply_text and not image_urls:
-        logger.info("[%s] empty reply — nothing to send", ctx)
-        return
-
-    # Фото-вложения через VK upload API пока не поддержаны — URL уходят текстом,
-    # ВК сам рендерит превью ссылок.
-    outgoing_text = reply_text or ""
-    if image_urls:
-        outgoing_text = (outgoing_text + "\n" + "\n".join(image_urls)).strip()
 
     from app.vk.sender import VkApiError, VkMessagesForbiddenError, send_to_dialog
-    try:
-        vk_message_id = await send_to_dialog(db, dialog, outgoing_text)
-    except VkMessagesForbiddenError:
-        await db.commit()  # vk_blocked проставлен в send_to_dialog
-        return
-    except (VkApiError, Exception):
-        logger.exception("[%s] vk reply send failed", ctx)
-        return
+    sent = 0
+    for i, part in enumerate(parts):
+        if not part.text and not part.image_urls:
+            logger.info("[%s] empty reply part %d — skipped", ctx, i)
+            continue
+        # Фото-вложения через VK upload API пока не поддержаны — URL уходят текстом,
+        # ВК сам рендерит превью ссылок.
+        outgoing_text = part.text or ""
+        if part.image_urls:
+            outgoing_text = (outgoing_text + "\n" + "\n".join(part.image_urls)).strip()
 
-    # Проставляем VK id на исходящее сообщение: message_reply о нашей же отправке
-    # придёт в вебхук, и по этому id (и random_id≠0) мы его отличим от оператора.
-    if ai_run.output_message_id and vk_message_id:
-        ai_message = await db.get(Message, ai_run.output_message_id)
-        if ai_message and not ai_message.external_message_id:
-            ai_message.external_message_id = str(vk_message_id)
-    dialog.last_message_at = msk_now()
+        if sent:
+            # Связка скриптов уходит двумя сообщениями подряд. Лимитам ВК это не
+            # мешает (20 запросов/сек на токен сообщества), пауза нужна, чтобы
+            # реплики не приходили одной миллисекундой и читались по-человечески.
+            await asyncio.sleep(FOLLOW_UP_DELAY_SECONDS)
+
+        try:
+            vk_message_id = await send_to_dialog(db, dialog, outgoing_text)
+        except VkMessagesForbiddenError:
+            await db.commit()  # vk_blocked проставлен в send_to_dialog
+            return
+        except (VkApiError, Exception):
+            logger.exception("[%s] vk reply send failed | part=%d", ctx, i)
+            break
+
+        # Проставляем VK id на исходящее сообщение: message_reply о нашей же отправке
+        # придёт в вебхук, и по этому id (и random_id≠0) мы его отличим от оператора.
+        if vk_message_id and not part.message.external_message_id:
+            part.message.external_message_id = str(vk_message_id)
+        sent += 1
+        logger.info(
+            "[%s] vk reply sent | part=%d/%d | vk_message_id=%s",
+            ctx, i + 1, len(parts), vk_message_id,
+        )
+
+    if sent:
+        dialog.last_message_at = msk_now()
     await db.commit()
-    logger.info("[%s] vk reply sent | vk_message_id=%s", ctx, vk_message_id)
 
 
 async def handle_message_reply(db: AsyncSession, group: VkGroup, msg: VkIncomingMessage) -> None:

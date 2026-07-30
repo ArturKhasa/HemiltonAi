@@ -234,6 +234,11 @@ class Script(Base):
     phrase_text = Column(Text, nullable=False)
     marketing_tag = Column(String(64), nullable=True)
     funnel_stage = Column(String(32), nullable=True)  # earliest valid funnel step; see migration 033
+    # Скрипт, который уходит клиенту вторым сообщением сразу за этим, не дожидаясь
+    # ответа (регламент ОП: приветствие + вопрос про имя/фамилию). См. миграцию 041.
+    follow_up_script_id = Column(
+        Integer, ForeignKey("scripts.id", ondelete="SET NULL"), nullable=True
+    )
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=msk_now)
     updated_at = Column(DateTime, default=msk_now, onupdate=msk_now)

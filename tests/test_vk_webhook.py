@@ -2,6 +2,7 @@
 import pytest
 from sqlalchemy import func, select
 
+from app.ai.runner import ReplyPart
 from app.ai.schemas import AgentOutput
 from app.db.models import AIRun, Client, Dialog, DialogType, Message, MessageRole, VkGroup
 from app.vk.webhook import (
@@ -96,9 +97,12 @@ def fake_ai(monkeypatch):
             model="test",
         )
         db.add(run)
+        reply = Message(dialog_id=dialog.id, role=MessageRole.ai, text="Да, есть в наличии!")
+        db.add(reply)
         await db.commit()
+        run.output_message_id = reply.id
         output = AgentOutput(reply_text="Да, есть в наличии!", confidence_score=0.95)
-        return output, run, [], "Да, есть в наличии!"
+        return output, run, [ReplyPart(text=reply.text, image_urls=[], message=reply)]
 
     monkeypatch.setattr("app.ai.runner.run_ai", _fake_run_ai)
     return calls
@@ -110,7 +114,10 @@ def fake_sender(monkeypatch):
 
     async def _fake_send(db, dialog, text):
         sent.append((dialog.id, text))
-        return 777
+        # Настоящий ВК выдаёт каждому сообщению свой id; на повторяющемся падает
+        # уникальный индекс (dialog_id, external_message_id), которым дедуплицируются
+        # вебхуки, — так что счётчик тут не украшение.
+        return 800 + len(sent)
 
     monkeypatch.setattr("app.vk.sender.send_to_dialog", _fake_send)
     return sent
@@ -136,6 +143,85 @@ async def test_message_new_creates_entities_and_sends(db, vk_group, fake_ai, fak
 
     assert fake_ai == [messages[0].id]
     assert fake_sender == [(dialog.id, "Да, есть в наличии!")]
+
+
+async def test_message_new_sends_every_reply_part(db, vk_group, fake_sender, monkeypatch):
+    """Связка скриптов (приветствие + вопрос) уходит двумя сообщениями подряд,
+    каждое со своим VK id — иначе message_reply о нашей же отправке не отличить
+    от сообщения живого оператора."""
+    monkeypatch.setattr("app.vk.webhook.FOLLOW_UP_DELAY_SECONDS", 0)
+
+    async def _two_part_run_ai(db_, dialog, client_message):
+        run = AIRun(dialog_id=dialog.id, input_message_id=client_message.id,
+                    provider="test", model="test")
+        db_.add(run)
+        parts = []
+        for text in ("Здравствуйте! Меня зовут София", "Какое имя напишем на кофте?"):
+            m = Message(dialog_id=dialog.id, role=MessageRole.ai, text=text)
+            db_.add(m)
+            parts.append(m)
+        await db_.commit()
+        run.output_message_id = parts[0].id
+        output = AgentOutput(reply_text=parts[0].text, confidence_score=0.95)
+        return output, run, [ReplyPart(text=m.text, image_urls=[], message=m) for m in parts]
+
+    monkeypatch.setattr("app.ai.runner.run_ai", _two_part_run_ai)
+    await handle_message_new(db, vk_group, parse_message_event(_event()))
+
+    dialog = (await db.execute(select(Dialog))).scalars().first()
+    assert fake_sender == [
+        (dialog.id, "Здравствуйте! Меня зовут София"),
+        (dialog.id, "Какое имя напишем на кофте?"),
+    ]
+    ai_msgs = (await db.execute(
+        select(Message).where(Message.role == MessageRole.ai).order_by(Message.id)
+    )).scalars().all()
+    assert [m.external_message_id for m in ai_msgs] == ["801", "802"]
+
+
+async def test_ref_link_tags_new_client(db, vk_group, fake_ai, fake_sender):
+    """Тег рекламной ссылки = marketing_tag скриптов: по нему list_scripts выбирает
+    приветствие под конкретную рекламу. Раньше теги не проставлялись никогда, и
+    все клиенты шли как безтеговые."""
+    event = _event()
+    event["object"]["message"]["ref"] = "sweetgold"
+    await handle_message_new(db, vk_group, parse_message_event(event))
+
+    client = await db.scalar(select(Client).where(Client.vk_user_id == 555))
+    assert client.marketing_tags == ["sweetgold"]
+
+
+async def test_ref_backfilled_on_existing_untagged_client(db, vk_group, fake_ai, fake_sender):
+    """ВК присылает ref только в первом сообщении; если клиент уже заведён без
+    тега, проставляем задним числом."""
+    await handle_message_new(db, vk_group, parse_message_event(_event()))
+    client = await db.scalar(select(Client).where(Client.vk_user_id == 555))
+    assert client.marketing_tags is None
+
+    event = _event(message_id=43, text="а сколько стоит?")
+    event["object"]["message"]["ref"] = "ПАВЕЛ_ПАТРИОТ_1"
+    await handle_message_new(db, vk_group, parse_message_event(event))
+
+    await db.refresh(client)
+    assert client.marketing_tags == ["ПАВЕЛ_ПАТРИОТ_1"]
+
+
+async def test_existing_tag_not_overwritten(db, vk_group, fake_ai, fake_sender):
+    """Клиент закреплён за первой рекламой, по которой пришёл."""
+    first = _event()
+    first["object"]["message"]["ref"] = "sweetgold"
+    await handle_message_new(db, vk_group, parse_message_event(first))
+
+    second = _event(message_id=43, text="ещё вопрос")
+    second["object"]["message"]["ref"] = "sweetwhite"
+    await handle_message_new(db, vk_group, parse_message_event(second))
+
+    client = await db.scalar(select(Client).where(Client.vk_user_id == 555))
+    assert client.marketing_tags == ["sweetgold"]
+
+
+def test_ref_absent_parses_as_none():
+    assert parse_message_event(_event()).ref is None
 
 
 async def test_message_new_dedup_skips_retry(db, vk_group, fake_ai, fake_sender):

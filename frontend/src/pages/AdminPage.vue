@@ -92,6 +92,11 @@
                 <td class="px-4 py-3 text-gray-400 font-mono text-xs">{{ s.id }}</td>
                 <td class="px-4 py-3 text-gray-800 max-w-sm">
                   <p class="truncate" :title="s.condition">{{ s.condition }}</p>
+                  <p
+                    v-if="s.follow_up_script_id"
+                    class="text-xs text-emerald-600 mt-0.5"
+                    title="Уйдёт вторым сообщением сразу за этим"
+                  >следом → #{{ s.follow_up_script_id }}</p>
                 </td>
                 <td class="px-4 py-3">
                   <span
@@ -257,6 +262,16 @@
               <option v-for="st in FUNNEL_STAGES" :key="st.value" :value="st.value">{{ st.label }}</option>
             </select>
             <p class="text-xs text-gray-400 mt-1">Скрипт виден, пока диалог не прошёл эту стадию. «Любая» — без ограничения.</p>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 mb-1.5">Отправить следом</label>
+            <select v-model="form.follow_up_script_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+              <option :value="0">— ничего —</option>
+              <option v-for="s in followUpOptions" :key="s.id" :value="s.id">
+                #{{ s.id }} — {{ s.condition.slice(0, 70) }}
+              </option>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">Уйдёт вторым сообщением сразу за этим, не дожидаясь ответа клиента.</p>
           </div>
           <div v-if="editScript" class="flex items-center gap-2">
             <input type="checkbox" v-model="form.is_active" id="modal_is_active" class="rounded w-4 h-4 cursor-pointer" />
@@ -425,7 +440,7 @@ const showModal = ref(false)
 const editScript = ref(null)
 const deleteTarget = ref(null)
 
-const form = ref({ type_id: null, condition: '', phrase_text: '', marketing_tag: '', funnel_stage: '', is_active: true })
+const form = ref({ type_id: null, condition: '', phrase_text: '', marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, is_active: true })
 
 // Funnel steps (must mirror STAGES in app/ai/funnel_agent.py). Empty = любая стадия (always shown).
 const FUNNEL_STAGES = [
@@ -447,6 +462,14 @@ const tabs = computed(() => [
 
 const existingTags = computed(() =>
   [...new Set(scripts.value.map(s => s.marketing_tag).filter(Boolean))].sort()
+)
+
+// Кандидаты в связку: тот же тип диалога, и не сам скрипт (на себя ссылаться нельзя).
+const followUpOptions = computed(() =>
+  scripts.value.filter(s =>
+    s.id !== editScript.value?.id &&
+    (form.value.type_id === null || s.type_id === form.value.type_id)
+  )
 )
 
 const filteredScripts = computed(() => {
@@ -473,13 +496,13 @@ async function load() {
 
 function openCreate() {
   editScript.value = null
-  form.value = { type_id: activeTypeId.value, condition: '', phrase_text: '', marketing_tag: '', funnel_stage: '', is_active: true }
+  form.value = { type_id: activeTypeId.value, condition: '', phrase_text: '', marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, is_active: true }
   showModal.value = true
 }
 
 function openEdit(s) {
   editScript.value = s
-  form.value = { type_id: s.type_id, condition: s.condition, phrase_text: s.phrase_text, marketing_tag: s.marketing_tag || '', funnel_stage: s.funnel_stage || '', is_active: s.is_active }
+  form.value = { type_id: s.type_id, condition: s.condition, phrase_text: s.phrase_text, marketing_tag: s.marketing_tag || '', funnel_stage: s.funnel_stage || '', follow_up_script_id: s.follow_up_script_id || 0, is_active: s.is_active }
   showModal.value = true
 }
 
@@ -488,8 +511,11 @@ async function saveScript() {
   try {
     const marketing_tag = form.value.marketing_tag?.trim() || ''
     const funnel_stage = form.value.funnel_stage || ''
+    // 0, а не null: PATCH на бэке режет null-поля (exclude_none), поэтому «связки
+    // нет» приходит нулём и там же превращается обратно в NULL.
+    const follow_up_script_id = form.value.follow_up_script_id || 0
     if (editScript.value) {
-      const res = await api.patch(`/scripts/${editScript.value.id}`, { ...form.value, marketing_tag, funnel_stage })
+      const res = await api.patch(`/scripts/${editScript.value.id}`, { ...form.value, marketing_tag, funnel_stage, follow_up_script_id })
       const idx = scripts.value.findIndex(s => s.id === editScript.value.id)
       if (idx !== -1) scripts.value[idx] = res.data
     } else {
@@ -499,6 +525,7 @@ async function saveScript() {
         type_id: form.value.type_id,
         marketing_tag,
         funnel_stage,
+        follow_up_script_id,
       })
       scripts.value.push(res.data)
     }

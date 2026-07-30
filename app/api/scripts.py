@@ -20,6 +20,7 @@ class ScriptOut(BaseModel):
     phrase_text: str
     marketing_tag: str | None
     funnel_stage: str | None
+    follow_up_script_id: int | None
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -33,6 +34,7 @@ class ScriptCreateRequest(BaseModel):
     type_id: int | None = None
     marketing_tag: str | None = None
     funnel_stage: str | None = None
+    follow_up_script_id: int | None = None
 
 
 class ScriptUpdateRequest(BaseModel):
@@ -41,6 +43,7 @@ class ScriptUpdateRequest(BaseModel):
     type_id: int | None = None
     marketing_tag: str | None = None
     funnel_stage: str | None = None
+    follow_up_script_id: int | None = None
     is_active: bool | None = None
 
 
@@ -66,6 +69,7 @@ async def create_script(
         body.condition, body.phrase_text, type_id=body.type_id,
         marketing_tag=body.marketing_tag or None,
         funnel_stage=body.funnel_stage or None,
+        follow_up_script_id=body.follow_up_script_id or None,
     )
     await db.commit()
     await db.refresh(script)
@@ -85,6 +89,12 @@ async def update_script(
         updates["marketing_tag"] = None  # empty string clears the tag
     if "funnel_stage" in updates and not updates["funnel_stage"]:
         updates["funnel_stage"] = None  # empty string clears the stage (= any stage)
+    if "follow_up_script_id" in updates:
+        # exclude_none выше съедает явный null, поэтому «связки нет» приходит нулём.
+        if not updates["follow_up_script_id"]:
+            updates["follow_up_script_id"] = None
+        elif updates["follow_up_script_id"] == script_id:
+            raise HTTPException(status_code=400, detail="Script cannot follow itself")
     script = await svc.update(script_id, **updates)
     if not script:
         raise HTTPException(status_code=404, detail="Script not found")

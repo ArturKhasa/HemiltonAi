@@ -761,6 +761,19 @@
             </select>
           </div>
           <div>
+            <label class="block text-sm font-medium mb-1">Метка рекламы (необязательно)</label>
+            <input
+              v-model="newMarketingTag"
+              placeholder="sweetgold, ПАВЕЛ_ПАТРИОТ_1..."
+              list="marketing_tag_options"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <datalist id="marketing_tag_options">
+              <option v-for="t in knownMarketingTags" :key="t" :value="t" />
+            </datalist>
+            <p class="text-xs text-gray-400 mt-1">То же, что ref у рекламной ссылки — определяет, какое приветствие получит клиент.</p>
+          </div>
+          <div>
             <label class="block text-sm font-medium mb-1">Модель ИИ</label>
             <select
               v-model="newAiProvider"
@@ -819,6 +832,11 @@ const newVkUserId = ref('')
 const newClientName = ref('')
 const newTypeId = ref(null)
 const newAiProvider = ref('qwen')
+const newMarketingTag = ref('')
+// Метки уже виденных диалогов — подсказка, чтобы тестировщик не угадывал написание.
+const knownMarketingTags = computed(() =>
+  [...new Set(dialogs.value.flatMap(d => d.marketing_tags || []))].sort()
+)
 const startLoading = ref(false)
 const startError = ref('')
 
@@ -1020,8 +1038,11 @@ function saveFiltersToStorage() {
 
 const _saved = loadFiltersFromStorage()
 const showFilters = ref(false)
-const filterShowTest = ref(_saved?.filterShowTest ?? false)
-const filterShowReal = ref(_saved?.filterShowReal ?? true)
+// По умолчанию — тестовые диалоги: страница открывается ради «+ Новый чат», а с
+// дефолтом на реальных тестировщик видел пустой список и решал, что чат не
+// создаётся (Женя, Георгий, 30.07). Реальные диалоги доступны в том же селекте.
+const filterShowTest = ref(_saved?.filterShowTest ?? true)
+const filterShowReal = ref(_saved?.filterShowReal ?? false)
 const filterStatuses = ref(_saved?.filterStatuses ?? [])
 const filterDatePreset = ref(_saved?.filterDatePreset ?? 'all')
 const filterDateFrom = ref(_saved?.filterDateFrom ?? '')
@@ -1431,12 +1452,20 @@ async function startChat() {
       client_name: newClientName.value.trim() || null,
       type_id: newTypeId.value,
       ai_provider: newAiProvider.value,
+      marketing_tag: newMarketingTag.value.trim() || null,
     })
     showNewChat.value = false
     newVkUserId.value = ''
     newClientName.value = ''
     newTypeId.value = dialogTypes.value[0]?.id ?? null
     newAiProvider.value = 'qwen'
+    newMarketingTag.value = ''
+    // Созданный чат всегда тестовый: если фильтр стоит на реальных, он бы
+    // не появился в списке и выглядел бы как «не создался».
+    if (!filterShowTest.value) {
+      filterShowTest.value = true
+      filterShowReal.value = false
+    }
     await loadDialogs()
     await openDialog(res.data.dialog_id)
   } catch (e) {

@@ -3,6 +3,7 @@ import asyncio
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime
 
 from agents import Runner
@@ -23,14 +24,50 @@ from app.ai.run_log import log_failed_run, usage_from_result
 from app.ai.tools import fetch_client_tags
 from app.ai.providers import get_model_name
 from app.ai.schemas import AgentOutput
+from app.ai.triggers import CURATOR_STATUS_NAME, mentions_embroidery
 from app.config import settings
 from app.utils.media import is_document_url, is_image_url, is_sticker_url, is_video_url
+from app.vk.spintax import resolve_spintax
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
-from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole
-from app.utils.text import normalize_dashes
+from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole, Script
+from app.utils.text import normalize_dashes, render_name_placeholder
 
 logger = logging.getLogger(__name__)
+
+
+# (?<!\[photo-) / (?<!\[video-) — не трогать URL внутри "[photo-URL]"/"[video-URL]"
+# токенов: их разбирает app.vk.sender.extract_and_resolve_attachments (перезалив
+# на своё сообщество), а не эта голая-ссылка-текстом ветка.
+_BARE_IMAGE_URL_RE = re.compile(
+    r'(?<!\[photo-)(?<!\[video-)https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\S*)?',
+    re.IGNORECASE,
+)
+_IMAGES_BLOCK_RE = re.compile(r"\n*<<<IMAGES>>>\n?(.*?)\n?<<<END_IMAGES>>>", re.DOTALL)
+
+
+def _split_image_urls(text: str) -> tuple[str, list[str]]:
+    """Вынести картинки из текста реплики: сначала блок <<<IMAGES>>> (его агент
+    копирует из истории), иначе — голые ссылки на изображения."""
+    images_match = _IMAGES_BLOCK_RE.search(text)
+    if images_match:
+        urls = [u.strip() for u in images_match.group(1).splitlines() if u.strip()]
+        return text[: images_match.start()].rstrip(), urls
+    urls = _BARE_IMAGE_URL_RE.findall(text)
+    if urls:
+        text = _BARE_IMAGE_URL_RE.sub("", text).strip()
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text, urls
+
+
+@dataclass
+class ReplyPart:
+    """Одно исходящее сообщение. За ход их может быть больше одного: регламент ОП
+    описывает связки скриптов («приветствие», следом «вопрос про имя/фамилию»),
+    которые менеджер отправляет подряд, не дожидаясь ответа клиента."""
+    text: str
+    image_urls: list[str]
+    message: Message
 
 # Cap history sent to the model — older turns rarely change the reply but cost input tokens.
 _HISTORY_MAX_MESSAGES = 100
@@ -124,8 +161,12 @@ async def run_ai(
     db: AsyncSession,
     dialog: Dialog,
     client_message: Message,
-) -> tuple[AgentOutput, AIRun]:
-    """Run the appropriate agent and persist AIRun record."""
+) -> tuple[AgentOutput, AIRun, list[ReplyPart]]:
+    """Run the appropriate agent, persist the AIRun and every outgoing message.
+
+    Реплик за ход может быть несколько — см. ReplyPart. Первая всегда ответ
+    модели, за ней могут идти скрипты, привязанные через follow_up_script_id.
+    """
     text = client_message.text
 
     type_id: int | None = getattr(dialog, "type_id", None)
@@ -500,7 +541,7 @@ async def run_ai(
         output = output.model_copy(update={"need_curator": False, "curator_reason": None})
 
     if output.need_curator and not output.next_status:
-        output = output.model_copy(update={"next_status": "Нужен куратор"})
+        output = output.model_copy(update={"next_status": CURATOR_STATUS_NAME})
 
     # Жёсткий гейт: из «Горячий клиент» единственный разрешённый переход —
     # «Ждем предоплату». Любой другой next_status сбрасываем (статус не меняется);
@@ -547,6 +588,18 @@ async def run_ai(
                 ctx,
             )
             output = output.model_copy(update={"next_status": None})
+
+    # Вышивка: считается индивидуально по каждому элементу дизайна, цены высокие —
+    # тему ведёт менеджер, не ИИ. Стоит последним, ПОСЛЕ всех гейтов выше: иначе
+    # переход из «Горячий клиент» сбросил бы эскалацию обратно в None. Ответ при
+    # этом уходит клиенту как обычно (need_curator не трогаем) — придерживать его
+    # значило бы вешать диалог на каждом упоминании вышивки.
+    if mentions_embroidery(text):
+        logger.info(
+            "[%s] embroidery mentioned by client -> status %r (reply still sent)",
+            ctx, CURATOR_STATUS_NAME,
+        )
+        output = output.model_copy(update={"next_status": CURATOR_STATUS_NAME})
 
     if output.next_status:
         matching = next((s for s in active_statuses if s.name == output.next_status), None)
@@ -614,24 +667,7 @@ async def run_ai(
     await db.flush()
 
     reply_text = output.reply_text
-    image_urls: list[str] = []
-    images_match = re.search(r"\n*<<<IMAGES>>>\n?(.*?)\n?<<<END_IMAGES>>>", reply_text, re.DOTALL)
-    if images_match:
-        image_urls = [u.strip() for u in images_match.group(1).splitlines() if u.strip()]
-        reply_text = reply_text[: images_match.start()].rstrip()
-    else:
-        # (?<!\[photo-) / (?<!\[video-) — не трогать URL внутри "[photo-URL]"/"[video-URL]"
-        # токенов: их разбирает app.vk.sender.extract_and_resolve_attachments (перезалив
-        # на своё сообщество), а не эта голая-ссылка-текстом ветка.
-        url_pattern = re.compile(
-            r'(?<!\[photo-)(?<!\[video-)https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\S*)?',
-            re.IGNORECASE,
-        )
-        image_urls = url_pattern.findall(reply_text)
-        if image_urls:
-            reply_text = url_pattern.sub('', reply_text).strip()
-            reply_text = re.sub(r'\n{3,}', '\n\n', reply_text).strip()
-
+    reply_text, image_urls = _split_image_urls(reply_text)
     reply_text = _normalize_dashes(reply_text)
 
     # Hash the final attachment set so future turns dedup by content, not URL.
@@ -657,12 +693,74 @@ async def run_ai(
 
     ai_run.output_message_id = ai_message.id
 
+    parts = [ReplyPart(text=reply_text, image_urls=image_urls, message=ai_message)]
+
+    follow_up = await _build_follow_up_part(db, dialog, output.source_script_id, client, ctx)
+    if follow_up is not None:
+        parts.append(follow_up)
+
     await db.commit()
     await db.refresh(ai_run)
 
     logger.info(
-        "[%s] run_ai done | ai_run_id=%s | ai_message_id=%s | need_curator=%s | selected_script=%s",
-        ctx, ai_run.id, ai_message.id, output.need_curator, output.selected_script,
+        "[%s] run_ai done | ai_run_id=%s | ai_message_id=%s | parts=%d | need_curator=%s | selected_script=%s",
+        ctx, ai_run.id, ai_message.id, len(parts), output.need_curator, output.selected_script,
     )
 
-    return output, ai_run, image_urls, reply_text
+    return output, ai_run, parts
+
+
+async def _build_follow_up_part(
+    db: AsyncSession,
+    dialog: Dialog,
+    source_script_id: int | None,
+    client: Client | None,
+    ctx: str,
+) -> ReplyPart | None:
+    """Вторая реплика хода, если у применённого скрипта настроена связка.
+
+    Цепочка нарочно однозвенная: follow_up у самого follow_up не разворачиваем.
+    Регламенту хватает пары «приветствие + вопрос», а рекурсия по данным из
+    админки при кольцевой ссылке отправила бы клиенту бесконечную простыню.
+    """
+    if not source_script_id:
+        return None
+    source = await db.get(Script, source_script_id)
+    if not source or not source.follow_up_script_id:
+        return None
+    follow_up = await db.get(Script, source.follow_up_script_id)
+    if not follow_up or not follow_up.is_active or not (follow_up.phrase_text or "").strip():
+        logger.info(
+            "[%s] follow-up script %s missing/inactive — skipped",
+            ctx, source.follow_up_script_id,
+        )
+        return None
+
+    text = render_name_placeholder(
+        resolve_spintax(follow_up.phrase_text), client.name if client else None
+    )
+    text = normalize_dashes(text)
+    text, image_urls = _split_image_urls(text)
+
+    file_hashes: list[str] = []
+    if image_urls:
+        from app.utils.media import hash_image_urls
+        file_hashes = list((await hash_image_urls(image_urls)).values())
+
+    message = Message(
+        dialog_id=dialog.id,
+        role=MessageRole.ai,
+        text=text,
+        msg_metadata={
+            "files": image_urls,
+            "file_hashes": file_hashes,
+            "follow_up_script_id": follow_up.id,
+            "source_script_id": follow_up.id,
+        },
+    )
+    db.add(message)
+    await db.flush()
+    logger.info(
+        "[%s] follow-up queued | script=%s -> %s", ctx, source.id, follow_up.id,
+    )
+    return ReplyPart(text=text, image_urls=image_urls, message=message)

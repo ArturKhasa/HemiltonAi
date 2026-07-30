@@ -1,6 +1,25 @@
 """Text post-processing helpers for outgoing messages."""
 import re
 
+# Плейсхолдер имени в текстах скриптов, унаследованных из CRM.
+_NAME_PLACEHOLDER_RE = re.compile(r"\[Имя\]", re.IGNORECASE)
+_CYRILLIC_NAME_RE = re.compile(r"^[А-Яа-яЁё][А-Яа-яЁё\-]*$")
+
+
+def render_name_placeholder(text: str, client_name: str | None) -> str:
+    """Подставить имя клиента в «[Имя]» скриптового текста.
+
+    Обращаемся по имени только если оно кириллицей — латиница, транслит, ники и
+    наборы букв дают «Max, какое имя напишем...», что сразу читается как бот (то
+    же правило в системном промпте). Имени нет — плейсхолдер вырезается вместе с
+    идущей за ним запятой, а фраза начинается с большой буквы.
+    """
+    name = (client_name or "").strip()
+    if name and _CYRILLIC_NAME_RE.match(name):
+        return _NAME_PLACEHOLDER_RE.sub(name, text)
+    stripped = _NAME_PLACEHOLDER_RE.sub("", text).lstrip(" ,")
+    return stripped[:1].upper() + stripped[1:] if stripped else stripped
+
 
 def normalize_dashes(text: str) -> str:
     """Strip the em-dash / en-dash «AI tell»: model loves spaced em-dashes,
