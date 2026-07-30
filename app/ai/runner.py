@@ -229,9 +229,26 @@ async def run_ai(
         .order_by(AIRun.id.desc())
         .limit(1)
     )
-    exclude_script_ids: set[int] | None = {last_script_id} if last_script_id else None
+    used_script_ids = {last_script_id} if last_script_id else set()
+
+    # Скрипты из связок (follow_up_script_id) уходят клиенту без собственного
+    # AIRun, поэтому запросом выше не видны — иначе модель на следующем же ходу
+    # снова выбрала бы «какое имя напишем на кофте?» и переспросила бы то, на что
+    # клиент только что ответил. Читаем их из метаданных отправленных сообщений.
+    recent_ai = await db.execute(
+        select(Message.msg_metadata)
+        .where(Message.dialog_id == dialog.id, Message.role == MessageRole.ai)
+        .order_by(Message.id.desc())
+        .limit(2)
+    )
+    for (meta,) in recent_ai.all():
+        sent_script_id = (meta or {}).get("source_script_id")
+        if sent_script_id:
+            used_script_ids.add(sent_script_id)
+
+    exclude_script_ids: set[int] | None = used_script_ids or None
     if exclude_script_ids:
-        logger.info("[%s] excluding last used script | script_id=%s", ctx, last_script_id)
+        logger.info("[%s] excluding recently used scripts | script_ids=%s", ctx, sorted(exclude_script_ids))
 
     dialog_provider = getattr(dialog, "ai_provider", None) or settings.AI_PROVIDER
     agent = build_sales_agent(
