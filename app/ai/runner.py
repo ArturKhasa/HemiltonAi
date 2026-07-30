@@ -24,14 +24,15 @@ from app.ai.run_log import log_failed_run, usage_from_result
 from app.ai.tools import fetch_client_tags
 from app.ai.providers import get_model_name
 from app.ai.schemas import AgentOutput
-from app.ai.triggers import CURATOR_STATUS_NAME, mentions_embroidery
+from app.ai.triggers import CURATOR_STATUS_NAME, curator_trigger
 from app.config import settings
 from app.utils.media import is_document_url, is_image_url, is_sticker_url, is_video_url
 from app.vk.spintax import resolve_spintax
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
+from app.ai.greeting import resolve_greeting
 from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole, Script
-from app.utils.text import normalize_dashes, render_name_placeholder
+from app.utils.text import normalize_dashes, render_name_placeholder, strip_repeated_greeting
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +180,10 @@ async def run_ai(
         "[%s] run_ai start | type_id=%s | msg_id=%s | text=%r",
         ctx, type_id, client_message.id, text[:80],
     )
+
+    greeting_script = await resolve_greeting(db, dialog, client, type_id)
+    if greeting_script is not None:
+        return await _run_scripted_greeting(db, dialog, client, greeting_script, ctx)
 
     logger.info("[%s] loading system prompt | type_id=%s", ctx, type_id)
     instructions = await get_system_prompt(db, type_id=type_id)
@@ -606,15 +611,16 @@ async def run_ai(
             )
             output = output.model_copy(update={"next_status": None})
 
-    # Вышивка: считается индивидуально по каждому элементу дизайна, цены высокие —
-    # тему ведёт менеджер, не ИИ. Стоит последним, ПОСЛЕ всех гейтов выше: иначе
-    # переход из «Горячий клиент» сбросил бы эскалацию обратно в None. Ответ при
-    # этом уходит клиенту как обычно (need_curator не трогаем) — придерживать его
-    # значило бы вешать диалог на каждом упоминании вышивки.
-    if mentions_embroidery(text):
+    # Вышивка и опт: и то и другое считается индивидуально, цены высокие, ошибка
+    # дорого стоит — темы ведёт менеджер, не ИИ. Стоит последним, ПОСЛЕ всех гейтов
+    # выше: иначе переход из «Горячий клиент» сбросил бы эскалацию обратно в None.
+    # Ответ при этом уходит клиенту как обычно (need_curator не трогаем) —
+    # придерживать его значило бы вешать диалог на каждом упоминании темы.
+    trigger = curator_trigger(text)
+    if trigger:
         logger.info(
-            "[%s] embroidery mentioned by client -> status %r (reply still sent)",
-            ctx, CURATOR_STATUS_NAME,
+            "[%s] trigger %r in client message -> status %r (reply still sent)",
+            ctx, trigger, CURATOR_STATUS_NAME,
         )
         output = output.model_copy(update={"next_status": CURATOR_STATUS_NAME})
 
@@ -687,6 +693,13 @@ async def run_ai(
     reply_text, image_urls = _split_image_urls(reply_text)
     reply_text = _normalize_dashes(reply_text)
 
+    # Приветствие мы уже отправили этим диалогом (иначе сюда бы не дошли —
+    # первое сообщение уходит скриптом), значит повторное здесь лишнее.
+    before_strip = reply_text
+    reply_text = strip_repeated_greeting(reply_text)
+    if reply_text != before_strip:
+        logger.info("[%s] stripped repeated greeting from reply", ctx)
+
     # Hash the final attachment set so future turns dedup by content, not URL.
     file_hashes: list[str] = []
     if image_urls:
@@ -724,6 +737,87 @@ async def run_ai(
         ctx, ai_run.id, ai_message.id, len(parts), output.need_curator, output.selected_script,
     )
 
+    return output, ai_run, parts
+
+
+async def _run_scripted_greeting(
+    db: AsyncSession,
+    dialog: Dialog,
+    client: Client | None,
+    script: Script,
+    ctx: str,
+) -> tuple[AgentOutput, AIRun, list[ReplyPart]]:
+    """Отдать приветствие дословно из скрипта, без обращения к модели.
+
+    Модель этот шаблон переписывала и теряла из него фото (см. app.ai.greeting),
+    а решать тут нечего: текст готов, вопрос следом задан регламентом. AIRun
+    заводим с нулевой стоимостью — прогона модели не было, но диалогу нужна
+    запись, на которую сошлётся output_message_id и дедуп вебхука.
+    """
+    text = render_name_placeholder(
+        resolve_spintax(script.phrase_text), client.name if client else None
+    )
+    text = normalize_dashes(text)
+    text, image_urls = _split_image_urls(text)
+
+    file_hashes: list[str] = []
+    if image_urls:
+        from app.utils.media import hash_image_urls
+        file_hashes = list((await hash_image_urls(image_urls)).values())
+
+    dialog.funnel_stage = "greeting"
+
+    ai_run = AIRun(
+        dialog_id=dialog.id,
+        provider="script",
+        model="greeting",
+        input_tokens=0,
+        output_tokens=0,
+        total_tokens=0,
+        cost_amount=0,
+        cost_currency="USD",
+        confidence_score=1,
+        selected_script="greeting:scripted",
+        source_script_id=script.id,
+    )
+    db.add(ai_run)
+    await db.flush()
+
+    message = Message(
+        dialog_id=dialog.id,
+        role=MessageRole.ai,
+        text=text,
+        msg_metadata={
+            "ai_run_id": ai_run.id,
+            "confidence": 1.0,
+            "need_curator": False,
+            "files": image_urls,
+            "file_hashes": file_hashes,
+            "source_script_id": script.id,
+        },
+    )
+    db.add(message)
+    await db.flush()
+    ai_run.output_message_id = message.id
+
+    parts = [ReplyPart(text=text, image_urls=image_urls, message=message)]
+    follow_up = await _build_follow_up_part(db, dialog, script.id, client, ctx)
+    if follow_up is not None:
+        parts.append(follow_up)
+
+    await db.commit()
+    await db.refresh(ai_run)
+
+    output = AgentOutput(
+        reply_text=text,
+        confidence_score=1.0,
+        selected_script="greeting:scripted",
+        source_script_id=script.id,
+    )
+    logger.info(
+        "[%s] scripted greeting sent | script=%s | photos=%d | parts=%d (модель не вызывалась)",
+        ctx, script.id, len(image_urls), len(parts),
+    )
     return output, ai_run, parts
 
 

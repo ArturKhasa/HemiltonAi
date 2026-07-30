@@ -5,7 +5,7 @@
 """
 import pytest
 
-from app.ai.triggers import mentions_embroidery
+from app.ai.triggers import curator_trigger, mentions_embroidery, mentions_wholesale
 
 
 @pytest.mark.parametrize(
@@ -41,3 +41,40 @@ def test_detected(text):
 )
 def test_not_detected(text):
     assert mentions_embroidery(text) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "я хочу 10 свитшотов, какая скидка?",   # реальная реплика Жени
+        "нужен опт",
+        "интересует оптовая цена",
+        "закажем оптом на команду",
+        "нам надо 25 худи",
+        "50 штук сделаете?",
+        "хотим на коллектив",
+    ],
+)
+def test_wholesale_detected(text):
+    assert mentions_wholesale(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "хочу один свитшот",
+        "а сколько стоит?",
+        "мне 4990 подходит",     # цена, а не количество
+        "",
+        None,
+        "оптика запотела",       # «опт» внутри слова — граница не совпадает
+    ],
+)
+def test_wholesale_not_detected(text):
+    assert mentions_wholesale(text) is False
+
+
+def test_trigger_name_reported():
+    assert curator_trigger("а вышивка есть?") == "вышивка"
+    assert curator_trigger("хочу 10 свитшотов") == "опт"
+    assert curator_trigger("какой цвет посоветуете?") is None

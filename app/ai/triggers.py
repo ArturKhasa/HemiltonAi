@@ -19,7 +19,30 @@ CURATOR_STATUS_NAME = "Нужен куратор"
 # «навышивать» в середине другого слова.
 _EMBROIDERY_RE = re.compile(r"\bвышив|\bвышит|\bвышью|\bвышьет", re.IGNORECASE)
 
+# Опт: ИИ путается в оптовых ценах — на 10 свитшотов назвала 4590₽/шт, а следом на
+# «дорого» выдала «дополнительную скидку» 4990₽, то есть дороже собственного
+# предложения. Оптовую цену считает менеджер.
+_WHOLESALE_RE = re.compile(
+    r"\bопт\b|\bоптом\b|\bоптов|\bна коллектив|\bкоманд[уые]\b|"
+    r"\d{1,3}\s*(?:шт|штук|единиц|изделий|свитшот|худи|толстов)",
+    re.IGNORECASE,
+)
+
 
 def mentions_embroidery(text: str | None) -> bool:
     """Клиент заговорил о вышивке — диалог передаём менеджеру."""
     return bool(_EMBROIDERY_RE.search((text or "").replace("ё", "е")))
+
+
+def mentions_wholesale(text: str | None) -> bool:
+    """Клиент просит опт/партию — цену считает менеджер, не ИИ."""
+    return bool(_WHOLESALE_RE.search((text or "").replace("ё", "е")))
+
+
+def curator_trigger(text: str | None) -> str | None:
+    """Название сработавшего триггера эскалации, либо None."""
+    if mentions_embroidery(text):
+        return "вышивка"
+    if mentions_wholesale(text):
+        return "опт"
+    return None
