@@ -188,9 +188,40 @@ def make_list_scripts(
     return list_scripts
 
 
+# «Товары не найдены» агент читал как «такого товара нет в продаже» и сообщал
+# клиенту, что позиция закончилась (диалог 9 на проде: «чёрные худи закончились»
+# при живом остатке). Пустой результат поиска — факт о запросе, а не о складе,
+# и формулировка обязана это проговаривать.
+_NO_PRODUCTS_FOUND = (
+    "Поиск по этому запросу ничего не дал. Попробуй ещё раз одним словом "
+    "(например «свитшот» или «худи»). ЭТО НЕ ЗНАЧИТ, ЧТО ТОВАРА НЕТ: о наличии, "
+    "отсутствии и ценах клиенту не сообщай, пока товар не найден."
+)
+
+
+async def run_product_search(query: str, type_id: int | None) -> str:
+    """Текст ответа инструмента search_products. Общая реализация для
+    openai-agents тулзы и anthropic_runner."""
+    async with AsyncSessionLocal() as db:
+        svc = ProductService(db)
+        products = await svc.search(query, type_id=type_id)
+        if products:
+            return format_products_list(products)
+        widest, loose = await svc.search_loose(query, type_id=type_id)
+    if not loose:
+        return _NO_PRODUCTS_FOUND
+    # Расширенный поиск помечаем явно: иначе агент выдаёт находку по одному слову
+    # за точный ответ на весь запрос.
+    return (
+        f"Точного совпадения по запросу «{query}» нет. "
+        f"Вот что нашлось по слову «{widest}» — сверься, подходит ли:\n"
+        + format_products_list(loose)
+    )
+
+
 def format_products_list(products) -> str:
     if not products:
-        return "Товары не найдены."
+        return _NO_PRODUCTS_FOUND
     lines = []
     for p in products:
         price = f"{p.price:g}₽" if p.price is not None else "?"
@@ -208,15 +239,23 @@ def make_search_products(type_id: int | None):
     """
     @function_tool
     async def search_products(query: str) -> str:
-        """Найти товары по (части) названия — например "свитшот" или "худи черный".
-        Возвращает цену, акционную цену (если есть) и размерную сетку. Используй перед
-        тем как называть клиенту точную цену или размерную сетку конкретного товара,
-        если в list_scripts() нет готовой фразы с этой информацией.
+        """Найти товары по названию — например "свитшот", "худи", "чёрный свитшот".
+        Порядок слов и род прилагательного значения не имеют. Возвращает цену,
+        акционную цену (если есть) и размерную сетку. Вызывай ОБЯЗАТЕЛЬНО перед тем,
+        как назвать клиенту цену, размерную сетку или сказать что-либо о наличии
+        товара, если в list_scripts() нет готовой фразы с этой информацией.
+
+        Пустой результат означает, что не подошёл запрос, а НЕ что товара нет в
+        наличии. В этом случае переспроси одним словом и ни в коем случае не
+        сообщай клиенту, что позиция закончилась.
         """
         logger.info("[tool] search_products called | type_id=%s | query=%r", type_id, query)
-        async with AsyncSessionLocal() as db:
-            products = await ProductService(db).search(query, type_id=type_id)
-        return format_products_list(products)
+        result = await run_product_search(query, type_id)
+        logger.info(
+            "[tool] search_products done | type_id=%s | query=%r | found=%s",
+            type_id, query, not result.startswith(_NO_PRODUCTS_FOUND[:20]),
+        )
+        return result
     return search_products
 
 

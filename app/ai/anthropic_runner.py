@@ -60,9 +60,12 @@ _TOOLS: list[dict] = [
     {
         "name": "search_products",
         "description": (
-            "Find products by (partial) name, e.g. 'свитшот' or 'худи черный'. "
-            "Returns price, promo price (if any) and size chart. Use before quoting an "
-            "exact price or size chart if list_scripts has no ready phrase with that info."
+            "Find products by name, e.g. 'свитшот', 'худи', 'чёрный свитшот'. Word order "
+            "and adjective gender do not matter. Returns price, promo price (if any) and "
+            "size chart. ALWAYS call before quoting a price or size chart, or saying "
+            "anything about stock, if list_scripts has no ready phrase with that info. "
+            "An empty result means the query did not match — NOT that the item is out of "
+            "stock; retry with a single word and never tell the client it ran out."
         ),
         "input_schema": {
             "type": "object",
@@ -175,12 +178,8 @@ async def _run_tool(
         from app.ai.tools import get_script_phrase_text
         return await get_script_phrase_text(args["script_id"])
     if name == "search_products":
-        from app.sales.products import ProductService
-        from app.db.session import AsyncSessionLocal
-        from app.ai.tools import format_products_list
-        async with AsyncSessionLocal() as db:
-            products = await ProductService(db).search(args["query"], type_id=type_id)
-        return format_products_list(products)
+        from app.ai.tools import run_product_search
+        return await run_product_search(args["query"], type_id)
     if name == "get_product_photo":
         from app.sales.products import ProductService
         from app.db.session import AsyncSessionLocal
