@@ -27,8 +27,29 @@ logger = logging.getLogger(__name__)
 # него начинается связка «похвала → стоимость → доставка».
 _PRAISE_CONDITION_RE = re.compile(r"похвал", re.I)
 
+# «4.2 Зафиксировали дизайн» — начало связки «фиксация → оформление → данные».
+# В выгрузке ОП условие записано как «информируем, что всю информацию по дизайну
+# зафиксировали», поэтому ловим оба порядка слов.
+_DESIGN_FIXED_CONDITION_RE = re.compile(
+    r"зафиксировали\s+дизайн|по\s+дизайну\s+зафиксировал", re.I
+)
+
 # «5.2 Ссылка на оплату» — единственный скрипт стадии payment_link со ссылкой.
 _PAYMENT_LINK_CONDITION_RE = re.compile(r"ссылк\w*\s+на\s+оплату", re.I)
+
+# Наш вопрос-сверка в конце шага «дизайн»: «…Всё верно?».
+_ASKS_CONFIRMATION_RE = re.compile(r"вс[её]\s+верно", re.I)
+
+# Согласие клиента. Отрицание («нет», «не верно») сюда не попадает — там шаг
+# ещё не закрыт и связку разворачивать рано.
+_AFFIRMATIVE_RE = re.compile(
+    r"^\W*(да|ага|угу|верно|вс[её]\s+верно|да[, ]+вс[её]\s+верно|точно|именно|"
+    r"подтверждаю|подходит|согласн\w+|оформляем|давайте)\b[\s\S]{0,20}$",
+    re.I,
+)
+
+# Шаг «5. Оформление» уже показан клиенту: названа сумма заказа и способы оплаты.
+_CHECKOUT_PRESENTED_RE = re.compile(r"сумма заказа|по оплате у нас|способ\w*\s+оплат", re.I)
 
 # Все платёжные ссылки проекта содержат «pay» в URL (monro-book-payment.online,
 # параметр ?pay=1000, заглушка example.com/pay/500); фото и CDN-ссылки — нет.
@@ -53,8 +74,48 @@ async def find_praise_script(db: AsyncSession, type_id: int | None) -> Script | 
     return await _pick(db, type_id, _PRAISE_CONDITION_RE)
 
 
+async def find_design_fixed_script(db: AsyncSession, type_id: int | None) -> Script | None:
+    return await _pick(db, type_id, _DESIGN_FIXED_CONDITION_RE)
+
+
 async def find_payment_link_script(db: AsyncSession, type_id: int | None) -> Script | None:
     return await _pick(db, type_id, _PAYMENT_LINK_CONDITION_RE)
+
+
+async def _last_outgoing(db: AsyncSession, dialog_id: int) -> str | None:
+    return await db.scalar(
+        select(Message.text)
+        .where(
+            Message.dialog_id == dialog_id,
+            Message.role.in_((MessageRole.ai, MessageRole.curator)),
+        )
+        .order_by(Message.id.desc())
+        .limit(1)
+    )
+
+
+async def design_just_confirmed(db: AsyncSession, dialog_id: int, client_text: str) -> bool:
+    """Клиент подтвердил сверку дизайна — по регламенту следом идут фиксация,
+    сумма заказа со способами оплаты и запрос данных получателя.
+
+    Без этого воронка вставала на месте: в прогоне на «да всё верно» модель
+    прислала ту же сверку ещё раз, и клиент до оформления не доехал.
+    """
+    if not _AFFIRMATIVE_RE.match((client_text or "").strip()):
+        return False
+    last = await _last_outgoing(db, dialog_id)
+    return bool(last and _ASKS_CONFIRMATION_RE.search(last))
+
+
+async def checkout_presented(db: AsyncSession, dialog_id: int) -> bool:
+    """Сумма заказа и способы оплаты уже показаны — счёт выставлять можно."""
+    rows = await db.execute(
+        select(Message.text).where(
+            Message.dialog_id == dialog_id,
+            Message.role.in_((MessageRole.ai, MessageRole.curator)),
+        )
+    )
+    return any(_CHECKOUT_PRESENTED_RE.search(t or "") for (t,) in rows.all())
 
 
 async def dialog_has_payment_link(db: AsyncSession, dialog_id: int) -> bool:

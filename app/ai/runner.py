@@ -35,7 +35,10 @@ from app.sales.price_placeholder import render_price_placeholders
 from app.sales.funnel_steps import (
     PAYMENT_LINK_RE,
     answered_inscription_question,
+    checkout_presented,
+    design_just_confirmed,
     dialog_has_payment_link,
+    find_design_fixed_script,
     find_payment_link_script,
     find_praise_script,
 )
@@ -417,6 +420,7 @@ async def run_ai(
     # обязаны уйти похвала, стоимость и доставка. Считаем ДО ответа модели — после
     # него последним нашим сообщением будет уже её реплика.
     praise_point = await answered_inscription_question(db, dialog.id)
+    design_point = await design_just_confirmed(db, dialog.id, text)
 
     logger.info(
         "[%s] calling agent | provider=%s | model=%s | context_turns=%d",
@@ -851,19 +855,26 @@ async def run_ai(
         db, dialog, output.source_script_id, client, ctx, known_slots=slots,
     ))
 
-    # Регламент ОП: следом за похвалой уходят стоимость и доставка. Если модель
-    # ответила своим текстом вместо скрипта «2. Похвала», связка не развернулась
-    # бы вовсе — цену клиент так и не увидел (диалог 52).
-    if praise_point and len(parts) == 1:
-        praise = await find_praise_script(db, type_id)
-        if praise is not None:
+    # Две точки, где регламент требует отправить следующие шаги не дожидаясь
+    # клиента: после похвалы (стоимость + доставка) и после подтверждения дизайна
+    # (оформление + данные получателя). Обе связки развернутся, только если модель
+    # сошлётся на нужный скрипт, — а она этого не делает: в диалоге 52 цена не
+    # ушла вовсе, в прогоне воронки на «да всё верно» пришла та же сверка снова.
+    # Достраиваем сами, когда своей связки в ответе не оказалось.
+    if len(parts) == 1:
+        entry = None
+        if praise_point:
+            entry = await find_praise_script(db, type_id)
+        elif design_point:
+            entry = await find_design_fixed_script(db, type_id)
+        if entry is not None:
             forced = await _build_follow_up_parts(
-                db, dialog, praise.id, client, ctx, known_slots=slots,
+                db, dialog, entry.id, client, ctx, known_slots=slots,
             )
             if forced:
                 logger.info(
-                    "[%s] funnel chain forced after praise | script=%s | parts=%d",
-                    ctx, praise.id, len(forced),
+                    "[%s] funnel chain forced | entry=%s | parts=%d",
+                    ctx, entry.id, len(forced),
                 )
                 parts.extend(forced)
 
@@ -871,12 +882,13 @@ async def run_ai(
     # модель сама выберет скрипт 5.2, нельзя: в диалоге 37 она вместо ссылки
     # написала, что ссылка «уже отправлена ранее», хотя её никогда не было.
     #
-    # Смотрим на сами контакты, а не только на стадию: классификатор помечает ход
-    # ещё как checkout ровно в тот момент, когда клиент прислал ФИО и телефон, —
-    # и счёт откладывался на неопределённый следующий ход.
+    # Условие берём из самого регламента, а не из стадии: сумма и способы оплаты
+    # уже показаны, ФИО с телефоном получены. Классификатор в этот момент держит
+    # ход то на checkout, то ещё на design, и счёт съезжал на ход, которого не было.
     contacts_ready = bool(slots.get("recipient") and slots.get("phone"))
     if (
-        (dialog.funnel_stage == "payment_link" or (contacts_ready and dialog.funnel_stage == "checkout"))
+        (dialog.funnel_stage == "payment_link"
+         or (contacts_ready and await checkout_presented(db, dialog.id)))
         and not await dialog_has_payment_link(db, dialog.id)
     ):
         link_script = await find_payment_link_script(db, type_id)
