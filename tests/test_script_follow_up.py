@@ -128,7 +128,7 @@ class TestChainDepth:
 
         parts = await _build_follow_up_parts(
             db, chain["dialog"], chain["greeting"].id, chain["client"], "test",
-            skip_city_question=True,
+            known_slots={"city": "Казань"},
         )
         assert [p.text for p in parts] == [
             "Елена, какое имя или фамилию напишем на Вашей кофте?",
@@ -144,9 +144,47 @@ class TestChainDepth:
 
         parts = await _build_follow_up_parts(
             db, chain["dialog"], chain["greeting"].id, chain["client"], "test",
-            skip_city_question=False,
+            known_slots={},
         )
         assert parts[-1].text == "В какой город доставка?"
+
+    async def test_contacts_link_skipped_when_already_given(self, db, chain):
+        """Прогон воронки: клиент прислал ФИО и телефон, и скрипт «5.1 Данные»
+        в том же ходу попросил их снова."""
+        contacts = Script(
+            condition="5.1 Данные перед оформлением",
+            phrase_text="Подскажите, пожалуйста, ФИО и номер телефона получателя посылки",
+            type_id=1,
+        )
+        db.add(contacts)
+        await db.flush()
+        chain["question"].follow_up_script_id = contacts.id
+        await db.commit()
+
+        slots = {"recipient": "Соколова Ирина Петровна", "phone": "89001234567"}
+        parts = await _build_follow_up_parts(
+            db, chain["dialog"], chain["greeting"].id, chain["client"], "test",
+            known_slots=slots,
+        )
+        assert [p.text for p in parts] == ["Елена, какое имя или фамилию напишем на Вашей кофте?"]
+
+    async def test_contacts_link_sent_when_phone_missing(self, db, chain):
+        """Скрипт спрашивает ФИО и телефон одной фразой — половины ответа мало."""
+        contacts = Script(
+            condition="5.1 Данные перед оформлением",
+            phrase_text="Подскажите, пожалуйста, ФИО и номер телефона получателя посылки",
+            type_id=1,
+        )
+        db.add(contacts)
+        await db.flush()
+        chain["question"].follow_up_script_id = contacts.id
+        await db.commit()
+
+        parts = await _build_follow_up_parts(
+            db, chain["dialog"], chain["greeting"].id, chain["client"], "test",
+            known_slots={"recipient": "Соколова Ирина Петровна"},
+        )
+        assert parts[-1].text.startswith("Подскажите")
 
     async def test_circular_chain_stops(self, db, chain):
         """Кольцевую ссылку в админке выставить легко — клиент не должен получить

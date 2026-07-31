@@ -39,7 +39,7 @@ from app.sales.funnel_steps import (
     find_payment_link_script,
     find_praise_script,
 )
-from app.sales.order_slots import ASKS_CITY_RE, collect_slots, format_slots_block
+from app.sales.order_slots import asked_slot, collect_slots, format_slots_block, slot_is_filled
 from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole, Script
 from app.utils.text import normalize_dashes, render_name_placeholder, strip_repeated_greeting
 
@@ -843,12 +843,12 @@ async def run_ai(
 
     parts = [ReplyPart(text=reply_text, image_urls=image_urls, message=ai_message)]
 
-    # Город уже назван — вопрос про него внутри дословного скрипта «2.3 Доставка»
-    # выглядит так, будто клиента не читают (диалог 52: «Казань» в 01:11, вопрос
-    # «в какой город нужна доставка?» в 01:13).
-    known_city = slots.get("city")
+    # Звенья связки уходят дословно и спрашивают своё независимо от того, что
+    # клиент уже сказал: «2.3 Доставка» переспросила город через две минуты после
+    # «Казань» (диалог 52), «5.1 Данные» — ФИО и телефон в том же ходу, где
+    # клиент их прислал. Такие звенья пропускаем.
     parts.extend(await _build_follow_up_parts(
-        db, dialog, output.source_script_id, client, ctx, skip_city_question=bool(known_city),
+        db, dialog, output.source_script_id, client, ctx, known_slots=slots,
     ))
 
     # Регламент ОП: следом за похвалой уходят стоимость и доставка. Если модель
@@ -858,7 +858,7 @@ async def run_ai(
         praise = await find_praise_script(db, type_id)
         if praise is not None:
             forced = await _build_follow_up_parts(
-                db, dialog, praise.id, client, ctx, skip_city_question=bool(known_city),
+                db, dialog, praise.id, client, ctx, known_slots=slots,
             )
             if forced:
                 logger.info(
@@ -870,7 +870,15 @@ async def run_ai(
     # Контакты получателя собраны — по регламенту следом идёт счёт. Ждать, пока
     # модель сама выберет скрипт 5.2, нельзя: в диалоге 37 она вместо ссылки
     # написала, что ссылка «уже отправлена ранее», хотя её никогда не было.
-    if dialog.funnel_stage == "payment_link" and not await dialog_has_payment_link(db, dialog.id):
+    #
+    # Смотрим на сами контакты, а не только на стадию: классификатор помечает ход
+    # ещё как checkout ровно в тот момент, когда клиент прислал ФИО и телефон, —
+    # и счёт откладывался на неопределённый следующий ход.
+    contacts_ready = bool(slots.get("recipient") and slots.get("phone"))
+    if (
+        (dialog.funnel_stage == "payment_link" or (contacts_ready and dialog.funnel_stage == "checkout"))
+        and not await dialog_has_payment_link(db, dialog.id)
+    ):
         link_script = await find_payment_link_script(db, type_id)
         if link_script is not None and not PAYMENT_LINK_RE.search(reply_text):
             part = await _render_script_part(db, dialog, link_script, client)
@@ -982,12 +990,12 @@ async def _build_follow_up_parts(
     source_script_id: int | None,
     client: Client | None,
     ctx: str,
-    skip_city_question: bool = False,
+    known_slots: dict[str, str] | None = None,
 ) -> list[ReplyPart]:
     """Все реплики связки: разворачиваем цепочку, пока у скрипта есть follow_up.
 
-    skip_city_question — город клиент уже назвал: звено, которое его спрашивает,
-    пропускаем, но цепочку не обрываем (за доставкой идут следующие шаги).
+    known_slots — факты, которые клиент уже назвал. Звено, спрашивающее такой
+    факт, пропускаем, но цепочку не обрываем: за ним идут следующие шаги.
     """
     parts: list[ReplyPart] = []
     seen: set[int] = set()
@@ -998,7 +1006,7 @@ async def _build_follow_up_parts(
             break
         seen.add(current_id)
         part, current_id = await _build_follow_up_part(
-            db, dialog, current_id, client, ctx, skip_city_question=skip_city_question,
+            db, dialog, current_id, client, ctx, known_slots=known_slots,
         )
         if part is not None:
             parts.append(part)
@@ -1013,7 +1021,7 @@ async def _build_follow_up_part(
     source_script_id: int | None,
     client: Client | None,
     ctx: str,
-    skip_city_question: bool = False,
+    known_slots: dict[str, str] | None = None,
 ) -> tuple[ReplyPart | None, int | None]:
     """Одно звено связки: реплика и id скрипта, за которым идти дальше.
 
@@ -1033,9 +1041,10 @@ async def _build_follow_up_part(
         )
         return None, None
 
-    if skip_city_question and ASKS_CITY_RE.search(follow_up.phrase_text or ""):
+    slot = asked_slot(follow_up.phrase_text or "")
+    if slot and slot_is_filled(slot, known_slots or {}):
         logger.info(
-            "[%s] follow-up %s skipped — city already known", ctx, follow_up.id,
+            "[%s] follow-up %s skipped — %s already known", ctx, follow_up.id, slot,
         )
         return None, follow_up.id
 
