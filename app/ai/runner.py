@@ -797,9 +797,10 @@ async def run_ai(
     await db.flush()
 
     reply_text = output.reply_text
-    # Модель читает текст скрипта через get_script_phrase уже с подставленными
-    # ценой и ссылкой, но иногда переносит в ответ сам плейсхолдер. Клиенту он
-    # уйти не должен ни при каких обстоятельствах.
+    # Плейсхолдеры скрипта модель переносит в ответ как есть — «Оплата доставки
+    # уже при получении. [Имя], а цвет какой выберем?» ушло клиенту в прогоне
+    # воронки. Раскрываем их на выходе, как и в дословных скриптах связки.
+    reply_text = render_name_placeholder(reply_text, client.name if client else None)
     reply_text = await render_price_placeholders(db, reply_text, type_id=type_id)
     reply_text, image_urls = _split_image_urls(reply_text)
     reply_text = _normalize_dashes(reply_text)
