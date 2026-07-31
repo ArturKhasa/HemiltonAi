@@ -94,10 +94,14 @@
             <span v-if="d.current_status" :class="['text-[10px] font-medium px-1.5 py-0.5 rounded-full', statusColor(d.current_status)]">
               {{ d.current_status }}
             </span>
+            <!-- Только когда пауза НЕ следует из статуса: «Нужен куратор» уже
+                 означает, что диалог передан человеку, и второй бейдж рядом с ним
+                 читался как дубль. Оператор, перехвативший диалог из ВК, статус не
+                 меняет — вот там метка и нужна. -->
             <span
-              v-if="d.ai_paused"
+              v-if="d.ai_paused && d.current_status !== 'Нужен куратор'"
               class="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700"
-              title="ИИ на паузе — диалог ведёт менеджер"
+              title="ИИ на паузе — отвечает живой оператор"
             >⏸ ручной</span>
           </div>
           <button
