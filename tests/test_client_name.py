@@ -41,6 +41,21 @@ class TestSurnames:
         """«Дима» кончается на «а», «Ксюша» — на «ша»: словарь проверяется первым."""
         assert usable_name(name) is not None
 
+    @pytest.mark.parametrize(
+        "name",
+        ["Ирина", "Марина", "Алина", "Полина", "Кристина", "Екатерина",
+         "Валентина", "Галина", "Ангелина", "Карина", "Регина", "Константин"],
+    )
+    def test_names_ending_like_surnames_survive(self, name):
+        """Живые имена на -ина/-ин. Без белого списка фильтр съедал их все, и
+        заметная доля клиенток слышала безличное «Вы» вместо имени."""
+        assert usable_name(name) == name
+
+    @pytest.mark.parametrize("name", ["Ева", "Лев", "Нина", "Дина", "Инна"])
+    def test_short_names_not_suffix_matched(self, name):
+        """Короче пяти букв — фамилией быть не может, окончание не смотрим."""
+        assert usable_name(name) == name
+
 
 class TestNonNames:
     @pytest.mark.parametrize(
