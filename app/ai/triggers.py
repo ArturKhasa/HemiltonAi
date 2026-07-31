@@ -89,6 +89,23 @@ def mentions_urgency(text: str | None) -> bool:
     return bool(_URGENT_RE.search((text or "").replace("ё", "е")))
 
 
+# Скрипт оплаты («Вот счёт-ссылка на 500 рублей…») ссылки НЕ содержит: живой
+# менеджер вставлял её руками из платёжной системы, генерации у нас нет. Бот
+# обещает ссылку и не присылает ничего — клиент ждёт на самом дорогом шаге.
+_LINK_PROMISE_RE = re.compile(
+    r"счет-ссылк|счёт-ссылк|ссылк\w*\s+на\s+оплат|вот\s+ссылк|"
+    r"ссылк\w*\s+действительн|по\s+qr-?коду|куар-?коду",
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+def promises_missing_payment_link(reply_text: str | None) -> bool:
+    """Ответ обещает ссылку на оплату, которой в нём нет."""
+    t = reply_text or ""
+    return bool(_LINK_PROMISE_RE.search(t)) and not _URL_RE.search(t)
+
+
 def curator_trigger(text: str | None) -> str | None:
     """Название сработавшего триггера эскалации, либо None."""
     if mentions_embroidery(text):

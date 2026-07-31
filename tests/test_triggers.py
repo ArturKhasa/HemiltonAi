@@ -5,7 +5,10 @@
 """
 import pytest
 
-from app.ai.triggers import curator_trigger, mentions_embroidery, mentions_urgency, mentions_wholesale
+from app.ai.triggers import (
+    curator_trigger, mentions_embroidery, mentions_urgency, mentions_wholesale,
+    promises_missing_payment_link,
+)
 
 
 @pytest.mark.parametrize(
@@ -119,3 +122,30 @@ def test_urgency_not_detected(text):
         pytest.skip("«не срочно» отличать от «срочно» регуляркой не выйдет — эскалация "
                     "лишний раз безопаснее пропущенного срочного заказа")
     assert mentions_urgency(text) is False
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # Текст скрипта #382 — ссылку живой менеджер вставлял руками.
+        "Вот счет-ссылка на 500 рублей. Есть удобная оплата по СБП:\n\nЖду скриншот чека",
+        "Отправляю ссылку на оплату, действительна час",
+        "Оплатить можно по QR-коду, переходить никуда не нужно",
+    ],
+)
+def test_missing_payment_link_detected(reply):
+    assert promises_missing_payment_link(reply) is True
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Вот счёт-ссылка на 500 рублей: https://pay.example.test/abc",
+        "Свитшот стоит 4 990 ₽. В какой город доставка?",
+        "Оплата возможна переводом по СБП или картой - как удобнее?",
+        "",
+        None,
+    ],
+)
+def test_no_false_link_alarm(reply):
+    assert promises_missing_payment_link(reply) is False
