@@ -1411,17 +1411,28 @@ async function loadStatuses() {
   } catch {}
 }
 
+// Счётчик открытий чата. Запросы истории летят параллельно и возвращаются в
+// произвольном порядке: без него быстрое переключение А → Б заканчивалось тем,
+// что подоспевший позже ответ по А затирал переписку Б. То же и с опросом раз в
+// 10 секунд, и с отправкой (ответ ИИ идёт 10-20 сек — за это время куратор
+// успевает уйти в другой чат, и реплики прилетали не туда).
+let _openSeq = 0
+
 async function openDialog(id) {
+  const seq = ++_openSeq
   activeDialogId.value = id
   pingState.value = null
+  messages.value = []
   const dialog = dialogs.value.find(d => d.id === id)
   aiPaused.value = dialog?.ai_paused ?? false
   vkBlocked.value = false
   const res = await api.get(`/chat/${id}/history`)
+  if (seq !== _openSeq) return  // за время запроса открыли другой чат
   messages.value = res.data
   await scrollBottom()
   try {
     const dRes = await api.get(`/dialogs/${id}`)
+    if (seq !== _openSeq) return
     pingState.value = dRes.data.ping_state
     aiPaused.value = dRes.data.ai_paused ?? false
     vkBlocked.value = dRes.data.vk_blocked ?? false
@@ -1434,13 +1445,14 @@ const aiPauseLoading = ref(false)
 
 // Пауза ставится автоматически, когда живой оператор отвечает из ВК; здесь куратор снимает/ставит её вручную.
 async function toggleAiPause(paused) {
-  if (!activeDialogId.value) return
+  const dialogId = activeDialogId.value
+  if (!dialogId) return
   aiPauseLoading.value = true
   try {
-    const res = await api.post(`/dialogs/${activeDialogId.value}/ai-pause`, { paused })
-    aiPaused.value = res.data.ai_paused
-    const d = dialogs.value.find(d => d.id === activeDialogId.value)
+    const res = await api.post(`/dialogs/${dialogId}/ai-pause`, { paused })
+    const d = dialogs.value.find(d => d.id === dialogId)
     if (d) d.ai_paused = res.data.ai_paused
+    if (activeDialogId.value === dialogId) aiPaused.value = res.data.ai_paused
   } catch (e) {
     alert('Ошибка: ' + (e.response?.data?.detail || e.message))
   } finally {
@@ -1449,11 +1461,12 @@ async function toggleAiPause(paused) {
 }
 
 async function changeStatus(newStatusName) {
-  if (!activeDialogId.value || !newStatusName) return
+  const dialogId = activeDialogId.value
+  if (!dialogId || !newStatusName) return
   statusChanging.value = true
   try {
-    await api.post(`/dialogs/${activeDialogId.value}/status`, { new_status: newStatusName })
-    const d = dialogs.value.find(d => d.id === activeDialogId.value)
+    await api.post(`/dialogs/${dialogId}/status`, { new_status: newStatusName })
+    const d = dialogs.value.find(d => d.id === dialogId)
     if (d) d.current_status = newStatusName
   } catch (e) {
     alert('Ошибка: ' + (e.response?.data?.detail || e.message))
@@ -1502,6 +1515,9 @@ function removeFile(index) {
 async function onFilesSelected(e) {
   const files = Array.from(e.target.files)
   e.target.value = ''
+  // Фиксируем чат на момент выбора файлов: загрузка идёт по одному, и без этого
+  // вложение уходило бы в тот диалог, который открыт к моменту ответа сервера.
+  const dialogId = activeDialogId.value
   for (const file of files) {
     const preview = URL.createObjectURL(file)
     const idx = pendingFiles.value.length
@@ -1509,7 +1525,7 @@ async function onFilesSelected(e) {
     try {
       const form = new FormData()
       form.append('file', file)
-      const res = await api.post(`/chat/${activeDialogId.value}/upload`, form, {
+      const res = await api.post(`/chat/${dialogId}/upload`, form, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       pendingFiles.value[idx].url = res.data.url
@@ -1541,13 +1557,17 @@ async function sendMessage() {
   sending.value = true
   await scrollBottom()
 
+  const seq = _openSeq
+  const dialogId = activeDialogId.value
   try {
-    const res = await api.post(`/chat/${activeDialogId.value}/message`, { text: text || '[фото]', files })
+    const res = await api.post(`/chat/${dialogId}/message`, { text: text || '[фото]', files })
+    if (seq !== _openSeq) return  // ушли в другой чат, пока ИИ думал
     for (const msg of res.data) {
       if (msg.role !== 'client') messages.value.push(msg)
     }
     await loadDialogs()
   } catch (e) {
+    if (seq !== _openSeq) return
     messages.value.push({
       id: Date.now(), role: 'ai',
       text: 'Ошибка: ' + (e.response?.data?.detail || e.message),
@@ -1589,11 +1609,12 @@ async function deleteDialog(id) {
 }
 
 async function resetPingState() {
-  if (!activeDialogId.value) return
+  const dialogId = activeDialogId.value
+  if (!dialogId) return
   resetPingLoading.value = true
   try {
-    await api.delete(`/dialogs/${activeDialogId.value}/ping-state`)
-    pingState.value = null
+    await api.delete(`/dialogs/${dialogId}/ping-state`)
+    if (activeDialogId.value === dialogId) pingState.value = null
     showResetPing.value = false
   } finally {
     resetPingLoading.value = false
@@ -1667,14 +1688,17 @@ function formatMsgTime(d) {
 let _pollInterval = null
 
 async function pollTick() {
+  const seq = _openSeq
+  const dialogId = activeDialogId.value
   await loadDialogs()
-  if (activeDialogId.value) {
-    const d = dialogs.value.find(d => d.id === activeDialogId.value)
+  if (dialogId && seq === _openSeq && activeDialogId.value === dialogId) {
+    const d = dialogs.value.find(d => d.id === dialogId)
     if (d && d.ai_paused !== undefined) aiPaused.value = d.ai_paused
     try {
       const el = messagesEl.value
       const atBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 60
-      const res = await api.get(`/chat/${activeDialogId.value}/history`)
+      const res = await api.get(`/chat/${dialogId}/history`)
+      if (seq !== _openSeq || activeDialogId.value !== dialogId) return
       messages.value = res.data
       if (atBottom) await scrollBottom()
     } catch {}
