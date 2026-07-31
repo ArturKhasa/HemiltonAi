@@ -13,9 +13,11 @@ from app.sales.funnel_steps import (
     checkout_presented,
     design_just_confirmed,
     dialog_has_payment_link,
+    find_contacts_script,
     find_design_fixed_script,
     find_payment_link_script,
     find_praise_script,
+    payment_option_chosen,
 )
 
 
@@ -148,6 +150,40 @@ class TestDesignConfirmation:
         ))
         await db.commit()
         assert not await design_just_confirmed(db, funnel["dialog"].id, "да")
+
+
+class TestPaymentOptionChosen:
+    """«5. Оформление» заканчивается вопросом про способ оплаты, и от ответа
+    зависит сумма в счёте. Запрос ФИО раньше уходил тем же ходом — то есть
+    «Отлично, тогда…» было реакцией на выбор, которого клиент не делал."""
+
+    async def _ask_choice(self, db, funnel):
+        db.add(Message(
+            dialog_id=funnel["dialog"].id, role=MessageRole.ai,
+            text="Удобно оплатить всю сумму сразу с подарком или сначала 500 рублей?",
+        ))
+        await db.commit()
+
+    async def test_contacts_script_found(self, db, funnel):
+        found = await find_contacts_script(db, type_id=1)
+        assert found is not None and found.id == funnel["contacts"].id
+
+    @pytest.mark.parametrize("answer", ["500", "давайте 500", "частями", "всю сумму сразу", "второй"])
+    async def test_choice_recognised(self, db, funnel, answer):
+        await self._ask_choice(db, funnel)
+        assert await payment_option_chosen(db, funnel["dialog"].id, answer)
+
+    @pytest.mark.parametrize("answer", ["дорого", "а можно дешевле?", "подумаю", "нет"])
+    async def test_objection_is_not_a_choice(self, db, funnel, answer):
+        await self._ask_choice(db, funnel)
+        assert not await payment_option_chosen(db, funnel["dialog"].id, answer)
+
+    async def test_choice_without_our_question_ignored(self, db, funnel):
+        db.add(Message(
+            dialog_id=funnel["dialog"].id, role=MessageRole.ai, text="Какой цвет выберем?",
+        ))
+        await db.commit()
+        assert not await payment_option_chosen(db, funnel["dialog"].id, "давайте 500")
 
 
 class TestCheckoutPresented:

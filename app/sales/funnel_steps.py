@@ -51,6 +51,23 @@ _AFFIRMATIVE_RE = re.compile(
 # Шаг «5. Оформление» уже показан клиенту: названа сумма заказа и способы оплаты.
 _CHECKOUT_PRESENTED_RE = re.compile(r"сумма заказа|по оплате у нас|способ\w*\s+оплат", re.I)
 
+# «5.1 Данные перед оформлением» — запрос ФИО и телефона получателя.
+_CONTACTS_CONDITION_RE = re.compile(r"данные\s+перед\s+оформлением", re.I)
+
+# Вопрос из «5. Оформление»: «Удобно оплатить всю сумму сразу с подарком или
+# сначала 500 рублей?».
+_ASKS_PAYMENT_CHOICE_RE = re.compile(
+    r"всю сумму сразу|сначала 500|вс[её]\s+сразу\s+или", re.I
+)
+
+# Клиент выбрал вариант оплаты. Список закрытый: на «дорого» или «а можно
+# дешевле» шаг не закрыт, и данные получателя запрашивать рано.
+_PAYMENT_CHOICE_RE = re.compile(
+    r"\b(500|пятьсот|частями|част\w+|рассрочк\w+|всю\s+сумму|полность\w+|сразу|"
+    r"перв\w+|втор\w+|подарок|да|давайте|хорошо|ок|окей)\b",
+    re.I,
+)
+
 # Все платёжные ссылки проекта содержат «pay» в URL (monro-book-payment.online,
 # параметр ?pay=1000, заглушка example.com/pay/500); фото и CDN-ссылки — нет.
 PAYMENT_LINK_RE = re.compile(r"https?://\S*pay", re.IGNORECASE)
@@ -105,6 +122,25 @@ async def design_just_confirmed(db: AsyncSession, dialog_id: int, client_text: s
         return False
     last = await _last_outgoing(db, dialog_id)
     return bool(last and _ASKS_CONFIRMATION_RE.search(last))
+
+
+async def find_contacts_script(db: AsyncSession, type_id: int | None) -> Script | None:
+    return await _pick(db, type_id, _CONTACTS_CONDITION_RE)
+
+
+async def payment_option_chosen(db: AsyncSession, dialog_id: int, client_text: str) -> bool:
+    """Клиент ответил на вопрос «всю сумму сразу или сначала 500 рублей?».
+
+    Только теперь по регламенту уместно «Отлично, тогда подскажите ФИО и номер
+    телефона»: и само «тогда», и сумма в счёте зависят от этого ответа. Раньше
+    оба сообщения уходили одним ходом, и вопрос про способ оплаты оставался без
+    ответа — клиент читал реакцию на выбор, которого не делал.
+    """
+    text = (client_text or "").strip()
+    if not text or "?" in text or not _PAYMENT_CHOICE_RE.search(text):
+        return False
+    last = await _last_outgoing(db, dialog_id)
+    return bool(last and _ASKS_PAYMENT_CHOICE_RE.search(last))
 
 
 async def checkout_presented(db: AsyncSession, dialog_id: int) -> bool:

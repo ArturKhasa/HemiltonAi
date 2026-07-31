@@ -38,9 +38,11 @@ from app.sales.funnel_steps import (
     checkout_presented,
     design_just_confirmed,
     dialog_has_payment_link,
+    find_contacts_script,
     find_design_fixed_script,
     find_payment_link_script,
     find_praise_script,
+    payment_option_chosen,
 )
 from app.sales.order_slots import asked_slot, collect_slots, format_slots_block, slot_is_filled
 from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole, Script
@@ -57,6 +59,26 @@ _BARE_IMAGE_URL_RE = re.compile(
     re.IGNORECASE,
 )
 _IMAGES_BLOCK_RE = re.compile(r"\n*<<<IMAGES>>>\n?(.*?)\n?<<<END_IMAGES>>>", re.DOTALL)
+
+# Токен вложения из текста скрипта. Его разбирает app.vk.sender при отправке.
+_PHOTO_TOKEN_RE = re.compile(r"\[photo-[^\]\s]+\]")
+
+
+def _carry_over_script_photos(reply_text: str, script_text: str) -> str:
+    """Вернуть в ответ фото скрипта, которые модель из него выбросила.
+
+    Скрипт «5. Оформление» заканчивается словами «Прикрепляю наши отзывы!» и
+    тремя токенами фото. Модель берёт текст, фразу про отзывы оставляет, а
+    токены теряет — клиент получает обещание без единой картинки (диалоги 59 и
+    64). Дословные звенья связки этим не страдают: там текст не переписывается.
+
+    Токены дописываются одним блоком в конец: ВК показывает вложения отдельно от
+    текста, и место токена внутри сообщения всё равно ни на что не влияет.
+    """
+    missing = [t for t in _PHOTO_TOKEN_RE.findall(script_text or "") if t not in (reply_text or "")]
+    if not missing:
+        return reply_text
+    return (reply_text or "").rstrip() + "\n\n" + "\n".join(missing)
 
 
 def _fit(value: str | None, limit: int) -> str | None:
@@ -421,6 +443,7 @@ async def run_ai(
     # него последним нашим сообщением будет уже её реплика.
     praise_point = await answered_inscription_question(db, dialog.id)
     design_point = await design_just_confirmed(db, dialog.id, text)
+    payment_choice_point = await payment_option_chosen(db, dialog.id, text)
 
     logger.info(
         "[%s] calling agent | provider=%s | model=%s | context_turns=%d",
@@ -806,6 +829,17 @@ async def run_ai(
     # воронки. Раскрываем их на выходе, как и в дословных скриптах связки.
     reply_text = render_name_placeholder(reply_text, client.name if client else None)
     reply_text = await render_price_placeholders(db, reply_text, type_id=type_id)
+
+    # Фото скрипта, на котором построен ответ, не должны потеряться при пересказе.
+    if output.source_script_id:
+        _src = await db.get(Script, output.source_script_id)
+        if _src is not None:
+            _before = reply_text
+            reply_text = _carry_over_script_photos(reply_text, _src.phrase_text or "")
+            if reply_text != _before:
+                logger.info(
+                    "[%s] script photos carried over | script=%s", ctx, output.source_script_id,
+                )
     reply_text, image_urls = _split_image_urls(reply_text)
     reply_text = _normalize_dashes(reply_text)
 
@@ -877,6 +911,18 @@ async def run_ai(
                     ctx, entry.id, len(forced),
                 )
                 parts.extend(forced)
+
+    # Клиент выбрал способ оплаты — теперь и только теперь уместен запрос данных
+    # получателя. Отдельным шагом, а не связкой к «5. Оформление»: тот скрипт
+    # заканчивается вопросом про способ оплаты, и оба сообщения одним ходом
+    # означали реакцию на выбор, которого клиент ещё не сделал.
+    if payment_choice_point and len(parts) == 1:
+        contacts = await find_contacts_script(db, type_id)
+        if contacts is not None and not slot_is_filled("recipient", slots):
+            part = await _render_script_part(db, dialog, contacts, client)
+            if part is not None:
+                logger.info("[%s] contacts request forced | script=%s", ctx, contacts.id)
+                parts.append(part)
 
     # Контакты получателя собраны — по регламенту следом идёт счёт. Ждать, пока
     # модель сама выберет скрипт 5.2, нельзя: в диалоге 37 она вместо ссылки
