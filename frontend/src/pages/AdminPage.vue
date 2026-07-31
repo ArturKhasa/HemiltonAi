@@ -9,7 +9,7 @@
         <button
           v-if="auth.user?.role === 'admin'"
           @click="$router.push('/admin/spending')"
-          class="text-xs text-blue-500 hover:text-blue-700 font-medium"
+          class="text-xs text-brand-700 hover:text-brand-800 font-medium"
         >Расход по направлениям</button>
         <button @click="auth.logout(); $router.push('/login')" class="text-xs text-gray-400 hover:text-gray-600">Выйти</button>
       </div>
@@ -24,7 +24,7 @@
           :class="[
             'px-4 py-2 text-sm font-medium rounded-lg transition-colors',
             activeSection === sec.id
-              ? 'bg-blue-600 text-white'
+              ? 'bg-brand-600 text-white'
               : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
           ]"
         >{{ sec.label }}</button>
@@ -40,7 +40,7 @@
             :class="[
               'px-4 py-3 text-sm font-medium whitespace-nowrap border-b-2 transition-colors',
               activeTypeId === tab.id
-                ? 'border-blue-600 text-blue-600'
+                ? 'border-brand-600 text-brand-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700'
             ]"
           >{{ tab.label }}</button>
@@ -54,7 +54,7 @@
               <label class="text-xs text-gray-400">Тег</label>
               <select
                 v-model="activeTag"
-                class="border rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                class="border rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
               >
                 <option :value="null">Все</option>
                 <option value="__none__">Без тега</option>
@@ -62,7 +62,7 @@
               </select>
             </div>
           </div>
-          <button @click="openCreate" class="bg-blue-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-blue-700 font-medium">
+          <button @click="openCreate" class="bg-brand-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-brand-700 font-medium">
             + Создать скрипт
           </button>
         </div>
@@ -94,7 +94,7 @@
                   <p class="truncate" :title="s.condition">{{ s.condition }}</p>
                   <p
                     v-if="s.follow_up_script_id"
-                    class="text-xs text-emerald-600 mt-0.5"
+                    class="text-xs text-brand-600 mt-0.5"
                     title="Уйдёт вторым сообщением сразу за этим"
                   >следом → #{{ s.follow_up_script_id }}</p>
                 </td>
@@ -130,7 +130,7 @@
                 </td>
                 <td class="px-4 py-3">
                   <div class="flex gap-3">
-                    <button @click="openEdit(s)" class="text-blue-500 hover:text-blue-700 text-xs font-medium">Ред.</button>
+                    <button @click="openEdit(s)" class="text-brand-700 hover:text-brand-800 text-xs font-medium">Ред.</button>
                     <button @click="confirmDelete(s)" class="text-red-400 hover:text-red-600 text-xs font-medium">Удал.</button>
                   </div>
                 </td>
@@ -147,7 +147,7 @@
             <span class="text-sm text-gray-500">{{ vkGroups.length }} групп</span>
             <span class="text-xs text-gray-400">Адрес вебхука для Callback API: <span class="font-mono text-gray-500">https://&lt;домен&gt;/webhook/vk</span></span>
           </div>
-          <button @click="openGroupCreate" class="bg-blue-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-blue-700 font-medium">
+          <button @click="openGroupCreate" class="bg-brand-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-brand-700 font-medium">
             + Добавить группу
           </button>
         </div>
@@ -184,7 +184,7 @@
                   </span>
                 </td>
                 <td class="px-4 py-3">
-                  <span v-if="g.dialog_type_id" class="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-medium">
+                  <span v-if="g.dialog_type_id" class="px-2 py-0.5 rounded-full bg-brand-100 text-brand-700 text-xs font-medium">
                     {{ dialogTypeName(g.dialog_type_id) }}
                   </span>
                   <span v-else class="text-gray-300 text-xs">—</span>
@@ -202,7 +202,7 @@
                 </td>
                 <td class="px-4 py-3">
                   <div class="flex gap-3">
-                    <button @click="openGroupEdit(g)" class="text-blue-500 hover:text-blue-700 text-xs font-medium">Ред.</button>
+                    <button @click="openGroupEdit(g)" class="text-brand-700 hover:text-brand-800 text-xs font-medium">Ред.</button>
                     <button @click="groupDeleteTarget = g" class="text-red-400 hover:text-red-600 text-xs font-medium">Удал.</button>
                   </div>
                 </td>
@@ -223,7 +223,7 @@
         <div class="p-6 space-y-4">
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Тип</label>
-            <select v-model="form.type_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+            <select v-model="form.type_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white">
               <option :value="null">— не задан —</option>
               <option v-for="t in dialogTypes" :key="t.id" :value="t.id">{{ t.display_name }}</option>
             </select>
@@ -233,7 +233,7 @@
             <textarea
               v-model="form.condition"
               rows="6"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none"
               placeholder="Текст условия..."
             ></textarea>
           </div>
@@ -242,7 +242,7 @@
             <textarea
               v-model="form.phrase_text"
               rows="4"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none"
               placeholder="Текст, который отправится клиенту..."
             ></textarea>
             <p class="text-xs text-gray-400 mt-1">Поддерживается spintax: {вариант1|вариант2} — выбирается случайный вариант.</p>
@@ -251,13 +251,13 @@
             <label class="block text-xs text-gray-500 mb-1.5">Маркетинговый тег</label>
             <input
               v-model="form.marketing_tag"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
               placeholder="Без # — пусто = для всех клиентов"
             />
           </div>
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Стадия воронки</label>
-            <select v-model="form.funnel_stage" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+            <select v-model="form.funnel_stage" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white">
               <option value="">— любая (показывать всегда) —</option>
               <option v-for="st in FUNNEL_STAGES" :key="st.value" :value="st.value">{{ st.label }}</option>
             </select>
@@ -265,7 +265,7 @@
           </div>
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Отправить следом</label>
-            <select v-model="form.follow_up_script_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+            <select v-model="form.follow_up_script_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white">
               <option :value="0">— ничего —</option>
               <option v-for="s in followUpOptions" :key="s.id" :value="s.id">
                 #{{ s.id }} — {{ s.condition.slice(0, 70) }}
@@ -283,7 +283,7 @@
           <button
             @click="saveScript"
             :disabled="saving || !form.condition.trim() || !form.phrase_text.trim()"
-            class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
+            class="px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 font-medium"
           >
             {{ saving ? 'Сохранение...' : (editScript ? 'Сохранить' : 'Создать') }}
           </button>
@@ -324,7 +324,7 @@
                 v-model.number="groupForm.group_id"
                 type="number"
                 :disabled="!!editGroup"
-                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-400"
+                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:bg-gray-100 disabled:text-gray-400"
                 placeholder="123456789"
               />
             </div>
@@ -332,7 +332,7 @@
               <label class="block text-xs text-gray-500 mb-1.5">Название <span class="text-red-500">*</span></label>
               <input
                 v-model="groupForm.name"
-                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
                 placeholder="Моё сообщество"
               />
             </div>
@@ -343,7 +343,7 @@
             </label>
             <input
               v-model="groupForm.access_token"
-              class="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+              class="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
               :placeholder="editGroup ? 'оставить текущий' : 'vk1.a....'"
             />
           </div>
@@ -352,7 +352,7 @@
               <label class="block text-xs text-gray-500 mb-1.5">Код подтверждения <span class="text-red-500">*</span></label>
               <input
                 v-model="groupForm.confirmation_code"
-                class="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                class="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
                 placeholder="a1b2c3d4"
               />
             </div>
@@ -360,14 +360,14 @@
               <label class="block text-xs text-gray-500 mb-1.5">Секретный ключ <span class="text-gray-400">(необязательно)</span></label>
               <input
                 v-model="groupForm.secret_key"
-                class="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                class="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
                 :placeholder="editGroup?.has_secret ? 'оставить текущий' : 'secret'"
               />
             </div>
           </div>
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Направление</label>
-            <select v-model="groupForm.dialog_type_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+            <select v-model="groupForm.dialog_type_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white">
               <option :value="null">— не задано —</option>
               <option v-for="t in dialogTypes" :key="t.id" :value="t.id">{{ t.display_name }}</option>
             </select>
@@ -388,7 +388,7 @@
           <button
             @click="saveGroup"
             :disabled="groupSaving || !canSaveGroup"
-            class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
+            class="px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 font-medium"
           >
             {{ groupSaving ? 'Сохранение...' : (editGroup ? 'Сохранить' : 'Добавить') }}
           </button>

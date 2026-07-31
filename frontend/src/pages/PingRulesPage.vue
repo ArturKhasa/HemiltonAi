@@ -18,7 +18,7 @@
             :class="[
               'px-4 py-3 text-sm font-medium whitespace-nowrap border-b-2 transition-colors',
               activeTypeId === tab.id
-                ? 'border-blue-600 text-blue-600'
+                ? 'border-brand-600 text-brand-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700'
             ]"
           >{{ tab.label }}</button>
@@ -46,7 +46,7 @@
               <label class="text-xs text-gray-400">Тег</label>
               <select
                 v-model="activeTag"
-                class="border rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                class="border rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
               >
                 <option :value="null">Все</option>
                 <option value="__none__">Без тега</option>
@@ -54,7 +54,7 @@
               </select>
             </div>
           </div>
-          <button @click="openCreate" class="bg-blue-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-blue-700 font-medium">
+          <button @click="openCreate" class="bg-brand-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-brand-700 font-medium">
             + Добавить шаг
           </button>
         </div>
@@ -114,7 +114,7 @@
                 </td>
                 <td class="px-4 py-3">
                   <div class="flex gap-3">
-                    <button @click="openEdit(r)" class="text-blue-500 hover:text-blue-700 text-xs font-medium">Ред.</button>
+                    <button @click="openEdit(r)" class="text-brand-700 hover:text-brand-800 text-xs font-medium">Ред.</button>
                     <button @click="confirmDelete(r)" class="text-red-400 hover:text-red-600 text-xs font-medium">Удал.</button>
                   </div>
                 </td>
@@ -136,7 +136,7 @@
           <div class="grid grid-cols-2 gap-4">
             <div>
               <label class="block text-xs text-gray-500 mb-1.5">Тип диалога</label>
-              <select v-model="form.type_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+              <select v-model="form.type_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white">
                 <option :value="null">— не задан —</option>
                 <option v-for="t in dialogTypes" :key="t.id" :value="t.id">{{ t.display_name }}</option>
               </select>
@@ -146,7 +146,7 @@
               <input
                 v-model="form.funnel_type"
                 list="funnel-list"
-                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
                 placeholder="regular"
               />
               <datalist id="funnel-list">
@@ -160,7 +160,7 @@
               v-model="form.marketing_tag"
               list="tag-list"
               :disabled="forAllTags"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-400"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:bg-gray-100 disabled:text-gray-400"
               :placeholder="forAllTags ? 'Все существующие теги' : '#ПРОФЕССИЯ'"
             />
             <datalist id="tag-list">
@@ -180,7 +180,7 @@
                 v-model.number="form.step"
                 type="number"
                 min="0"
-                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
                 :class="{ 'border-amber-400 focus:ring-amber-400': stepConflict }"
                 placeholder="0"
               />
@@ -194,7 +194,7 @@
                 v-model.number="form.delay_seconds"
                 type="number"
                 min="0"
-                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
                 placeholder="1200"
               />
               <p v-if="form.delay_seconds" class="text-xs text-gray-400 mt-1">{{ formatDelay(form.delay_seconds) }}</p>
@@ -205,7 +205,7 @@
             <textarea
               v-model="form.phrase_text"
               rows="4"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none"
               placeholder="Текст сообщения шага..."
             ></textarea>
             <p class="text-xs text-gray-400 mt-1">Поддерживается spintax: {вариант1|вариант2} — выбирается случайный вариант.</p>
@@ -218,7 +218,7 @@
             <textarea
               v-model="form.manual_text"
               rows="4"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none"
               :class="{ 'border-red-400': textRequired && !form.manual_text?.trim() }"
               placeholder="Текст сообщения..."
             ></textarea>
@@ -236,7 +236,7 @@
           <button
             @click="saveRule"
             :disabled="saving || !canSave"
-            class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
+            class="px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 font-medium"
           >
             {{ saving ? 'Сохранение...' : (editRule ? 'Сохранить' : 'Создать') }}
           </button>

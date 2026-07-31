@@ -5,19 +5,19 @@
       <form @submit.prevent="submit" class="space-y-4">
         <div>
           <label class="block text-sm font-medium mb-1">Email</label>
-          <input v-model="email" type="email" required class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          <input v-model="email" type="email" required class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500" />
         </div>
         <div>
           <label class="block text-sm font-medium mb-1">Пароль</label>
-          <input v-model="password" type="password" required class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          <input v-model="password" type="password" required class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500" />
         </div>
         <p v-if="error" class="text-red-500 text-sm">{{ error }}</p>
-        <button type="submit" :disabled="loading" class="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50">
+        <button type="submit" :disabled="loading" class="w-full bg-brand-600 text-white py-2 rounded-lg hover:bg-brand-700 disabled:opacity-50">
           {{ loading ? 'Вход...' : 'Войти' }}
         </button>
       </form>
       <p class="mt-4 text-center text-sm">
-        Нет аккаунта? <RouterLink to="/register" class="text-blue-600 hover:underline">Зарегистрироваться</RouterLink>
+        Нет аккаунта? <RouterLink to="/register" class="text-brand-600 hover:underline">Зарегистрироваться</RouterLink>
       </p>
     </div>
   </div>

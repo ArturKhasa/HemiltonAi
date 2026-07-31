@@ -36,7 +36,7 @@
       </div>
 
       <div class="p-3 border-b flex gap-2">
-        <button v-if="filterShowTest" @click="showNewChat = true" class="flex-1 bg-blue-600 text-white py-2 rounded-lg text-sm hover:bg-blue-700 font-medium">
+        <button v-if="filterShowTest" @click="showNewChat = true" class="flex-1 bg-brand-600 text-white py-2 rounded-lg text-sm hover:bg-brand-700 font-medium">
           + Новый чат
         </button>
         <button
@@ -44,7 +44,7 @@
           :class="[
             'px-3 py-2 rounded-lg text-sm border transition-colors',
             hasActiveFilters
-              ? 'border-blue-400 text-blue-600 bg-blue-50'
+              ? 'border-brand-400 text-brand-600 bg-brand-50'
               : 'border-gray-200 text-gray-500 hover:bg-gray-50'
           ]"
           title="Фильтры"
@@ -55,7 +55,7 @@
         <button
           v-if="filterShowReal"
           @click="openPingReview"
-          class="px-3 py-2 rounded-lg text-sm border border-blue-400 text-blue-600 bg-blue-50 hover:bg-blue-100 font-medium transition-colors"
+          class="px-3 py-2 rounded-lg text-sm border border-brand-400 text-brand-600 bg-brand-50 hover:bg-brand-100 font-medium transition-colors"
           title="Просмотр реальных диалогов"
         >Пинг</button>
         <button v-if="filterShowTest && !filterShowReal" @click="showDeleteAll = true" :disabled="dialogs.length === 0" class="px-3 py-2 rounded-lg text-sm border border-red-200 text-red-500 hover:bg-red-50 disabled:opacity-30 disabled:cursor-not-allowed" title="Удалить все чаты">
@@ -74,7 +74,7 @@
           @click="openDialog(d.id)"
           :class="[
             'group relative w-full text-left px-4 py-3 border-b hover:bg-gray-50 transition-colors cursor-pointer',
-            activeDialogId === d.id ? 'bg-blue-50 border-l-2 border-l-blue-500' : ''
+            activeDialogId === d.id ? 'bg-brand-50 border-l-2 border-l-brand-500' : ''
           ]"
         >
           <p class="text-sm font-medium text-gray-800 truncate pr-6">{{ d.vk_user_id }}</p>
@@ -88,7 +88,7 @@
                 : d.ai_provider === 'minimax'
                   ? 'bg-purple-100 text-purple-700'
                   : d.ai_provider === 'qwen'
-                    ? 'bg-blue-100 text-blue-700'
+                    ? 'bg-brand-100 text-brand-700'
                     : 'bg-green-100 text-green-700'
             ]">{{ d.ai_provider === 'anthropic' ? 'Claude' : d.ai_provider === 'minimax' ? 'MiniMax' : d.ai_provider === 'qwen' ? 'Qwen' : 'ChatGPT' }}</span>
             <span v-if="d.current_status" :class="['text-[10px] font-medium px-1.5 py-0.5 rounded-full', statusColor(d.current_status)]">
@@ -121,7 +121,7 @@
               :value="activeDialog?.current_status || ''"
               @change="changeStatus($event.target.value)"
               :disabled="statusChanging"
-              class="text-xs border rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              class="text-xs border rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50"
             >
               <option value="" disabled>— не задан —</option>
               <option v-for="s in activeStatuses" :key="s.id" :value="s.name">{{ s.name }}</option>
@@ -159,7 +159,7 @@
               <span
                 v-for="tag in activeDialog.marketing_tags"
                 :key="tag"
-                class="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200"
+                class="text-xs px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200"
               >{{ tag }}</span>
             </div>
             <span class="text-xs text-gray-400">Dialog #{{ activeDialogId }}</span>
@@ -218,7 +218,7 @@
               <div :class="[
                 'max-w-xl px-4 py-2.5 rounded-2xl text-sm shadow-sm',
                 msg.role === 'client'
-                  ? 'bg-blue-600 text-white rounded-br-sm'
+                  ? 'bg-brand-600 text-white rounded-br-sm'
                   : msg.role === 'curator'
                     ? 'bg-purple-50 border border-purple-200 rounded-bl-sm text-gray-800'
                     : msg.is_ping
@@ -239,7 +239,7 @@
                     :href="part.value"
                     target="_blank"
                     rel="noopener"
-                    class="block mt-1 text-blue-600 underline break-all"
+                    class="block mt-1 text-brand-600 underline break-all"
                   >{{ part.value }}</a>
                   <span v-else class="inline-block mt-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 text-xs">{{ part.value }}</span>
                 </template>
@@ -278,7 +278,7 @@
                     <span v-if="msg.need_curator" class="text-orange-500 font-medium">⚠ На проверку куратору</span>
                   </div>
                   <div v-else></div>
-                  <span v-if="msg.created_at" :class="['text-xs ml-auto', msg.role === 'client' ? 'text-blue-200' : 'text-gray-400']">
+                  <span v-if="msg.created_at" :class="['text-xs ml-auto', msg.role === 'client' ? 'text-brand-200' : 'text-gray-400']">
                     {{ formatMsgTime(msg.created_at) }}
                   </span>
                 </div>
@@ -343,9 +343,9 @@
               @keydown.enter.exact.prevent="sendMessage"
               placeholder="Введите сообщение... (Enter — отправить)"
               rows="1"
-              class="flex-1 border rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none disabled:opacity-50"
+              class="flex-1 border rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none disabled:opacity-50"
             />
-            <button type="submit" :disabled="sending || (!input.trim() && !pendingFiles.length) || pendingFiles.some(f => f.uploading)" class="bg-blue-600 text-white px-5 py-2.5 rounded-xl hover:bg-blue-700 disabled:opacity-50 text-sm font-medium">
+            <button type="submit" :disabled="sending || (!input.trim() && !pendingFiles.length) || pendingFiles.some(f => f.uploading)" class="bg-brand-600 text-white px-5 py-2.5 rounded-xl hover:bg-brand-700 disabled:opacity-50 text-sm font-medium">
               Отправить
             </button>
           </form>
@@ -357,7 +357,7 @@
       <div v-else class="flex-1 flex items-center justify-center">
         <div class="text-center text-gray-400">
           <p class="text-lg mb-2">Выберите чат или создайте новый</p>
-          <button v-if="filterShowTest" @click="showNewChat = true" class="bg-blue-600 text-white px-6 py-2.5 rounded-xl text-sm hover:bg-blue-700">
+          <button v-if="filterShowTest" @click="showNewChat = true" class="bg-brand-600 text-white px-6 py-2.5 rounded-xl text-sm hover:bg-brand-700">
             + Новый чат
           </button>
         </div>
@@ -422,7 +422,7 @@
             <select
               :value="dialogTypeFilterValue"
               @change="setDialogTypeFilter($event.target.value)"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
             >
               <option value="test">Тестовые диалоги</option>
               <option v-if="canSeeRealDialogs" value="real">Реальные диалоги</option>
@@ -451,7 +451,7 @@
                     @click="filterDatePreset = preset.value; showDateDropdown = false"
                     :class="[
                       'w-full text-left px-4 py-2 text-sm hover:bg-gray-50 transition-colors',
-                      filterDatePreset === preset.value ? 'text-blue-600 font-medium' : 'text-gray-700'
+                      filterDatePreset === preset.value ? 'text-brand-600 font-medium' : 'text-gray-700'
                     ]"
                   >{{ preset.label }}</button>
                 </div>
@@ -459,11 +459,11 @@
               <div v-if="filterDatePreset === 'custom'" class="flex gap-2 mt-2">
                 <div class="flex-1">
                   <label class="text-xs text-gray-500 mb-1 block">От</label>
-                  <input type="date" v-model="filterDateFrom" class="w-full border rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  <input type="date" v-model="filterDateFrom" class="w-full border rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
                 </div>
                 <div class="flex-1">
                   <label class="text-xs text-gray-500 mb-1 block">До</label>
-                  <input type="date" v-model="filterDateTo" class="w-full border rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  <input type="date" v-model="filterDateTo" class="w-full border rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
                 </div>
               </div>
             </div>
@@ -490,7 +490,7 @@
                     @click="filterClientDatePreset = preset.value; showClientDateDropdown = false"
                     :class="[
                       'w-full text-left px-4 py-2 text-sm hover:bg-gray-50 transition-colors',
-                      filterClientDatePreset === preset.value ? 'text-blue-600 font-medium' : 'text-gray-700'
+                      filterClientDatePreset === preset.value ? 'text-brand-600 font-medium' : 'text-gray-700'
                     ]"
                   >{{ preset.label }}</button>
                 </div>
@@ -498,11 +498,11 @@
               <div v-if="filterClientDatePreset === 'custom'" class="flex gap-2 mt-2">
                 <div class="flex-1">
                   <label class="text-xs text-gray-500 mb-1 block">От</label>
-                  <input type="date" v-model="filterClientDateFrom" class="w-full border rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  <input type="date" v-model="filterClientDateFrom" class="w-full border rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
                 </div>
                 <div class="flex-1">
                   <label class="text-xs text-gray-500 mb-1 block">До</label>
-                  <input type="date" v-model="filterClientDateTo" class="w-full border rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  <input type="date" v-model="filterClientDateTo" class="w-full border rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
                 </div>
               </div>
             </div>
@@ -516,7 +516,7 @@
                   type="checkbox"
                   :checked="allStatusesSelected"
                   @change="toggleAllStatuses"
-                  class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  class="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500"
                 />
                 <span class="text-xs text-gray-500">Выбрать все</span>
               </label>
@@ -531,7 +531,7 @@
                   type="checkbox"
                   :value="s.name"
                   v-model="filterStatuses"
-                  class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  class="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500"
                 />
                 <span :class="['text-xs font-medium px-1.5 py-0.5 rounded-full', statusColor(s.name)]">{{ s.name }}</span>
               </label>
@@ -540,7 +540,7 @@
                   type="checkbox"
                   value="__none__"
                   v-model="filterStatuses"
-                  class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  class="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500"
                 />
                 <span class="text-xs font-medium px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">Без статуса</span>
               </label>
@@ -551,7 +551,7 @@
             <p class="text-sm font-medium text-gray-700 mb-2">Направление</p>
             <select
               v-model="filterDialogTypeId"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
             >
               <option :value="null">Все типы</option>
               <option v-for="t in dialogTypes" :key="t.id" :value="t.id">{{ t.display_name }}</option>
@@ -562,7 +562,7 @@
             <p class="text-sm font-medium text-gray-700 mb-2">Воронка пинга</p>
             <select
               v-model="filterPingFunnelType"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
             >
               <option :value="null">Все</option>
               <option value="__none__">Не указано</option>
@@ -574,7 +574,7 @@
             <p class="text-sm font-medium text-gray-700 mb-2">Стадия диалога</p>
             <select
               v-model="filterFunnelStage"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
             >
               <option :value="null">Все</option>
               <option value="__none__">Не указано</option>
@@ -586,19 +586,19 @@
             <p class="text-sm font-medium text-gray-700 mb-2">AI провайдер</p>
             <div class="flex flex-col gap-2">
               <label class="flex items-center gap-2 cursor-pointer select-none">
-                <input type="checkbox" value="openai" v-model="filterAiProviders" class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <input type="checkbox" value="openai" v-model="filterAiProviders" class="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500" />
                 <span class="text-sm text-gray-700">OpenAI</span>
               </label>
               <label class="flex items-center gap-2 cursor-pointer select-none">
-                <input type="checkbox" value="anthropic" v-model="filterAiProviders" class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <input type="checkbox" value="anthropic" v-model="filterAiProviders" class="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500" />
                 <span class="text-sm text-gray-700">Claude</span>
               </label>
               <label class="flex items-center gap-2 cursor-pointer select-none">
-                <input type="checkbox" value="minimax" v-model="filterAiProviders" class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <input type="checkbox" value="minimax" v-model="filterAiProviders" class="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500" />
                 <span class="text-sm text-gray-700">MiniMax</span>
               </label>
               <label class="flex items-center gap-2 cursor-pointer select-none">
-                <input type="checkbox" value="qwen" v-model="filterAiProviders" class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <input type="checkbox" value="qwen" v-model="filterAiProviders" class="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500" />
                 <span class="text-sm text-gray-700">Qwen</span>
               </label>
             </div>
@@ -608,23 +608,23 @@
             <p class="text-sm font-medium text-gray-700 mb-2">Последнее сообщение от</p>
             <div class="flex flex-col gap-2">
               <label class="flex items-center gap-2 cursor-pointer select-none">
-                <input type="radio" value="" v-model="filterLastMessageFrom" class="w-4 h-4 border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <input type="radio" value="" v-model="filterLastMessageFrom" class="w-4 h-4 border-gray-300 text-brand-600 focus:ring-brand-500" />
                 <span class="text-sm text-gray-700">Все</span>
               </label>
               <label class="flex items-center gap-2 cursor-pointer select-none">
-                <input type="radio" value="client" v-model="filterLastMessageFrom" class="w-4 h-4 border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <input type="radio" value="client" v-model="filterLastMessageFrom" class="w-4 h-4 border-gray-300 text-brand-600 focus:ring-brand-500" />
                 <span class="text-sm text-gray-700">От клиента</span>
               </label>
               <label class="flex items-center gap-2 cursor-pointer select-none">
-                <input type="radio" value="ai_reply" v-model="filterLastMessageFrom" class="w-4 h-4 border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <input type="radio" value="ai_reply" v-model="filterLastMessageFrom" class="w-4 h-4 border-gray-300 text-brand-600 focus:ring-brand-500" />
                 <span class="text-sm text-gray-700">Ответ от ИИ</span>
               </label>
               <label class="flex items-center gap-2 cursor-pointer select-none">
-                <input type="radio" value="ai_ping" v-model="filterLastMessageFrom" class="w-4 h-4 border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <input type="radio" value="ai_ping" v-model="filterLastMessageFrom" class="w-4 h-4 border-gray-300 text-brand-600 focus:ring-brand-500" />
                 <span class="text-sm text-gray-700">Пинг от ИИ</span>
               </label>
               <label class="flex items-center gap-2 cursor-pointer select-none">
-                <input type="radio" value="curator" v-model="filterLastMessageFrom" class="w-4 h-4 border-gray-300 text-blue-600 focus:ring-blue-500" />
+                <input type="radio" value="curator" v-model="filterLastMessageFrom" class="w-4 h-4 border-gray-300 text-brand-600 focus:ring-brand-500" />
                 <span class="text-sm text-gray-700">От куратора</span>
               </label>
             </div>
@@ -636,14 +636,14 @@
               type="text"
               v-model="filterClientId"
               placeholder="VK ID (несколько через ;)"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
           </div>
         </div>
         <div class="flex gap-2 mt-5">
           <button
             @click="applyFilters"
-            class="flex-1 bg-blue-600 text-white py-2 rounded-lg text-sm hover:bg-blue-700 font-medium"
+            class="flex-1 bg-brand-600 text-white py-2 rounded-lg text-sm hover:bg-brand-700 font-medium"
           >Применить</button>
         </div>
         <button
@@ -676,14 +676,14 @@
           rows="4"
           autofocus
           placeholder="Например: Не называть цену без выявления потребности клиента"
-          class="w-full border rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+          class="w-full border rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none"
         />
         <p v-if="feedbackModal.error" class="text-red-500 text-xs mt-1">{{ feedbackModal.error }}</p>
         <div class="flex gap-2 mt-4">
           <button
             @click="saveFeedback"
             :disabled="feedbackModal.loading || feedbackModal.text.trim().length < 30"
-            class="flex-1 bg-blue-600 text-white py-2 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
+            class="flex-1 bg-brand-600 text-white py-2 rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
           >{{ feedbackModal.loading ? 'Сохраняем...' : 'Сохранить' }}</button>
         <p v-if="feedbackModal.text.trim().length > 0 && feedbackModal.text.trim().length < 30" class="text-xs text-gray-400 mt-1">Минимум 30 символов ({{ feedbackModal.text.trim().length }}/30)</p>
           <button
@@ -716,8 +716,8 @@
               <pre class="whitespace-pre-wrap break-words text-xs bg-purple-50 border border-purple-100 rounded-xl p-3 text-gray-700">{{ contextModal.system }}</pre>
             </div>
             <div v-for="(m, i) in contextModal.messages" :key="i">
-              <div :class="['text-xs font-semibold uppercase mb-1', m.role === 'user' ? 'text-blue-600' : 'text-gray-500']">{{ m.role }}</div>
-              <pre :class="['whitespace-pre-wrap break-words text-xs rounded-xl p-3 text-gray-700 border', m.role === 'user' ? 'bg-blue-50 border-blue-100' : 'bg-gray-50 border-gray-100']">{{ m.content }}</pre>
+              <div :class="['text-xs font-semibold uppercase mb-1', m.role === 'user' ? 'text-brand-600' : 'text-gray-500']">{{ m.role }}</div>
+              <pre :class="['whitespace-pre-wrap break-words text-xs rounded-xl p-3 text-gray-700 border', m.role === 'user' ? 'bg-brand-50 border-brand-100' : 'bg-gray-50 border-gray-100']">{{ m.content }}</pre>
             </div>
             <div v-if="!contextModal.system && contextModal.messages.length === 0" class="text-sm text-gray-400">Контекст пуст</div>
           </template>
@@ -738,7 +738,7 @@
               autofocus
               type="number"
               placeholder="например: 12345"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
           </div>
           <div>
@@ -746,7 +746,7 @@
             <input
               v-model="newClientName"
               placeholder="Иван Иванов"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
           </div>
           <div>
@@ -754,7 +754,7 @@
             <select
               v-model="newTypeId"
               required
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
             >
               <option v-if="dialogTypes.length === 0" :value="null" disabled>Загрузка...</option>
               <option v-for="t in dialogTypes" :key="t.id" :value="t.id">{{ t.display_name }}</option>
@@ -766,7 +766,7 @@
               v-model="newMarketingTag"
               placeholder="sweetgold, ПАВЕЛ_ПАТРИОТ_1..."
               list="marketing_tag_options"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
             <datalist id="marketing_tag_options">
               <option v-for="t in knownMarketingTags" :key="t" :value="t" />
@@ -777,7 +777,7 @@
             <label class="block text-sm font-medium mb-1">Модель ИИ</label>
             <select
               v-model="newAiProvider"
-              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
             >
               <option value="openai">ChatGPT</option>
               <option value="anthropic">Claude</option>
@@ -787,7 +787,7 @@
           </div>
           <p v-if="startError" class="text-red-500 text-sm">{{ startError }}</p>
           <div class="flex gap-2 pt-1">
-            <button type="submit" :disabled="startLoading || !String(newVkUserId).trim()" class="flex-1 bg-blue-600 text-white py-2 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
+            <button type="submit" :disabled="startLoading || !String(newVkUserId).trim()" class="flex-1 bg-brand-600 text-white py-2 rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50">
               {{ startLoading ? 'Создаём...' : 'Начать чат' }}
             </button>
             <button type="button" @click="showNewChat = false" class="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">
@@ -1107,6 +1107,8 @@ const selectedDateLabel = computed(() => DATE_PRESETS.find(p => p.value === filt
 const selectedClientDateLabel = computed(() => DATE_PRESETS.find(p => p.value === filterClientDatePreset.value)?.label ?? 'Все время')
 
 const STATUS_COLORS = {
+  // Не brand-*: бейджи статусов должны отличаться друг от друга при любой теме,
+  // а «Заказ оформлен» ниже уже зелёный — фирменный зелёный слился бы с ним.
   'Поинтересовался':  'bg-blue-100 text-blue-700',
   'Есть расчет':      'bg-purple-100 text-purple-700',
   'Горячий':          'bg-red-100 text-red-700',

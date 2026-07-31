@@ -12,7 +12,7 @@
       <div class="bg-white rounded-xl shadow-sm border overflow-hidden">
         <div class="px-4 py-3 flex justify-between items-center border-b bg-gray-50">
           <span class="text-sm text-gray-500">{{ users.length }} пользователей</span>
-          <button @click="openCreate" class="bg-blue-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-blue-700 font-medium">
+          <button @click="openCreate" class="bg-brand-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-brand-700 font-medium">
             + Создать пользователя
           </button>
         </div>
@@ -39,7 +39,7 @@
                 <td class="px-4 py-3 text-gray-400 font-mono text-xs">{{ u.id }}</td>
                 <td class="px-4 py-3 text-gray-800">
                   {{ u.email }}
-                  <span v-if="u.id === auth.user?.id" class="ml-1 text-xs text-blue-500">(вы)</span>
+                  <span v-if="u.id === auth.user?.id" class="ml-1 text-xs text-brand-700">(вы)</span>
                 </td>
                 <td class="px-4 py-3">
                   <select
@@ -71,7 +71,7 @@
                 </td>
                 <td class="px-4 py-3">
                   <div class="flex gap-3">
-                    <button @click="openPassword(u)" class="text-blue-500 hover:text-blue-700 text-xs font-medium">Пароль</button>
+                    <button @click="openPassword(u)" class="text-brand-700 hover:text-brand-800 text-xs font-medium">Пароль</button>
                     <button
                       v-if="u.id !== auth.user?.id"
                       @click="deleteTarget = u"
@@ -99,15 +99,15 @@
         <div class="p-6 space-y-4">
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Email</label>
-            <input v-model="createForm.email" type="email" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="user@example.com" />
+            <input v-model="createForm.email" type="email" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" placeholder="user@example.com" />
           </div>
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Пароль</label>
-            <input v-model="createForm.password" type="text" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="минимум 6 символов" />
+            <input v-model="createForm.password" type="text" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" placeholder="минимум 6 символов" />
           </div>
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Роль</label>
-            <select v-model="createForm.role" class="w-full border rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <select v-model="createForm.role" class="w-full border rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand-500">
               <option value="curator">curator</option>
               <option value="admin">admin</option>
             </select>
@@ -134,7 +134,7 @@
           <button
             @click="createUser"
             :disabled="saving || !createForm.email.trim() || !createForm.password.trim()"
-            class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
+            class="px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 font-medium"
           >{{ saving ? 'Создание...' : 'Создать' }}</button>
         </div>
       </div>
@@ -144,13 +144,13 @@
     <div v-if="passwordTarget" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
       <div class="bg-white rounded-xl shadow-xl w-full max-w-sm p-6">
         <h2 class="font-semibold text-gray-800 mb-4">Новый пароль для {{ passwordTarget.email }}</h2>
-        <input v-model="newPassword" type="text" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4" placeholder="Новый пароль" />
+        <input v-model="newPassword" type="text" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mb-4" placeholder="Новый пароль" />
         <div class="flex justify-end gap-2">
           <button @click="passwordTarget = null; newPassword = ''" class="px-4 py-2 text-sm text-gray-600 border rounded-lg hover:bg-gray-50">Отмена</button>
           <button
             @click="savePassword"
             :disabled="saving || !newPassword.trim()"
-            class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
+            class="px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 font-medium"
           >{{ saving ? '...' : 'Сохранить' }}</button>
         </div>
       </div>

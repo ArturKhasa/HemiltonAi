@@ -6,7 +6,7 @@
         <button
           @click="prev"
           :disabled="currentIndex === 0 || loading"
-          class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 hover:bg-blue-700 transition-colors whitespace-nowrap"
+          class="px-4 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 hover:bg-brand-700 transition-colors whitespace-nowrap"
         >← Предыдущий</button>
         <div class="flex-1 flex flex-col items-center gap-1.5">
           <span class="text-sm text-gray-700 font-medium">
@@ -24,7 +24,7 @@
         <button
           @click="next"
           :disabled="currentIndex >= dialogs.length - 1 || loading"
-          class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 hover:bg-blue-700 transition-colors whitespace-nowrap"
+          class="px-4 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 hover:bg-brand-700 transition-colors whitespace-nowrap"
         >Следующий →</button>
       </div>
     </div>
@@ -40,7 +40,7 @@
             :value="currentDialog?.current_status || ''"
             @change="changeStatus($event.target.value)"
             :disabled="statusChanging"
-            class="text-xs border rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            class="text-xs border rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50"
           >
             <option value="" disabled>— не задан —</option>
             <option v-for="s in activeStatuses" :key="s.id" :value="s.name">{{ s.name }}</option>
@@ -52,7 +52,7 @@
             <span
               v-for="tag in currentDialog.marketing_tags"
               :key="tag"
-              class="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200"
+              class="text-xs px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200"
             >{{ tag }}</span>
           </div>
           <span class="text-xs text-gray-400">Dialog #{{ currentDialog.id }}</span>
@@ -91,7 +91,7 @@
           <div :class="[
             'max-w-xl px-4 py-2.5 rounded-2xl text-sm shadow-sm',
             msg.role === 'client'
-              ? 'bg-blue-600 text-white rounded-br-sm'
+              ? 'bg-brand-600 text-white rounded-br-sm'
               : msg.role === 'curator'
                 ? 'bg-purple-50 border border-purple-200 rounded-bl-sm text-gray-800'
                 : msg.is_ping
@@ -117,7 +117,7 @@
                 <span v-if="msg.need_curator" class="text-orange-500 font-medium">⚠ На проверку куратору</span>
               </div>
               <div v-else></div>
-              <span v-if="msg.created_at" :class="['text-xs ml-auto', msg.role === 'client' ? 'text-blue-200' : 'text-gray-400']">
+              <span v-if="msg.created_at" :class="['text-xs ml-auto', msg.role === 'client' ? 'text-brand-200' : 'text-gray-400']">
                 {{ formatMsgTime(msg.created_at) }}
               </span>
             </div>
@@ -153,7 +153,7 @@
           rows="4"
           autofocus
           placeholder="Например: Не называть цену без выявления потребности клиента"
-          class="w-full border rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+          class="w-full border rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none"
         />
         <p v-if="feedbackModal.error" class="text-red-500 text-xs mt-1">{{ feedbackModal.error }}</p>
         <p v-if="feedbackModal.text.trim().length > 0 && feedbackModal.text.trim().length < 30" class="text-xs text-gray-400 mt-1">Минимум 30 символов ({{ feedbackModal.text.trim().length }}/30)</p>
@@ -161,7 +161,7 @@
           <button
             @click="saveFeedback"
             :disabled="feedbackModal.loading || feedbackModal.text.trim().length < 30"
-            class="flex-1 bg-blue-600 text-white py-2 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
+            class="flex-1 bg-brand-600 text-white py-2 rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50"
           >{{ feedbackModal.loading ? 'Сохраняем...' : 'Сохранить' }}</button>
           <button
             v-if="feedbackModal.feedbackId"
@@ -193,8 +193,8 @@
               <pre class="whitespace-pre-wrap break-words text-xs bg-purple-50 border border-purple-100 rounded-xl p-3 text-gray-700">{{ contextModal.system }}</pre>
             </div>
             <div v-for="(m, i) in contextModal.messages" :key="i">
-              <div :class="['text-xs font-semibold uppercase mb-1', m.role === 'user' ? 'text-blue-600' : 'text-gray-500']">{{ m.role }}</div>
-              <pre :class="['whitespace-pre-wrap break-words text-xs rounded-xl p-3 text-gray-700 border', m.role === 'user' ? 'bg-blue-50 border-blue-100' : 'bg-gray-50 border-gray-100']">{{ m.content }}</pre>
+              <div :class="['text-xs font-semibold uppercase mb-1', m.role === 'user' ? 'text-brand-600' : 'text-gray-500']">{{ m.role }}</div>
+              <pre :class="['whitespace-pre-wrap break-words text-xs rounded-xl p-3 text-gray-700 border', m.role === 'user' ? 'bg-brand-50 border-brand-100' : 'bg-gray-50 border-gray-100']">{{ m.content }}</pre>
             </div>
             <div v-if="!contextModal.system && contextModal.messages.length === 0" class="text-sm text-gray-400">Контекст пуст</div>
           </template>

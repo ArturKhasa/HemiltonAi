@@ -14,31 +14,31 @@
       <div class="bg-white rounded-xl shadow-sm border p-4 flex flex-wrap gap-4">
         <label class="flex flex-col gap-1">
           <span class="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Период</span>
-          <select v-model="preset" @change="load()" class="px-3 py-1.5 text-sm rounded-lg border bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <select v-model="preset" @change="load()" class="px-3 py-1.5 text-sm rounded-lg border bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-500">
             <option v-for="p in presets" :key="p.key" :value="p.key">{{ p.label }}</option>
           </select>
         </label>
         <label class="flex flex-col gap-1">
           <span class="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Дата по</span>
-          <select v-model="dateBasis" @change="load()" class="px-3 py-1.5 text-sm rounded-lg border bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <select v-model="dateBasis" @change="load()" class="px-3 py-1.5 text-sm rounded-lg border bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-500">
             <option v-for="b in dateBases" :key="b.key" :value="b.key" :title="b.hint">{{ b.label }}</option>
           </select>
         </label>
         <label class="flex flex-col gap-1">
           <span class="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Провайдер</span>
-          <select v-model="provider" @change="load()" class="px-3 py-1.5 text-sm rounded-lg border bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <select v-model="provider" @change="load()" class="px-3 py-1.5 text-sm rounded-lg border bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-500">
             <option v-for="p in providers" :key="p.key" :value="p.key">{{ p.label }}</option>
           </select>
         </label>
         <label class="flex flex-col gap-1">
           <span class="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Сегмент</span>
-          <select v-model="segment" @change="load()" class="px-3 py-1.5 text-sm rounded-lg border bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <select v-model="segment" @change="load()" class="px-3 py-1.5 text-sm rounded-lg border bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-500">
             <option v-for="s in segments" :key="s.key" :value="s.key" :title="s.hint">{{ s.label }}</option>
           </select>
         </label>
         <label class="flex flex-col gap-1">
           <span class="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Метрика</span>
-          <select v-model="metric" class="px-3 py-1.5 text-sm rounded-lg border bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <select v-model="metric" class="px-3 py-1.5 text-sm rounded-lg border bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-500">
             <option v-for="m in metrics" :key="m.key" :value="m.key">{{ m.label }}</option>
           </select>
         </label>
