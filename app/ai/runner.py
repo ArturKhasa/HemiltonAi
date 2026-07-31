@@ -24,7 +24,7 @@ from app.ai.run_log import log_failed_run, usage_from_result
 from app.ai.tools import fetch_client_tags
 from app.ai.providers import get_model_name
 from app.ai.schemas import AgentOutput
-from app.ai.triggers import CURATOR_STATUS_NAME, curator_trigger, promises_missing_payment_link
+from app.ai.triggers import CURATOR_STATUS_NAME, curator_trigger
 from app.config import settings
 from app.utils.media import is_document_url, is_image_url, is_sticker_url, is_video_url
 from app.vk.spintax import resolve_spintax
@@ -622,18 +622,6 @@ async def run_ai(
     # Вышивка и опт: и то и другое считается индивидуально, цены высокие, ошибка
     # дорого стоит — темы ведёт менеджер, не ИИ. Стоит последним, ПОСЛЕ всех гейтов
     # выше: иначе переход из «Горячий клиент» сбросил бы эскалацию обратно в None.
-    # Обещание ссылки без ссылки — придерживаем ответ и зовём менеджера: он
-    # выставит счёт руками. Единственный случай, когда реплику НЕ отправляем:
-    # «вот счёт-ссылка» без ссылки хуже молчания, клиент будет ждать впустую.
-    if promises_missing_payment_link(output.reply_text):
-        logger.info("[%s] reply promises a payment link but has none — held for curator", ctx)
-        output = output.model_copy(update={
-            "next_status": CURATOR_STATUS_NAME,
-            "need_curator": True,
-            "curator_reason": "Нужна ссылка на оплату — выставьте счёт и отправьте клиенту",
-        })
-        dialog.ai_paused = True
-
     trigger = curator_trigger(text)
     if trigger:
         # На саму реплику с триггером отвечаем, дальше замолкаем и ждём менеджера.
