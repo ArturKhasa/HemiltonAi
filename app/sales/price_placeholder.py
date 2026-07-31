@@ -25,10 +25,25 @@ _PRICE_PLACEHOLDER_RE = re.compile(
     r"\[цена(-до-скидки)?:([^\]]+)\]", re.IGNORECASE
 )
 
+# «[ссылка-оплаты]» — счёт клиенту. Пока платёжной интеграции нет, подставляется
+# заглушка из настроек (см. config.PAYMENT_LINK_URL): менеджер выставлял счёт
+# руками, и без подстановки скрипт обещал ссылку, не присылая ничего.
+_PAYMENT_LINK_PLACEHOLDER_RE = re.compile(r"\[ссылка-оплаты\]", re.IGNORECASE)
+
 
 def format_price(value) -> str:
     """4990 → «4 990 ₽». Неразрывный пробел, чтобы сумма не рвалась переносом."""
     return f"{int(value):,}".replace(",", " ") + " ₽"
+
+
+def _render_payment_link(text: str) -> str:
+    if not _PAYMENT_LINK_PLACEHOLDER_RE.search(text):
+        return text
+    from app.config import settings
+    url = (settings.PAYMENT_LINK_URL or "").strip()
+    if "example.com" in url:
+        logger.warning("подставлена ЗАГЛУШКА ссылки на оплату — настоящих счетов ещё нет")
+    return _PAYMENT_LINK_PLACEHOLDER_RE.sub(url, text)
 
 
 async def render_price_placeholders(
@@ -39,7 +54,8 @@ async def render_price_placeholders(
     Товар не нашёлся — плейсхолдер убираем вместе со скобками, оставив запрос
     как обычное слово: лучше фраза без цифры, чем «[цена:свитшот]» у клиента.
     """
-    matches = list(_PRICE_PLACEHOLDER_RE.finditer(text or ""))
+    text = _render_payment_link(text or "")
+    matches = list(_PRICE_PLACEHOLDER_RE.finditer(text))
     if not matches:
         return text
 

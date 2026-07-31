@@ -55,3 +55,18 @@ class TestRender:
         got = await render_price_placeholders(
             db, "[цена:свитшот] вместо [цена-до-скидки:свитшот]", type_id=1)
         assert got == "4 990 ₽ вместо 5 990 ₽"
+
+
+class TestPaymentLink:
+    """Скрипт #382 обещает «вот счёт-ссылка», а ссылки в нём нет — менеджер
+    вставлял её руками. До платёжной интеграции подставляем заглушку."""
+
+    async def test_placeholder_replaced(self, db, products):
+        got = await render_price_placeholders(db, "Вот счёт: [ссылка-оплаты]", type_id=1)
+        assert "[ссылка-оплаты]" not in got
+        assert "http" in got
+
+    async def test_works_together_with_price(self, db, products):
+        got = await render_price_placeholders(
+            db, "[цена:свитшот] — оплатить: [ссылка-оплаты]", type_id=1)
+        assert got.startswith("4 990 ₽ — оплатить: http")
