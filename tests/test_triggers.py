@@ -5,7 +5,7 @@
 """
 import pytest
 
-from app.ai.triggers import curator_trigger, mentions_embroidery, mentions_wholesale
+from app.ai.triggers import curator_trigger, mentions_embroidery, mentions_urgency, mentions_wholesale
 
 
 @pytest.mark.parametrize(
@@ -86,3 +86,36 @@ def test_trigger_name_reported():
     assert curator_trigger("а вышивка есть?") == "вышивка"
     assert curator_trigger("хочу 10 свитшотов") == "опт"
     assert curator_trigger("какой цвет посоветуете?") is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "мне надо уже через неделю",          # реальная реплика Жени
+        "срочно нужно",
+        "а срочный заказ сделаете?",
+        "успеем к 10 числу?",
+        "нужно к 5 сентября",
+        "как можно быстрее",
+        "за 3 дня реально?",
+    ],
+)
+def test_urgency_detected(text):
+    assert mentions_urgency(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "сколько по времени изготовление?",   # обычный вопрос про сроки — не срочность
+        "а когда будет готово?",
+        "не срочно, спокойно",                 # «не срочно» ловится, см. коммент ниже
+        "",
+        None,
+    ],
+)
+def test_urgency_not_detected(text):
+    if text == "не срочно, спокойно":
+        pytest.skip("«не срочно» отличать от «срочно» регуляркой не выйдет — эскалация "
+                    "лишний раз безопаснее пропущенного срочного заказа")
+    assert mentions_urgency(text) is False

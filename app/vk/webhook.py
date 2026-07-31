@@ -102,9 +102,14 @@ def parse_message_event(payload: dict) -> VkIncomingMessage | None:
         else:
             return None  # нечего обрабатывать (пересланное без текста и т.п.)
 
-    # ref живёт на самом сообщении; на старых версиях Callback API объект события
+    # У ссылки вида ?ref=adb_r&ref_source=rusover449 метка кампании — во ВТОРОМ
+    # параметре, а в ref лежит тип площадки, общий для всей рекламы. Приоритет
+    # ref_source, ref — запасной. На старых версиях Callback API объект события
     # и был сообщением, поэтому смотрим оба уровня.
-    ref = msg.get("ref") or obj.get("ref")
+    ref = (
+        msg.get("ref_source") or obj.get("ref_source")
+        or msg.get("ref") or obj.get("ref")
+    )
     ref = str(ref).strip() if ref else None
 
     message_id = msg.get("id") or msg.get("conversation_message_id")

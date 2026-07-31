@@ -74,10 +74,27 @@ def mentions_wholesale(text: str | None) -> bool:
     )
 
 
+# Срочность: производство 10-14 дней плюс доставка, уложиться в неделю можно
+# только вручную — договорившись на производстве. Обещать это ИИ не может.
+_URGENT_RE = re.compile(
+    r"\bсрочн|\bпосрочн|\bгорит\b|\bкак можно скорее|\bкак можно быстрее|"
+    r"\bуспе(?:ть|ем|ете)\b|\bнужно к \d|\bнадо к \d|\bк \d{1,2}\s*(?:числ|-?м[уи])|"
+    r"\b(?:за|через)\s+(?:\d+\s*)?(?:день|дня|дней|недел)",
+    re.IGNORECASE,
+)
+
+
+def mentions_urgency(text: str | None) -> bool:
+    """Клиент называет срок, в который стандартное производство не укладывается."""
+    return bool(_URGENT_RE.search((text or "").replace("ё", "е")))
+
+
 def curator_trigger(text: str | None) -> str | None:
     """Название сработавшего триггера эскалации, либо None."""
     if mentions_embroidery(text):
         return "вышивка"
     if mentions_wholesale(text):
         return "опт"
+    if mentions_urgency(text):
+        return "срочный заказ"
     return None
