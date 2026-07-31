@@ -12,26 +12,41 @@ from app.vk.spintax import resolve_spintax
 logger = logging.getLogger(__name__)
 
 
-async def get_script_phrase_text(script_id: int) -> str:
-    """Текст скрипта из БД с раскрытым spintax. Общая реализация для
-    openai-agents тулзы и anthropic_runner."""
+async def get_script_phrase_text(script_id: int, type_id: int | None = None) -> str:
+    """Текст скрипта из БД с раскрытым spintax и подставленными плейсхолдерами.
+
+    Цена и ссылка на оплату подставляются здесь, а не оставляются модели: увидев
+    «[цена:свитшот]», она просто выбрасывала плейсхолдер и называла цифру из
+    головы — 4 990 ₽ рядом со скриптовыми 5 990 ₽ в том же ходу (диалог 44), а
+    «[ссылка-оплаты]» превращалась в «вот счёт-ссылка на 500 рублей:» без самой
+    ссылки (диалог 40).
+    """
+    from app.sales.price_placeholder import render_price_placeholders
+
     async with AsyncSessionLocal() as db:
         script = await ScriptService(db).get_by_id(script_id)
-    if not script or not (script.phrase_text or "").strip():
-        return f"Скрипт {script_id} не найден или не содержит текста."
-    return resolve_spintax(script.phrase_text)
+        if not script or not (script.phrase_text or "").strip():
+            return f"Скрипт {script_id} не найден или не содержит текста."
+        return await render_price_placeholders(
+            db, resolve_spintax(script.phrase_text),
+            type_id=type_id if type_id is not None else script.type_id,
+        )
 
 
-@function_tool
-async def get_script_phrase(script_id: int) -> str:
-    """Fetch the ready-to-send phrase text of a script by its script_id. Resolves spintax
-    automatically. Use the returned text as the basis for reply_text and set
-    source_script_id to this script_id in the final output.
-    """
-    logger.info("[tool] get_script_phrase called | script_id=%d", script_id)
-    text = await get_script_phrase_text(script_id)
-    logger.info("[tool] get_script_phrase done | script_id=%d | text_len=%d", script_id, len(text))
-    return text
+def make_get_script_phrase(type_id: int | None):
+    """Return a get_script_phrase tool scoped to a specific dialog type."""
+    @function_tool
+    async def get_script_phrase(script_id: int) -> str:
+        """Fetch the ready-to-send phrase text of a script by its script_id. Prices and the
+        payment link are already substituted — copy the returned numbers and links exactly,
+        never replace them with your own. Use the text as the basis for reply_text and set
+        source_script_id to this script_id in the final output.
+        """
+        logger.info("[tool] get_script_phrase called | script_id=%d", script_id)
+        text = await get_script_phrase_text(script_id, type_id)
+        logger.info("[tool] get_script_phrase done | script_id=%d | text_len=%d", script_id, len(text))
+        return text
+    return get_script_phrase
 
 
 async def save_client_marketing_tags(client_id: int, tags: list[str]) -> None:

@@ -49,7 +49,8 @@ _TOOLS: list[dict] = [
         "name": "get_script_phrase",
         "description": (
             "Fetch the ready-to-send phrase text of a script by its script_id. "
-            "Use the returned text as the basis for reply_text."
+            "Prices and the payment link are already substituted — copy the returned "
+            "numbers and links exactly. Use the text as the basis for reply_text."
         ),
         "input_schema": {
             "type": "object",
@@ -176,7 +177,7 @@ async def _run_tool(
         )
     if name == "get_script_phrase":
         from app.ai.tools import get_script_phrase_text
-        return await get_script_phrase_text(args["script_id"])
+        return await get_script_phrase_text(args["script_id"], type_id)
     if name == "search_products":
         from app.ai.tools import run_product_search
         return await run_product_search(args["query"], type_id)

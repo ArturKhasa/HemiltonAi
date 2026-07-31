@@ -3,7 +3,7 @@ from agents import Agent
 from app.ai.providers import get_model_string
 from app.ai.schemas import AgentOutput
 from app.ai.tools import (
-    get_script_phrase,
+    make_get_script_phrase,
     make_list_scripts,
     make_search_products,
     make_get_product_photo,
@@ -45,7 +45,7 @@ def build_sales_agent(
             type_id, client_id=client_id, current_stage=funnel_stage,
             exclude_script_ids=exclude_script_ids,
         ),
-        get_script_phrase,
+        make_get_script_phrase(type_id),
         make_search_products(type_id),
         make_get_product_photo(type_id),
         make_find_similar_examples(type_id),

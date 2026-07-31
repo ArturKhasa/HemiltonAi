@@ -32,6 +32,14 @@ from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
 from app.ai.greeting import resolve_greeting
 from app.sales.price_placeholder import render_price_placeholders
+from app.sales.funnel_steps import (
+    PAYMENT_LINK_RE,
+    answered_inscription_question,
+    dialog_has_payment_link,
+    find_payment_link_script,
+    find_praise_script,
+)
+from app.sales.order_slots import ASKS_CITY_RE, collect_slots, format_slots_block
 from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole, Script
 from app.utils.text import normalize_dashes, render_name_placeholder, strip_repeated_greeting
 
@@ -115,9 +123,6 @@ _DUP_RETRY_INSTRUCTION = (
 )
 
 
-# Все платёжные ссылки проекта содержат «pay» в URL (monro-book-payment.online,
-# monro-statue-payment.online, параметр ?pay=1000); фото/CDN-ссылки — нет.
-_PAYMENT_LINK_RE = re.compile(r"https?://\S*pay", re.IGNORECASE)
 
 
 def _normalize_for_dup(text: str) -> str:
@@ -150,6 +155,19 @@ _OBJECTION_ANSWER_RE = re.compile(
     re.IGNORECASE,
 )
 _MONEY_RE = re.compile(r"\d[\d\s\u00a0]{2,7}(?=\s*(?:₽|руб))", re.IGNORECASE)
+
+# Ответ без вопроса обрывает диалог: следующего хода не будет, пока клиент не
+# напишет сам, а писать ему больше не на что (диалог 51: «Фиксирую этот вариант и
+# передаю его в работу.» — и тишина на середине воронки). Регламент ОП требует
+# закрывать каждую реплику вопросом, кроме терминального шага.
+_NO_QUESTION_RETRY_INSTRUCTION = (
+    "[Служебное] Твой ответ не заканчивается вопросом — диалог на нём оборвётся, "
+    "потому что клиенту нечего ответить. Перепиши: сохрани смысл, но закончи "
+    "сообщение вопросом, который двигает заказ к следующему шагу текущей стадии "
+    "воронки."
+)
+# На этой стадии заказ уже передан на ведение — вопрос не нужен.
+_TERMINAL_STAGE = "paid"
 
 _REQUOTE_RETRY_INSTRUCTION = (
     "[Служебное] Клиент отвечает на ТВОЙ вопрос о том, что его остановило, а не "
@@ -368,6 +386,18 @@ async def run_ai(
             if msg.text:
                 manager_history_texts.append(msg.text)
 
+    # Что клиент уже сообщил по заказу. Модель это переспрашивает, хотя история у
+    # неё перед глазами (диалог 52: пять ходов подряд «какой дизайн нанесём?»),
+    # поэтому факты собираются кодом и подаются готовым списком.
+    slots = collect_slots(
+        [("client" if m.role == MessageRole.client else "manager", m.text) for m in local_msgs]
+        + [("client", text)]
+    )
+    slots_block = format_slots_block(slots)
+    if slots_block:
+        dynamic_context.append(slots_block)
+        logger.info("[%s] order slots injected | %s", ctx, sorted(slots))
+
     # Dynamic per-turn context (funnel stage, feedback rules) as separate user messages,
     # placed right before the current client message so they sit in the uncached tail and
     # don't bust the cached system prompt / history prefix.
@@ -382,6 +412,11 @@ async def run_ai(
         input_messages.append({"role": "user", "content": _attachment_content(text, files)})
     else:
         input_messages.append({"role": "user", "content": text})
+
+    # Точка воронки «клиент ответил на вопрос про надпись»: по регламенту ОП следом
+    # обязаны уйти похвала, стоимость и доставка. Считаем ДО ответа модели — после
+    # него последним нашим сообщением будет уже её реплика.
+    praise_point = await answered_inscription_question(db, dialog.id)
 
     logger.info(
         "[%s] calling agent | provider=%s | model=%s | context_turns=%d",
@@ -539,13 +574,25 @@ async def run_ai(
 
         dup_match = _find_duplicate_reply(output.reply_text, manager_history_texts)
         requote = _requotes_known_price(text, output.reply_text, manager_history_texts)
-        if (not dup_match and not requote) or dup_attempt == 2:
+        # Вопрос спрашиваем только с самой модели: когда следом уходит связка
+        # скриптов (своя у похвалы, своя у выбранного моделью скрипта), вопрос
+        # задаёт последнее звено связки, а не эта реплика.
+        no_question = (
+            "?" not in (output.reply_text or "")
+            and not praise_point
+            and output.source_script_id is None
+            and dialog.funnel_stage != _TERMINAL_STAGE
+        )
+        if (not dup_match and not requote and not no_question) or dup_attempt == 2:
             break
         if requote:
             logger.warning(
                 "[%s] reply re-quotes a known price in answer to an objection — retrying", ctx,
             )
             correction = _REQUOTE_RETRY_INSTRUCTION
+        elif no_question:
+            logger.warning("[%s] reply ends without a question — retrying", ctx)
+            correction = _NO_QUESTION_RETRY_INSTRUCTION
         else:
             logger.warning(
                 "[%s] reply duplicates an already-sent manager message — retrying | dup_head=%r",
@@ -646,16 +693,9 @@ async def run_ai(
     if (
         output.next_status == "Ждем предоплату"
         and status_before_name != "Ждем предоплату"
-        and not _PAYMENT_LINK_RE.search(output.reply_text or "")
+        and not PAYMENT_LINK_RE.search(output.reply_text or "")
     ):
-        _sent_res = await db.execute(
-            select(Message.id).where(
-                Message.dialog_id == dialog.id,
-                Message.role.in_((MessageRole.ai, MessageRole.curator)),
-                Message.text.op("~*")(r"https?://[^[:space:]]*pay"),
-            ).limit(1)
-        )
-        if _sent_res.first() is None:
+        if not await dialog_has_payment_link(db, dialog.id):
             logger.info(
                 "[%s] blocked next_status 'Ждем предоплату' — no payment link sent in dialog",
                 ctx,
@@ -757,6 +797,10 @@ async def run_ai(
     await db.flush()
 
     reply_text = output.reply_text
+    # Модель читает текст скрипта через get_script_phrase уже с подставленными
+    # ценой и ссылкой, но иногда переносит в ответ сам плейсхолдер. Клиенту он
+    # уйти не должен ни при каких обстоятельствах.
+    reply_text = await render_price_placeholders(db, reply_text, type_id=type_id)
     reply_text, image_urls = _split_image_urls(reply_text)
     reply_text = _normalize_dashes(reply_text)
 
@@ -798,7 +842,40 @@ async def run_ai(
 
     parts = [ReplyPart(text=reply_text, image_urls=image_urls, message=ai_message)]
 
-    parts.extend(await _build_follow_up_parts(db, dialog, output.source_script_id, client, ctx))
+    # Город уже назван — вопрос про него внутри дословного скрипта «2.3 Доставка»
+    # выглядит так, будто клиента не читают (диалог 52: «Казань» в 01:11, вопрос
+    # «в какой город нужна доставка?» в 01:13).
+    known_city = slots.get("city")
+    parts.extend(await _build_follow_up_parts(
+        db, dialog, output.source_script_id, client, ctx, skip_city_question=bool(known_city),
+    ))
+
+    # Регламент ОП: следом за похвалой уходят стоимость и доставка. Если модель
+    # ответила своим текстом вместо скрипта «2. Похвала», связка не развернулась
+    # бы вовсе — цену клиент так и не увидел (диалог 52).
+    if praise_point and len(parts) == 1:
+        praise = await find_praise_script(db, type_id)
+        if praise is not None:
+            forced = await _build_follow_up_parts(
+                db, dialog, praise.id, client, ctx, skip_city_question=bool(known_city),
+            )
+            if forced:
+                logger.info(
+                    "[%s] funnel chain forced after praise | script=%s | parts=%d",
+                    ctx, praise.id, len(forced),
+                )
+                parts.extend(forced)
+
+    # Контакты получателя собраны — по регламенту следом идёт счёт. Ждать, пока
+    # модель сама выберет скрипт 5.2, нельзя: в диалоге 37 она вместо ссылки
+    # написала, что ссылка «уже отправлена ранее», хотя её никогда не было.
+    if dialog.funnel_stage == "payment_link" and not await dialog_has_payment_link(db, dialog.id):
+        link_script = await find_payment_link_script(db, type_id)
+        if link_script is not None and not PAYMENT_LINK_RE.search(reply_text):
+            part = await _render_script_part(db, dialog, link_script, client)
+            if part is not None:
+                logger.info("[%s] payment link forced | script=%s", ctx, link_script.id)
+                parts.append(part)
 
     await db.commit()
     await db.refresh(ai_run)
@@ -904,8 +981,13 @@ async def _build_follow_up_parts(
     source_script_id: int | None,
     client: Client | None,
     ctx: str,
+    skip_city_question: bool = False,
 ) -> list[ReplyPart]:
-    """Все реплики связки: разворачиваем цепочку, пока у скрипта есть follow_up."""
+    """Все реплики связки: разворачиваем цепочку, пока у скрипта есть follow_up.
+
+    skip_city_question — город клиент уже назвал: звено, которое его спрашивает,
+    пропускаем, но цепочку не обрываем (за доставкой идут следующие шаги).
+    """
     parts: list[ReplyPart] = []
     seen: set[int] = set()
     current_id = source_script_id
@@ -914,10 +996,13 @@ async def _build_follow_up_parts(
             logger.warning("[%s] follow-up chain loops at script %s — stopped", ctx, current_id)
             break
         seen.add(current_id)
-        part, current_id = await _build_follow_up_part(db, dialog, current_id, client, ctx)
-        if part is None:
+        part, current_id = await _build_follow_up_part(
+            db, dialog, current_id, client, ctx, skip_city_question=skip_city_question,
+        )
+        if part is not None:
+            parts.append(part)
+        elif current_id is None:
             break
-        parts.append(part)
     return parts
 
 
@@ -927,8 +1012,13 @@ async def _build_follow_up_part(
     source_script_id: int | None,
     client: Client | None,
     ctx: str,
+    skip_city_question: bool = False,
 ) -> tuple[ReplyPart | None, int | None]:
-    """Одно звено связки: реплика и id скрипта, за которым идти дальше."""
+    """Одно звено связки: реплика и id скрипта, за которым идти дальше.
+
+    Реплика None при непройденном звене; id при этом остаётся, чтобы цепочка
+    продолжилась дальше по нему.
+    """
     if not source_script_id:
         return None, None
     source = await db.get(Script, source_script_id)
@@ -942,12 +1032,37 @@ async def _build_follow_up_part(
         )
         return None, None
 
+    if skip_city_question and ASKS_CITY_RE.search(follow_up.phrase_text or ""):
+        logger.info(
+            "[%s] follow-up %s skipped — city already known", ctx, follow_up.id,
+        )
+        return None, follow_up.id
+
+    part = await _render_script_part(db, dialog, follow_up, client)
+    if part is None:
+        return None, follow_up.id
+    logger.info(
+        "[%s] follow-up queued | script=%s -> %s", ctx, source.id, follow_up.id,
+    )
+    return part, follow_up.id
+
+
+async def _render_script_part(
+    db: AsyncSession,
+    dialog: Dialog,
+    script: Script,
+    client: Client | None,
+) -> ReplyPart | None:
+    """Дословная реплика по скрипту: имя, цены и ссылка на оплату подставлены,
+    фото вынесены во вложения. Модель этот текст не переписывает."""
     text = render_name_placeholder(
-        resolve_spintax(follow_up.phrase_text), client.name if client else None
+        resolve_spintax(script.phrase_text), client.name if client else None
     )
     text = await render_price_placeholders(db, text, type_id=dialog.type_id)
     text = normalize_dashes(text)
     text, image_urls = _split_image_urls(text)
+    if not text.strip() and not image_urls:
+        return None
 
     file_hashes: list[str] = []
     if image_urls:
@@ -961,13 +1076,9 @@ async def _build_follow_up_part(
         msg_metadata={
             "files": image_urls,
             "file_hashes": file_hashes,
-            "follow_up_script_id": follow_up.id,
-            "source_script_id": follow_up.id,
+            "source_script_id": script.id,
         },
     )
     db.add(message)
     await db.flush()
-    logger.info(
-        "[%s] follow-up queued | script=%s -> %s", ctx, source.id, follow_up.id,
-    )
-    return ReplyPart(text=text, image_urls=image_urls, message=message), follow_up.id
+    return ReplyPart(text=text, image_urls=image_urls, message=message)

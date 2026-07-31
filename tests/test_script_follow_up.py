@@ -64,7 +64,7 @@ class TestFollowUpPart:
         part = parts[0]
         assert part.text == "Елена, какое имя или фамилию напишем на Вашей кофте?"
         assert part.message.role == MessageRole.ai
-        assert part.message.msg_metadata["follow_up_script_id"] == chain["question"].id
+        assert part.message.msg_metadata["source_script_id"] == chain["question"].id
 
     async def test_no_chain_no_second_reply(self, db, chain):
         """У вопроса связки нет — разворачивать нечего."""
@@ -112,6 +112,41 @@ class TestChainDepth:
             "Елена, какое имя или фамилию напишем на Вашей кофте?",
             "В какой город доставка?",
         ]
+
+    async def test_known_city_link_skipped_chain_continues(self, db, chain):
+        """Диалог 52: город назван в 01:11, скрипт доставки спросил его в 01:13.
+        Звено с вопросом про город пропускаем, но следующее за ним — отправляем."""
+        delivery = Script(condition="2.3 Доставка", phrase_text="В какой город доставка?", type_id=1)
+        db.add(delivery)
+        await db.flush()
+        colour = Script(condition="3. Цвет", phrase_text="Какой цвет выберем?", type_id=1)
+        db.add(colour)
+        await db.flush()
+        chain["question"].follow_up_script_id = delivery.id
+        delivery.follow_up_script_id = colour.id
+        await db.commit()
+
+        parts = await _build_follow_up_parts(
+            db, chain["dialog"], chain["greeting"].id, chain["client"], "test",
+            skip_city_question=True,
+        )
+        assert [p.text for p in parts] == [
+            "Елена, какое имя или фамилию напишем на Вашей кофте?",
+            "Какой цвет выберем?",
+        ]
+
+    async def test_city_link_sent_when_city_unknown(self, db, chain):
+        delivery = Script(condition="2.3 Доставка", phrase_text="В какой город доставка?", type_id=1)
+        db.add(delivery)
+        await db.flush()
+        chain["question"].follow_up_script_id = delivery.id
+        await db.commit()
+
+        parts = await _build_follow_up_parts(
+            db, chain["dialog"], chain["greeting"].id, chain["client"], "test",
+            skip_city_question=False,
+        )
+        assert parts[-1].text == "В какой город доставка?"
 
     async def test_circular_chain_stops(self, db, chain):
         """Кольцевую ссылку в админке выставить легко — клиент не должен получить
