@@ -19,7 +19,11 @@ from app.sales.products import ProductService
 
 logger = logging.getLogger(__name__)
 
-_PRICE_PLACEHOLDER_RE = re.compile(r"\[цена:([^\]]+)\]", re.IGNORECASE)
+# «[цена:свитшот]» — акционная (то, что клиент платит сегодня),
+# «[цена-до-скидки:свитшот]» — обычная, та самая «вместо N рублей».
+_PRICE_PLACEHOLDER_RE = re.compile(
+    r"\[цена(-до-скидки)?:([^\]]+)\]", re.IGNORECASE
+)
 
 
 def format_price(value) -> str:
@@ -42,12 +46,13 @@ async def render_price_placeholders(
     svc = ProductService(db)
     result = text
     for m in matches:
-        query = m.group(1).strip()
+        before_discount = bool(m.group(1))
+        query = m.group(2).strip()
         products = await svc.search(query, type_id=type_id, limit=1)
         price = None
         if products:
             p = products[0]
-            price = p.min_price if p.min_price is not None else p.price
+            price = p.price if before_discount else (p.min_price if p.min_price is not None else p.price)
         if price is None:
             logger.warning("price placeholder %r: товар не найден, убираю плейсхолдер", query)
             result = result.replace(m.group(0), query)

@@ -7,7 +7,7 @@
 """
 import pytest
 
-from app.ai.runner import _build_follow_up_part
+from app.ai.runner import _build_follow_up_parts
 from app.db.models import Client, Dialog, DialogType, MessageRole, Script
 from app.utils.text import render_name_placeholder
 
@@ -57,37 +57,68 @@ class TestNamePlaceholder:
 
 class TestFollowUpPart:
     async def test_chained_script_produces_second_reply(self, db, chain):
-        part = await _build_follow_up_part(
+        parts = await _build_follow_up_parts(
             db, chain["dialog"], chain["greeting"].id, chain["client"], "test"
         )
-        assert part is not None
+        assert len(parts) == 1
+        part = parts[0]
         assert part.text == "Елена, какое имя или фамилию напишем на Вашей кофте?"
         assert part.message.role == MessageRole.ai
         assert part.message.msg_metadata["follow_up_script_id"] == chain["question"].id
 
     async def test_no_chain_no_second_reply(self, db, chain):
-        """У вопроса связки нет — цепочка однозвенная, дальше не разворачиваем."""
-        assert await _build_follow_up_part(
+        """У вопроса связки нет — разворачивать нечего."""
+        assert await _build_follow_up_parts(
             db, chain["dialog"], chain["question"].id, chain["client"], "test"
-        ) is None
+        ) == []
 
     async def test_free_form_reply_has_no_follow_up(self, db, chain):
         """Модель ответила без скрипта (source_script_id=None) — связки нет."""
-        assert await _build_follow_up_part(
+        assert await _build_follow_up_parts(
             db, chain["dialog"], None, chain["client"], "test"
-        ) is None
+        ) == []
 
     async def test_deactivated_follow_up_skipped(self, db, chain):
         chain["question"].is_active = False
         await db.commit()
-        assert await _build_follow_up_part(
+        assert await _build_follow_up_parts(
             db, chain["dialog"], chain["greeting"].id, chain["client"], "test"
-        ) is None
+        ) == []
 
     async def test_dangling_reference_skipped(self, db, chain):
         """Скрипт удалили — FK ставит NULL, но подстрахуемся и от битой ссылки."""
         chain["greeting"].follow_up_script_id = 99999
         await db.commit()
-        assert await _build_follow_up_part(
+        assert await _build_follow_up_parts(
             db, chain["dialog"], chain["greeting"].id, chain["client"], "test"
-        ) is None
+        ) == []
+
+
+class TestChainDepth:
+    """Воронка ОП — лестница: похвала → стоимость → доставка, каждый шаг помечен
+    «отправляем сразу после …». Разворачиваем всю цепочку, но не бесконечно."""
+
+    async def test_multi_link_chain_expanded(self, db, chain):
+        third = Script(condition="2.3 Доставка", phrase_text="В какой город доставка?", type_id=1)
+        db.add(third)
+        await db.flush()
+        chain["question"].follow_up_script_id = third.id
+        await db.commit()
+
+        parts = await _build_follow_up_parts(
+            db, chain["dialog"], chain["greeting"].id, chain["client"], "test"
+        )
+        assert [p.text for p in parts] == [
+            "Елена, какое имя или фамилию напишем на Вашей кофте?",
+            "В какой город доставка?",
+        ]
+
+    async def test_circular_chain_stops(self, db, chain):
+        """Кольцевую ссылку в админке выставить легко — клиент не должен получить
+        бесконечную простыню."""
+        chain["question"].follow_up_script_id = chain["greeting"].id
+        await db.commit()
+        parts = await _build_follow_up_parts(
+            db, chain["dialog"], chain["greeting"].id, chain["client"], "test"
+        )
+        assert len(parts) <= 4

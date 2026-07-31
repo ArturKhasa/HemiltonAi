@@ -49,3 +49,9 @@ class TestRender:
     async def test_several_placeholders(self, db, products):
         got = await render_price_placeholders(db, "[цена:свитшот] и [цена:футболка]", type_id=1)
         assert got == "4\u00a0990\u00a0₽ и 2\u00a0990\u00a0₽"
+
+    async def test_price_before_discount(self, db, products):
+        """«вместо N рублей» — обычная цена из матрицы, не акционная."""
+        got = await render_price_placeholders(
+            db, "[цена:свитшот] вместо [цена-до-скидки:свитшот]", type_id=1)
+        assert got == "4 990 ₽ вместо 5 990 ₽"

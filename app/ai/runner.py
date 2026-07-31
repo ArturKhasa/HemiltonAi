@@ -756,9 +756,7 @@ async def run_ai(
 
     parts = [ReplyPart(text=reply_text, image_urls=image_urls, message=ai_message)]
 
-    follow_up = await _build_follow_up_part(db, dialog, output.source_script_id, client, ctx)
-    if follow_up is not None:
-        parts.append(follow_up)
+    parts.extend(await _build_follow_up_parts(db, dialog, output.source_script_id, client, ctx))
 
     await db.commit()
     await db.refresh(ai_run)
@@ -833,9 +831,7 @@ async def _run_scripted_greeting(
     ai_run.output_message_id = message.id
 
     parts = [ReplyPart(text=text, image_urls=image_urls, message=message)]
-    follow_up = await _build_follow_up_part(db, dialog, script.id, client, ctx)
-    if follow_up is not None:
-        parts.append(follow_up)
+    parts.extend(await _build_follow_up_parts(db, dialog, script.id, client, ctx))
 
     await db.commit()
     await db.refresh(ai_run)
@@ -853,31 +849,56 @@ async def _run_scripted_greeting(
     return output, ai_run, parts
 
 
+# Воронка ОП — лестница: «2. Похвала» → «2.2 Стоимость» → «2.3 Доставка». Каждый
+# шаг помечен «отправляем сразу после …», то есть уходит без ожидания клиента.
+# Ограничение — страховка от кольцевой ссылки, выставленной в админке: без него
+# клиент получил бы бесконечную простыню.
+_MAX_FOLLOW_UP_CHAIN = 4
+
+
+async def _build_follow_up_parts(
+    db: AsyncSession,
+    dialog: Dialog,
+    source_script_id: int | None,
+    client: Client | None,
+    ctx: str,
+) -> list[ReplyPart]:
+    """Все реплики связки: разворачиваем цепочку, пока у скрипта есть follow_up."""
+    parts: list[ReplyPart] = []
+    seen: set[int] = set()
+    current_id = source_script_id
+    while current_id and len(parts) < _MAX_FOLLOW_UP_CHAIN:
+        if current_id in seen:
+            logger.warning("[%s] follow-up chain loops at script %s — stopped", ctx, current_id)
+            break
+        seen.add(current_id)
+        part, current_id = await _build_follow_up_part(db, dialog, current_id, client, ctx)
+        if part is None:
+            break
+        parts.append(part)
+    return parts
+
+
 async def _build_follow_up_part(
     db: AsyncSession,
     dialog: Dialog,
     source_script_id: int | None,
     client: Client | None,
     ctx: str,
-) -> ReplyPart | None:
-    """Вторая реплика хода, если у применённого скрипта настроена связка.
-
-    Цепочка нарочно однозвенная: follow_up у самого follow_up не разворачиваем.
-    Регламенту хватает пары «приветствие + вопрос», а рекурсия по данным из
-    админки при кольцевой ссылке отправила бы клиенту бесконечную простыню.
-    """
+) -> tuple[ReplyPart | None, int | None]:
+    """Одно звено связки: реплика и id скрипта, за которым идти дальше."""
     if not source_script_id:
-        return None
+        return None, None
     source = await db.get(Script, source_script_id)
     if not source or not source.follow_up_script_id:
-        return None
+        return None, None
     follow_up = await db.get(Script, source.follow_up_script_id)
     if not follow_up or not follow_up.is_active or not (follow_up.phrase_text or "").strip():
         logger.info(
             "[%s] follow-up script %s missing/inactive — skipped",
             ctx, source.follow_up_script_id,
         )
-        return None
+        return None, None
 
     text = render_name_placeholder(
         resolve_spintax(follow_up.phrase_text), client.name if client else None
@@ -907,4 +928,4 @@ async def _build_follow_up_part(
     logger.info(
         "[%s] follow-up queued | script=%s -> %s", ctx, source.id, follow_up.id,
     )
-    return ReplyPart(text=text, image_urls=image_urls, message=message)
+    return ReplyPart(text=text, image_urls=image_urls, message=message), follow_up.id
