@@ -154,6 +154,26 @@
           </button>
         </div>
 
+        <!-- Приход без метки — не то же самое, что чужая реклама: ВК присылает
+             ref только в первом сообщении, а в группу заходят ещё и из поиска. -->
+        <div class="px-4 py-3 border-b flex items-start gap-2 bg-white">
+          <input
+            type="checkbox"
+            id="answer_untagged"
+            :checked="answerUntagged"
+            @change="saveAnswerUntagged($event.target.checked)"
+            class="rounded w-4 h-4 cursor-pointer mt-0.5"
+          />
+          <label for="answer_untagged" class="text-sm text-gray-700 cursor-pointer">
+            Отвечать клиентам без метки
+            <span class="block text-xs text-gray-400 mt-0.5">
+              Органика: зашли из поиска по группе, по ссылке без параметров, писали раньше.
+              Чужая реклама (метка есть, но её нет в списке) блокируется в любом случае.
+            </span>
+          </label>
+          <span v-if="untaggedSaved" class="text-xs text-green-600 ml-auto mt-0.5">сохранено</span>
+        </div>
+
         <p v-if="refTags.length === 0" class="px-4 py-3 text-xs text-amber-700 bg-amber-50 border-b">
           Список пуст — ИИ отвечает всем, как и раньше. Как только добавите первую метку,
           он начнёт отвечать только на метки из этого списка, а остальной трафик пойдёт к менеджеру.
@@ -738,6 +758,23 @@ function syncGreetingDrafts() {
 const greetingChanged = (id) => {
   const src = scripts.value.find(s => s.id === id)
   return !!src && greetingDrafts.value[id] !== undefined && greetingDrafts.value[id] !== src.phrase_text
+}
+
+
+// Галка живёт на направлении: у каждого своя реклама и свой органический трафик.
+const untaggedSaved = ref(false)
+const answerUntagged = computed(() => {
+  const t = dialogTypes.value.find(x => x.id === (activeTypeId.value ?? dialogTypes.value[0]?.id))
+  return t ? t.answer_untagged !== false : true
+})
+
+async function saveAnswerUntagged(value) {
+  const t = dialogTypes.value.find(x => x.id === (activeTypeId.value ?? dialogTypes.value[0]?.id))
+  if (!t) return
+  const res = await api.patch(`/dialog-types/${t.id}`, { answer_untagged: value })
+  t.answer_untagged = res.data.answer_untagged
+  untaggedSaved.value = true
+  setTimeout(() => { untaggedSaved.value = false }, 2000)
 }
 
 async function loadRefTags() {

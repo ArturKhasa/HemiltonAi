@@ -31,7 +31,8 @@ class TestWhitelistBootstrap:
         await db.commit()
         assert await svc.ai_allowed("rusover449", 1) is True
         assert await svc.ai_allowed("другая", 1) is False
-        assert await svc.ai_allowed(None, 1) is False
+        # Приход без метки — отдельный случай, см. TestUntaggedSwitch.
+        assert await svc.ai_allowed(None, 1) is True
 
     async def test_disabled_tag_blocks_ai(self, db, svc):
         await svc.create("rusover449", type_id=1, is_active=False)
@@ -93,3 +94,31 @@ class TestRefParsing:
                                    "random_id": 0, "attachments": [], "ref": "adb_r"}},
         }
         assert parse_message_event(event).ref == "adb_r"
+
+
+class TestUntaggedSwitch:
+    """ВК присылает ref только в первом сообщении, поэтому без метки приходят и
+    живые клиенты — из поиска по группе, по ссылке без параметров, старые. Их
+    судьбу решает настройка направления, а не белый список."""
+
+    @pytest.fixture
+    async def with_tag(self, db, svc):
+        await svc.create("rusover449", type_id=1)
+        await db.commit()
+        return svc
+
+    async def test_untagged_served_by_default(self, db, with_tag):
+        assert await with_tag.ai_allowed(None, 1) is True
+
+    async def test_untagged_blocked_when_switched_off(self, db, with_tag):
+        dt = await db.get(DialogType, 1)
+        dt.answer_untagged = False
+        await db.commit()
+        assert await with_tag.ai_allowed(None, 1) is False
+
+    async def test_foreign_tag_blocked_regardless(self, db, with_tag):
+        """Чужая реклама блокируется всегда — галка её не касается."""
+        dt = await db.get(DialogType, 1)
+        dt.answer_untagged = True
+        await db.commit()
+        assert await with_tag.ai_allowed("чужая-кампания", 1) is False

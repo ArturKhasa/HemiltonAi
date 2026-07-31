@@ -45,6 +45,10 @@ class DialogType(Base):
     name = Column(String(128), unique=True, nullable=False)
     display_name = Column(String(255), nullable=False)
     successful_clients_file = Column(String(512), nullable=True)
+    # Отвечает ли ИИ клиентам, пришедшим БЕЗ ref-метки (органика, поиск по группе,
+    # старые клиенты). Чужая реклама — метка есть, но не в белом списке — блокируется
+    # независимо от этого флага. См. миграцию 044 и app.sales.ref_tags.
+    answer_untagged = Column(Boolean, nullable=False, default=True, server_default="true")
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=msk_now)
 

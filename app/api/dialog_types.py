@@ -18,6 +18,7 @@ class DialogTypeOut(BaseModel):
     name: str
     display_name: str
     is_active: bool
+    answer_untagged: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -31,6 +32,7 @@ class DialogTypeCreateRequest(BaseModel):
 class DialogTypeUpdateRequest(BaseModel):
     display_name: str | None = None
     is_active: bool | None = None
+    answer_untagged: bool | None = None
 
 
 @router.get("/", response_model=list[DialogTypeOut])
@@ -77,6 +79,8 @@ async def update_dialog_type(
         dt.display_name = body.display_name
     if body.is_active is not None:
         dt.is_active = body.is_active
+    if body.answer_untagged is not None:
+        dt.answer_untagged = body.answer_untagged
     await db.commit()
     await db.refresh(dt)
     return dt
