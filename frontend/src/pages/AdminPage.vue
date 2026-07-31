@@ -3,7 +3,7 @@
     <div class="bg-white border-b px-6 py-4 flex items-center justify-between">
       <div class="flex items-center gap-3">
         <button @click="$router.push('/')" class="text-sm text-gray-400 hover:text-gray-600">← Назад</button>
-        <h1 class="text-lg font-semibold text-gray-800">{{ activeSection === 'scripts' ? 'Скрипты' : 'Группы ВК' }}</h1>
+        <h1 class="text-lg font-semibold text-gray-800">{{ SECTIONS.find(x => x.id === activeSection)?.label }}</h1>
       </div>
       <div class="flex items-center gap-4">
         <button
@@ -140,8 +140,93 @@
         </div>
       </div>
 
+      <!-- ===== Ref tags section ===== -->
+      <div v-else-if="activeSection === 'ref-tags'" class="bg-white rounded-xl shadow-sm border overflow-hidden">
+        <div class="px-4 py-3 flex justify-between items-center border-b bg-gray-50">
+          <div class="flex flex-col gap-0.5">
+            <span class="text-sm text-gray-500">{{ refTags.length }} меток</span>
+            <span class="text-xs text-gray-400">
+              Метка из рекламной ссылки: <span class="font-mono text-gray-500">?ref=adb_r&amp;ref_source=<b>rusover449</b></span>
+            </span>
+          </div>
+          <button @click="openRefCreate" class="bg-brand-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-brand-700 font-medium">
+            + Добавить метку
+          </button>
+        </div>
+
+        <p v-if="refTags.length === 0" class="px-4 py-3 text-xs text-amber-700 bg-amber-50 border-b">
+          Список пуст — ИИ отвечает всем, как и раньше. Как только добавите первую метку,
+          он начнёт отвечать только на метки из этого списка, а остальной трафик пойдёт к менеджеру.
+        </p>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="bg-gray-50 text-left border-b">
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium">Метка</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-32">ИИ отвечает</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium">Первое сообщение</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-44">Заметка</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-24">Действия</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              <tr v-if="refLoading"><td colspan="5" class="px-4 py-10 text-center text-gray-400">Загрузка...</td></tr>
+              <tr v-else-if="refTags.length === 0"><td colspan="5" class="px-4 py-10 text-center text-gray-400">Меток пока нет</td></tr>
+              <tr v-else v-for="r in refTags" :key="r.id" class="hover:bg-gray-50 transition-colors align-top">
+                <td class="px-4 py-3 font-mono text-gray-800">{{ r.tag }}</td>
+                <td class="px-4 py-3">
+                  <button
+                    @click="toggleRefActive(r)"
+                    :class="[
+                      'px-2.5 py-1 rounded-full text-xs font-medium transition-colors',
+                      r.is_active ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                                  : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                    ]"
+                  >{{ r.is_active ? 'Да' : 'Нет' }}</button>
+                </td>
+                <td class="px-4 py-3">
+                  <select
+                    :value="r.greeting_script_id || 0"
+                    @change="bindGreeting(r, Number($event.target.value))"
+                    class="w-full border rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
+                  >
+                    <option :value="0">— общее приветствие —</option>
+                    <option v-for="g in greetingScripts" :key="g.id" :value="g.id">
+                      #{{ g.id }} — {{ (g.marketing_tag || g.phrase_text).slice(0, 46) }}
+                    </option>
+                  </select>
+                  <div v-if="r.greeting_script_id" class="mt-1.5">
+                    <textarea
+                      v-model="greetingDrafts[r.greeting_script_id]"
+                      rows="4"
+                      class="w-full border rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-brand-500 resize-y"
+                    ></textarea>
+                    <div class="flex items-center gap-2 mt-1">
+                      <button
+                        @click="saveGreetingText(r.greeting_script_id)"
+                        :disabled="!greetingChanged(r.greeting_script_id)"
+                        class="text-xs px-2.5 py-1 rounded-lg bg-brand-600 text-white disabled:opacity-40 hover:bg-brand-700"
+                      >Сохранить текст</button>
+                      <span v-if="greetingSaved === r.greeting_script_id" class="text-xs text-green-600">сохранено</span>
+                    </div>
+                  </div>
+                </td>
+                <td class="px-4 py-3 text-gray-500 text-xs">{{ r.note || '—' }}</td>
+                <td class="px-4 py-3">
+                  <div class="flex gap-3">
+                    <button @click="openRefEdit(r)" class="text-brand-700 hover:text-brand-800 text-xs font-medium">Ред.</button>
+                    <button @click="refDeleteTarget = r" class="text-red-400 hover:text-red-600 text-xs font-medium">Удал.</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <!-- ===== VK groups section ===== -->
-      <div v-else class="bg-white rounded-xl shadow-sm border overflow-hidden">
+      <div v-else-if="activeSection === 'vk-groups'" class="bg-white rounded-xl shadow-sm border overflow-hidden">
         <div class="px-4 py-3 flex justify-between items-center border-b bg-gray-50">
           <div class="flex flex-col gap-0.5">
             <span class="text-sm text-gray-500">{{ vkGroups.length }} групп</span>
@@ -291,6 +376,67 @@
       </div>
     </div>
 
+
+    <!-- Ref tag modal -->
+    <div v-if="showRefModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-xl shadow-xl w-full max-w-md">
+        <div class="px-6 py-4 border-b">
+          <h2 class="font-semibold text-gray-800">{{ editRefTag ? 'Метка #' + editRefTag.id : 'Новая реф-метка' }}</h2>
+        </div>
+        <div class="p-6 space-y-4">
+          <div>
+            <label class="block text-xs text-gray-500 mb-1.5">Метка</label>
+            <input
+              v-model="refForm.tag"
+              placeholder="rusover449"
+              class="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
+            />
+            <p class="text-xs text-gray-400 mt-1">Значение <span class="font-mono">ref_source</span> из рекламной ссылки.</p>
+          </div>
+          <div v-if="!editRefTag">
+            <label class="block text-xs text-gray-500 mb-1.5">Направление</label>
+            <select v-model="refForm.type_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white">
+              <option :value="null">— не задано —</option>
+              <option v-for="t in dialogTypes" :key="t.id" :value="t.id">{{ t.display_name }}</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 mb-1.5">Заметка</label>
+            <input
+              v-model="refForm.note"
+              placeholder="Например: свитшоты, гербы, август"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+            />
+          </div>
+          <div class="flex items-center gap-2">
+            <input type="checkbox" v-model="refForm.is_active" id="ref_is_active" class="rounded w-4 h-4 cursor-pointer" />
+            <label for="ref_is_active" class="text-sm text-gray-700 cursor-pointer">ИИ отвечает на эту метку</label>
+          </div>
+          <p v-if="refError" class="text-red-500 text-sm">{{ refError }}</p>
+        </div>
+        <div class="px-6 py-4 border-t flex justify-end gap-2">
+          <button @click="showRefModal = false" class="px-4 py-2 text-sm text-gray-600 border rounded-lg hover:bg-gray-50">Отмена</button>
+          <button
+            @click="saveRefTag"
+            :disabled="refSaving || !refForm.tag.trim()"
+            class="px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 font-medium"
+          >{{ refSaving ? 'Сохранение...' : (editRefTag ? 'Сохранить' : 'Создать') }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Ref tag delete confirmation -->
+    <div v-if="refDeleteTarget" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-xl shadow-xl w-full max-w-sm p-6">
+        <h2 class="font-semibold text-gray-800 mb-2">Удалить метку «{{ refDeleteTarget.tag }}»?</h2>
+        <p class="text-sm text-gray-500 mb-6">Клиенты с этой метки перестанут получать ответы ИИ.</p>
+        <div class="flex gap-2">
+          <button @click="refDeleteTarget = null" class="flex-1 px-4 py-2 text-sm border rounded-lg hover:bg-gray-50">Отмена</button>
+          <button @click="doRefDelete" class="flex-1 px-4 py-2 text-sm bg-red-500 text-white rounded-lg hover:bg-red-600">Удалить</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Delete script confirmation -->
     <div v-if="deleteTarget" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
       <div class="bg-white rounded-xl shadow-xl w-full max-w-sm p-6">
@@ -425,6 +571,7 @@ const auth = useAuthStore()
 
 const SECTIONS = [
   { id: 'scripts', label: 'Скрипты' },
+  { id: 'ref-tags', label: 'Реф-метки' },
   { id: 'vk-groups', label: 'Группы ВК' },
 ]
 const activeSection = ref('scripts')
@@ -558,6 +705,114 @@ async function doDelete() {
 
 // ===== Группы ВК =====
 
+
+// ===== Реф-метки =====
+// Заказчик: «метки проставляют и редактируют постоянно + редактирование первых
+// сообщений» — поэтому текст приветствия правится прямо в строке метки, а не
+// поиском нужного скрипта среди сотни остальных.
+const refTags = ref([])
+const refLoading = ref(false)
+const refSaving = ref(false)
+const showRefModal = ref(false)
+const editRefTag = ref(null)
+const refDeleteTarget = ref(null)
+const refError = ref('')
+const refForm = ref({ tag: '', type_id: null, is_active: true, note: '' })
+
+// Черновики текстов приветствий: правим у себя, сохраняем по кнопке.
+const greetingDrafts = ref({})
+const greetingSaved = ref(null)
+
+const greetingScripts = computed(() =>
+  scripts.value.filter(s => (s.condition || '').toLowerCase().includes('первое приветственное'))
+)
+
+function syncGreetingDrafts() {
+  for (const r of refTags.value) {
+    if (!r.greeting_script_id) continue
+    const src = scripts.value.find(s => s.id === r.greeting_script_id)
+    if (src) greetingDrafts.value[r.greeting_script_id] = src.phrase_text
+  }
+}
+
+const greetingChanged = (id) => {
+  const src = scripts.value.find(s => s.id === id)
+  return !!src && greetingDrafts.value[id] !== undefined && greetingDrafts.value[id] !== src.phrase_text
+}
+
+async function loadRefTags() {
+  refLoading.value = true
+  try {
+    const res = await api.get('/ref-tags/')
+    refTags.value = res.data
+    syncGreetingDrafts()
+  } finally {
+    refLoading.value = false
+  }
+}
+
+function openRefCreate() {
+  editRefTag.value = null
+  refError.value = ''
+  refForm.value = { tag: '', type_id: activeTypeId.value, is_active: true, note: '' }
+  showRefModal.value = true
+}
+
+function openRefEdit(r) {
+  editRefTag.value = r
+  refError.value = ''
+  refForm.value = { tag: r.tag, type_id: r.type_id, is_active: r.is_active, note: r.note || '' }
+  showRefModal.value = true
+}
+
+async function saveRefTag() {
+  refSaving.value = true
+  refError.value = ''
+  try {
+    if (editRefTag.value) {
+      const res = await api.patch(`/ref-tags/${editRefTag.value.id}`, {
+        tag: refForm.value.tag, is_active: refForm.value.is_active, note: refForm.value.note,
+      })
+      const i = refTags.value.findIndex(x => x.id === editRefTag.value.id)
+      if (i !== -1) refTags.value[i] = res.data
+    } else {
+      const res = await api.post('/ref-tags/', refForm.value)
+      refTags.value.push(res.data)
+    }
+    showRefModal.value = false
+  } catch (e) {
+    refError.value = e.response?.data?.detail || 'Ошибка'
+  } finally {
+    refSaving.value = false
+  }
+}
+
+async function toggleRefActive(r) {
+  const res = await api.patch(`/ref-tags/${r.id}`, { is_active: !r.is_active })
+  r.is_active = res.data.is_active
+}
+
+async function bindGreeting(r, scriptId) {
+  // 0 вместо null: PATCH на бэке режет null-поля (exclude_none).
+  const res = await api.patch(`/ref-tags/${r.id}`, { greeting_script_id: scriptId })
+  r.greeting_script_id = res.data.greeting_script_id
+  syncGreetingDrafts()
+}
+
+async function saveGreetingText(scriptId) {
+  const res = await api.patch(`/scripts/${scriptId}`, { phrase_text: greetingDrafts.value[scriptId] })
+  const i = scripts.value.findIndex(s => s.id === scriptId)
+  if (i !== -1) scripts.value[i] = res.data
+  greetingSaved.value = scriptId
+  setTimeout(() => { if (greetingSaved.value === scriptId) greetingSaved.value = null }, 2000)
+}
+
+async function doRefDelete() {
+  await api.delete(`/ref-tags/${refDeleteTarget.value.id}`)
+  refTags.value = refTags.value.filter(x => x.id !== refDeleteTarget.value.id)
+  refDeleteTarget.value = null
+}
+
 const groupsLoading = ref(false)
 const groupSaving = ref(false)
 const vkGroups = ref([])
@@ -664,8 +919,10 @@ async function doDeleteGroup() {
   }
 }
 
-onMounted(() => {
-  load()
+onMounted(async () => {
+  // Метки после скриптов: экран показывает тексты приветствий, а они из scripts.
+  await load()
   loadGroups()
+  loadRefTags()
 })
 </script>

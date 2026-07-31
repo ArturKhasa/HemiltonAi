@@ -174,7 +174,7 @@ async def _get_or_create_client(
 
 
 async def _get_or_create_dialog(
-    db: AsyncSession, client: Client, type_id: int | None
+    db: AsyncSession, client: Client, type_id: int | None, ai_allowed: bool = True,
 ) -> Dialog:
     dialog = await db.scalar(
         select(Dialog).where(Dialog.client_id == client.id, Dialog.type_id == type_id)
@@ -192,6 +192,8 @@ async def _get_or_create_dialog(
         type_id=type_id,
         current_status_id=initial_status.id if initial_status else None,
         is_test=False,
+        # Метка не в белом списке — диалог сразу к живому менеджеру, ИИ молчит.
+        ai_paused=not ai_allowed,
         ai_provider=pick_ai_provider(client.id),
     )
     db.add(dialog)
@@ -204,7 +206,11 @@ async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMe
     client = await _get_or_create_client(db, group, msg.vk_user_id, ref=msg.ref)
     type_id, type_name = await _resolve_dialog_type(db, group)
     current_dialog_type.set(type_name)
-    dialog = await _get_or_create_dialog(db, client, type_id)
+
+    from app.sales.ref_tags import RefTagService
+    client_tag = (client.marketing_tags or [None])[0]
+    ai_allowed = await RefTagService(db).ai_allowed(client_tag, type_id)
+    dialog = await _get_or_create_dialog(db, client, type_id, ai_allowed=ai_allowed)
     ctx = f"vk={group.group_id}/{msg.vk_user_id}"
 
     # Дедуп: ВК ретраит события. Сообщение с завершённым AIRun — пропускаем;

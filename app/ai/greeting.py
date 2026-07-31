@@ -49,6 +49,23 @@ async def pick_greeting_script(
     группы берём наименьший id: в выгрузке лежит несколько одинаковых по условию
     приветствий без тега, и выбор должен быть воспроизводимым, а не случайным.
     """
+    client_tags = set((client.marketing_tags if client else None) or [])
+
+    # Явная привязка из админки сильнее подбора по тегу скрипта: там метка и тег
+    # совпадают только пока их не разошлись руками, а метки правят постоянно.
+    from app.sales.ref_tags import RefTagService
+    svc = RefTagService(db)
+    for tag in sorted(client_tags):
+        row = await svc.get(tag, type_id)
+        if row is not None and row.greeting_script_id:
+            bound = await db.get(Script, row.greeting_script_id)
+            if bound is not None and bound.is_active and (bound.phrase_text or "").strip():
+                return bound
+            logger.warning(
+                "ref-метка %r ссылается на неактивный приветственный скрипт %s",
+                tag, row.greeting_script_id,
+            )
+
     q = select(Script).where(Script.is_active == True)
     if type_id is not None:
         q = q.where(Script.type_id == type_id)
@@ -62,7 +79,6 @@ async def pick_greeting_script(
     if not candidates:
         return None
 
-    client_tags = set((client.marketing_tags if client else None) or [])
     if client_tags:
         tagged = [
             s for s in candidates

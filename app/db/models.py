@@ -248,6 +248,27 @@ class Script(Base):
 
 
 
+class RefTag(Base):
+    """Метка рекламной ссылки (?ref=adb_r&ref_source=rusover449 → «rusover449»).
+
+    Белый список: ИИ отвечает только клиентам с перечисленными здесь метками, и
+    у каждой кампании своё приветствие. Пока таблица ПУСТА, список не
+    применяется и ИИ отвечает всем — см. app.vk.webhook и миграцию 043.
+    """
+    __tablename__ = "ref_tags"
+    id = Column(Integer, primary_key=True)
+    type_id = Column(Integer, ForeignKey("dialog_types.id", ondelete="CASCADE"), nullable=True)
+    tag = Column(String(128), nullable=False, index=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    greeting_script_id = Column(
+        Integer, ForeignKey("scripts.id", ondelete="SET NULL"), nullable=True
+    )
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=msk_now)
+    updated_at = Column(DateTime, default=msk_now, onupdate=msk_now)
+    __table_args__ = (UniqueConstraint("type_id", "tag", name="uq_ref_tag_type_tag"),)
+
+
 class PromptVersion(Base):
     __tablename__ = "prompt_versions"
     id = Column(Integer, primary_key=True)
