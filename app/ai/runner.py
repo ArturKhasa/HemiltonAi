@@ -725,9 +725,12 @@ async def run_ai(
         msg_metadata={
             "ai_run_id": ai_run.id,
             "confidence": confidence,
-            "need_curator": output.need_curator,
-            # Метка эскалации для админки: клиенту в ВК уходит обычный текст, а
-            # куратор видит в переписке, на чём именно диалог передан менеджеру.
+            # В админке помечаем «на проверку» и по триггеру тоже, хотя ответ при
+            # этом клиенту уходит: отдельная вторая метка про то же самое только
+            # путала кураторов. Решение об отправке принимается по output.need_curator
+            # (см. вебхук), а это поле — исключительно для интерфейса.
+            "need_curator": output.need_curator or bool(trigger),
+            # Причина, которая дописывается к метке: «на проверку: вышивка».
             "curator_trigger": trigger,
             "files": image_urls,
             "file_hashes": file_hashes,

@@ -280,12 +280,13 @@
                     <span v-if="msg.confidence_score !== null && msg.confidence_score !== undefined">
                       {{ (msg.confidence_score * 100).toFixed(0) }}% уверенность
                     </span>
-                    <span v-if="msg.need_curator" class="text-orange-500 font-medium">⚠ На проверку куратору</span>
                     <span
-                      v-if="msg.curator_trigger"
-                      class="text-orange-600 font-semibold"
-                      title="Клиенту ответ ушёл, дальше диалог ведёт менеджер — ИИ на паузе"
-                    >🙋 Передан менеджеру: {{ msg.curator_trigger }}</span>
+                      v-if="msg.need_curator"
+                      class="text-orange-500 font-medium"
+                      :title="msg.curator_trigger
+                        ? 'Ответ клиенту ушёл, дальше диалог ведёт менеджер — ИИ на паузе'
+                        : 'Ответ не отправлен клиенту, ждёт проверки куратора'"
+                    >⚠ На проверку куратору{{ msg.curator_trigger ? ': ' + msg.curator_trigger : '' }}</span>
                   </div>
                   <div v-else></div>
                   <span v-if="msg.created_at" :class="['text-xs ml-auto', msg.role === 'client' ? 'text-brand-200' : 'text-gray-400']">
@@ -1307,8 +1308,9 @@ function exportDialogHtml() {
     if (msg.confidence_score !== null && msg.confidence_score !== undefined && msg.role !== 'client') {
       meta.push(`${(msg.confidence_score * 100).toFixed(0)}% уверенность`)
     }
-    if (msg.need_curator) meta.push('⚠ На проверку куратору')
-    if (msg.curator_trigger) meta.push(`🙋 Передан менеджеру: ${escapeHtml(msg.curator_trigger)}`)
+    if (msg.need_curator) {
+      meta.push('⚠ На проверку куратору' + (msg.curator_trigger ? `: ${escapeHtml(msg.curator_trigger)}` : ''))
+    }
     if (msg.selected_script) meta.push(escapeHtml(msg.selected_script))
 
     const files = (msg.files || []).map(url => isAudioUrl(url)
