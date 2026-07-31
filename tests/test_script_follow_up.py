@@ -40,7 +40,8 @@ async def chain(db):
 
 class TestNamePlaceholder:
     def test_cyrillic_name_substituted(self):
-        assert render_name_placeholder(QUESTION, "Лена").startswith("Лена, какое имя")
+        """Уменьшительное разворачивается в полное — см. test_client_name."""
+        assert render_name_placeholder(QUESTION, "Лена").startswith("Елена, какое имя")
 
     def test_latin_name_dropped(self):
         """Латиница/ник — обращаемся без имени, как и требует системный промпт."""
@@ -60,7 +61,7 @@ class TestFollowUpPart:
             db, chain["dialog"], chain["greeting"].id, chain["client"], "test"
         )
         assert part is not None
-        assert part.text == "Лена, какое имя или фамилию напишем на Вашей кофте?"
+        assert part.text == "Елена, какое имя или фамилию напишем на Вашей кофте?"
         assert part.message.role == MessageRole.ai
         assert part.message.msg_metadata["follow_up_script_id"] == chain["question"].id
 
