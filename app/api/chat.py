@@ -42,6 +42,9 @@ class ChatMessageOut(BaseModel):
     text: str
     created_at: datetime
     need_curator: bool = False
+    # Тема, из-за которой диалог передан менеджеру («вышивка», «опт»). Метка
+    # только для админки — клиенту в ВК уходит обычный текст ответа.
+    curator_trigger: str | None = None
     confidence_score: float | None = None
     files: list[str] = []
     audio_urls: list[str] = []
@@ -601,18 +604,21 @@ async def send_message(
         files: list[str] = []
         is_ping = False
         audio_urls: list[str] = []
+        curator_trigger = None
         if m.msg_metadata:
             need_curator = m.msg_metadata.get("need_curator", False)
             confidence = m.msg_metadata.get("confidence")
             files = m.msg_metadata.get("files", [])
             audio_urls = m.msg_metadata.get("audio_urls", [])
             is_ping = bool(m.msg_metadata.get("ping", False))
+            curator_trigger = m.msg_metadata.get("curator_trigger")
         out.append(ChatMessageOut(
             id=m.id,
             role=m.role.value,
             text=m.text,
             created_at=m.created_at,
             need_curator=need_curator,
+            curator_trigger=curator_trigger,
             confidence_score=confidence,
             files=files,
             audio_urls=audio_urls,
@@ -693,12 +699,14 @@ async def get_history(
         files: list[str] = []
         is_ping = False
         audio_urls: list[str] = []
+        curator_trigger = None
         if m.msg_metadata:
             need_curator = m.msg_metadata.get("need_curator", False)
             confidence = m.msg_metadata.get("confidence")
             files = m.msg_metadata.get("files", [])
             audio_urls = m.msg_metadata.get("audio_urls", [])
             is_ping = bool(m.msg_metadata.get("ping", False))
+            curator_trigger = m.msg_metadata.get("curator_trigger")
         fb = feedbacks.get(m.id)
         run = ai_runs_by_msg.get(m.id)
         out.append(ChatMessageOut(
@@ -707,6 +715,7 @@ async def get_history(
             text=m.text,
             created_at=m.created_at,
             need_curator=need_curator,
+            curator_trigger=curator_trigger,
             confidence_score=confidence,
             files=files,
             audio_urls=audio_urls,

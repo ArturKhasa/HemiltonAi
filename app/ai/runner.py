@@ -614,19 +614,26 @@ async def run_ai(
     # Вышивка и опт: и то и другое считается индивидуально, цены высокие, ошибка
     # дорого стоит — темы ведёт менеджер, не ИИ. Стоит последним, ПОСЛЕ всех гейтов
     # выше: иначе переход из «Горячий клиент» сбросил бы эскалацию обратно в None.
-    # Ответ при этом уходит клиенту как обычно (need_curator не трогаем) —
-    # придерживать его значило бы вешать диалог на каждом упоминании темы.
     trigger = curator_trigger(text)
     if trigger:
-        # На саму реплику с триггером отвечаем (РОП просил не молчать в ответ на
-        # прямой вопрос), а дальше замолкаем и ждём менеджера. Пауза заодно
-        # держит статус: без неё следующий же прогон перезаписал бы «Нужен
-        # куратор» своим next_status, и эскалация пропадала бы из списка.
+        # На саму реплику с триггером отвечаем, дальше замолкаем и ждём менеджера.
+        # Пауза заодно держит статус: без неё следующий же прогон перезаписал бы
+        # «Нужен куратор» своим next_status, и эскалация пропадала бы из списка.
+        #
+        # need_curator снимаем принудительно: с ним вебхук придержал бы ответ
+        # (webhook.py), и на живом трафике клиент на «а вышивка есть?» не получил
+        # бы вообще ничего — а РОП просил отвечать общей формулировкой. Риск
+        # ограничен одной репликой: сразу за ней диалог встаёт на паузу.
         logger.info(
-            "[%s] trigger %r in client message -> status %r + ai paused (this reply still sent)",
-            ctx, trigger, CURATOR_STATUS_NAME,
+            "[%s] trigger %r in client message -> status %r + ai paused "
+            "(reply released to client, need_curator was %s)",
+            ctx, trigger, CURATOR_STATUS_NAME, output.need_curator,
         )
-        output = output.model_copy(update={"next_status": CURATOR_STATUS_NAME})
+        output = output.model_copy(update={
+            "next_status": CURATOR_STATUS_NAME,
+            "need_curator": False,
+            "curator_reason": f"Тема менеджера: {trigger}",
+        })
         dialog.ai_paused = True
 
     if output.next_status:
@@ -719,6 +726,9 @@ async def run_ai(
             "ai_run_id": ai_run.id,
             "confidence": confidence,
             "need_curator": output.need_curator,
+            # Метка эскалации для админки: клиенту в ВК уходит обычный текст, а
+            # куратор видит в переписке, на чём именно диалог передан менеджеру.
+            "curator_trigger": trigger,
             "files": image_urls,
             "file_hashes": file_hashes,
         },

@@ -94,6 +94,11 @@
             <span v-if="d.current_status" :class="['text-[10px] font-medium px-1.5 py-0.5 rounded-full', statusColor(d.current_status)]">
               {{ d.current_status }}
             </span>
+            <span
+              v-if="d.ai_paused"
+              class="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700"
+              title="ИИ на паузе — диалог ведёт менеджер"
+            >⏸ ручной</span>
           </div>
           <button
             v-if="d.is_test"
@@ -276,6 +281,11 @@
                       {{ (msg.confidence_score * 100).toFixed(0) }}% уверенность
                     </span>
                     <span v-if="msg.need_curator" class="text-orange-500 font-medium">⚠ На проверку куратору</span>
+                    <span
+                      v-if="msg.curator_trigger"
+                      class="text-orange-600 font-semibold"
+                      title="Клиенту ответ ушёл, дальше диалог ведёт менеджер — ИИ на паузе"
+                    >🙋 Передан менеджеру: {{ msg.curator_trigger }}</span>
                   </div>
                   <div v-else></div>
                   <span v-if="msg.created_at" :class="['text-xs ml-auto', msg.role === 'client' ? 'text-brand-200' : 'text-gray-400']">
@@ -1298,6 +1308,7 @@ function exportDialogHtml() {
       meta.push(`${(msg.confidence_score * 100).toFixed(0)}% уверенность`)
     }
     if (msg.need_curator) meta.push('⚠ На проверку куратору')
+    if (msg.curator_trigger) meta.push(`🙋 Передан менеджеру: ${escapeHtml(msg.curator_trigger)}`)
     if (msg.selected_script) meta.push(escapeHtml(msg.selected_script))
 
     const files = (msg.files || []).map(url => isAudioUrl(url)
