@@ -140,6 +140,40 @@ def _find_duplicate_reply(reply: str, manager_texts: list[str]) -> str | None:
     return None
 
 
+
+# Клиент отвечает одним словом на «что остановило — цена или сроки?». Это ОТВЕТ,
+# а не новый вопрос о стоимости, но модель читает «цена» буквально и присылает
+# прайс заново. Промптом не держится — проверяем в коде.
+_OBJECTION_ANSWER_RE = re.compile(
+    r"^\W*(цена|цены|ценник|стоимость|дорого|дороговато|сроки|срок|долго|"
+    r"дизайн|финансы|деньги|не надо|не нужно|подумаю)\W*$",
+    re.IGNORECASE,
+)
+_MONEY_RE = re.compile(r"\d[\d\s\u00a0]{2,7}(?=\s*(?:₽|руб))", re.IGNORECASE)
+
+_REQUOTE_RETRY_INSTRUCTION = (
+    "[Служебное] Клиент отвечает на ТВОЙ вопрос о том, что его остановило, а не "
+    "спрашивает цену заново — он её уже видел. Не повторяй стоимость и не описывай "
+    "товар снова. Отработай возражение: присоединись, назови ценность, предложи "
+    "оплату частями. Напиши другой ответ."
+)
+
+
+def _prices_in(text: str) -> set[str]:
+    """Суммы в тексте, нормализованные: «4 990 ₽» и «4990руб» — одно и то же."""
+    return {re.sub(r"\D", "", m) for m in _MONEY_RE.findall(text or "")}
+
+
+def _requotes_known_price(client_text: str, reply: str, manager_texts: list[str]) -> bool:
+    """Ответ повторяет уже названную сумму в ответ на возражение одним словом."""
+    if not _OBJECTION_ANSWER_RE.match((client_text or "").strip()):
+        return False
+    already = set()
+    for t in manager_texts:
+        already |= _prices_in(t)
+    return bool(_prices_in(reply) & already)
+
+
 def _attachment_content(text: str, files: list[str]) -> list[dict]:
     """Собирает multimodal-контент сообщения клиента: текст + вложения.
 
@@ -504,14 +538,22 @@ async def run_ai(
         acc_cache_write += cache_write_tokens
 
         dup_match = _find_duplicate_reply(output.reply_text, manager_history_texts)
-        if not dup_match or dup_attempt == 2:
+        requote = _requotes_known_price(text, output.reply_text, manager_history_texts)
+        if (not dup_match and not requote) or dup_attempt == 2:
             break
-        logger.warning(
-            "[%s] reply duplicates an already-sent manager message — retrying | dup_head=%r",
-            ctx, dup_match[:100],
-        )
+        if requote:
+            logger.warning(
+                "[%s] reply re-quotes a known price in answer to an objection — retrying", ctx,
+            )
+            correction = _REQUOTE_RETRY_INSTRUCTION
+        else:
+            logger.warning(
+                "[%s] reply duplicates an already-sent manager message — retrying | dup_head=%r",
+                ctx, dup_match[:100],
+            )
+            correction = _DUP_RETRY_INSTRUCTION
         input_messages.append({"role": "assistant", "content": output.reply_text})
-        input_messages.append({"role": "user", "content": _DUP_RETRY_INSTRUCTION})
+        input_messages.append({"role": "user", "content": correction})
 
     if dup_match:
         logger.warning("[%s] duplicate reply survived the retry — escalating to curator", ctx)
