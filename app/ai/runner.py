@@ -618,11 +618,16 @@ async def run_ai(
     # придерживать его значило бы вешать диалог на каждом упоминании темы.
     trigger = curator_trigger(text)
     if trigger:
+        # На саму реплику с триггером отвечаем (РОП просил не молчать в ответ на
+        # прямой вопрос), а дальше замолкаем и ждём менеджера. Пауза заодно
+        # держит статус: без неё следующий же прогон перезаписал бы «Нужен
+        # куратор» своим next_status, и эскалация пропадала бы из списка.
         logger.info(
-            "[%s] trigger %r in client message -> status %r (reply still sent)",
+            "[%s] trigger %r in client message -> status %r + ai paused (this reply still sent)",
             ctx, trigger, CURATOR_STATUS_NAME,
         )
         output = output.model_copy(update={"next_status": CURATOR_STATUS_NAME})
+        dialog.ai_paused = True
 
     if output.next_status:
         matching = next((s for s in active_statuses if s.name == output.next_status), None)

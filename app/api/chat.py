@@ -573,8 +573,15 @@ async def send_message(
     await db.flush()
     await db.commit()
 
-    from app.ai.runner import run_ai
-    output, ai_run, parts = await run_ai(db, dialog, client_message)
+    # ИИ на паузе (оператор перехватил диалог или сработала эскалация к менеджеру) —
+    # сообщение сохраняем, но не отвечаем. То же поведение, что в вебхуке ВК, иначе
+    # в тестовом чате эскалация выглядела бы иначе, чем на живом трафике.
+    if dialog.ai_paused:
+        n_parts = 0
+    else:
+        from app.ai.runner import run_ai
+        output, ai_run, parts = await run_ai(db, dialog, client_message)
+        n_parts = len(parts)
 
     # Реплика клиента + все реплики хода: связка скриптов даёт больше одной
     # (приветствие, следом вопрос про имя/фамилию), и тестировщик должен увидеть
@@ -583,7 +590,7 @@ async def send_message(
         select(Message)
         .where(Message.dialog_id == dialog_id)
         .order_by(Message.created_at.desc(), Message.id.desc())
-        .limit(1 + len(parts))
+        .limit(1 + n_parts)
     )
     messages = list(reversed(result.scalars().all()))
 
