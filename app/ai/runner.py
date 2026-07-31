@@ -47,6 +47,14 @@ _BARE_IMAGE_URL_RE = re.compile(
 _IMAGES_BLOCK_RE = re.compile(r"\n*<<<IMAGES>>>\n?(.*?)\n?<<<END_IMAGES>>>", re.DOTALL)
 
 
+def _fit(value: str | None, limit: int) -> str | None:
+    """Подрезать строку под ширину колонки. Значение пришло от модели, и слишком
+    длинное роняло весь INSERT прогона — клиент вместо ответа получал 500."""
+    if value is None:
+        return None
+    return value if len(value) <= limit else value[:limit]
+
+
 def _split_image_urls(text: str) -> tuple[str, list[str]]:
     """Вынести картинки из текста реплики: сначала блок <<<IMAGES>>> (его агент
     копирует из истории), иначе — голые ссылки на изображения."""
@@ -694,7 +702,11 @@ async def run_ai(
         selected_script=output.selected_script,
         source_script_id=output.source_script_id,
         status_before=status_before_name,
-        status_after=output.next_status,
+        # Обрезаем: next_status приходит от модели, и хотя выше он сверяется со
+        # списком статусов, в колонку он пишется сырым. Одна длинная строка от
+        # модели не должна ронять весь ответ клиенту — так уже случилось с
+        # selected_script (см. миграцию 042).
+        status_after=_fit(output.next_status, 64),
         raw_response=output.model_dump(),
         full_context=full_context,
     )

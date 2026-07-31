@@ -167,7 +167,9 @@ class AIRun(Base):
     confidence_score = Column(Numeric(4, 3), nullable=True)
     need_curator = Column(Boolean, default=False)
     curator_reason = Column(Text, nullable=True)
-    selected_script = Column(String(255), nullable=True)
+    # Text, а не varchar: сюда модель кладёт название/условие применённого скрипта,
+    # а условия правятся в админке и длину их никто не ограничивает (миграция 042).
+    selected_script = Column(Text, nullable=True)
     source_script_id = Column(Integer, nullable=True)
     status_before = Column(String(64), nullable=True)
     status_after = Column(String(64), nullable=True)
