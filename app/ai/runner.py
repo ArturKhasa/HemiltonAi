@@ -33,6 +33,7 @@ from app.ai.funnel_agent import detect_stage, format_stage_block
 from app.ai.greeting import resolve_greeting
 from app.sales.price_placeholder import render_price_placeholders
 from app.sales.funnel_steps import (
+    CHECKOUT_PRESENTED_RE,
     PAYMENT_LINK_RE,
     answered_inscription_question,
     checkout_presented,
@@ -895,11 +896,14 @@ async def run_ai(
     # сошлётся на нужный скрипт, — а она этого не делает: в диалоге 52 цена не
     # ушла вовсе, в прогоне воронки на «да всё верно» пришла та же сверка снова.
     # Достраиваем сами, когда своей связки в ответе не оказалось.
+    # Шаг, который модель сделала сама, повторять скриптом нельзя: в прогоне она
+    # на «да всё верно» написала свой пересказ оформления, и следом ушёл скрипт
+    # #380 с тем же содержанием — клиент прочитал условия оплаты дважды.
     if len(parts) == 1:
         entry = None
-        if praise_point:
+        if praise_point and not _prices_in(reply_text):
             entry = await find_praise_script(db, type_id)
-        elif design_point:
+        elif design_point and not CHECKOUT_PRESENTED_RE.search(reply_text):
             entry = await find_design_fixed_script(db, type_id)
         if entry is not None:
             forced = await _build_follow_up_parts(
@@ -916,7 +920,11 @@ async def run_ai(
     # получателя. Отдельным шагом, а не связкой к «5. Оформление»: тот скрипт
     # заканчивается вопросом про способ оплаты, и оба сообщения одним ходом
     # означали реакцию на выбор, которого клиент ещё не сделал.
-    if payment_choice_point and len(parts) == 1:
+    if (
+        payment_choice_point
+        and len(parts) == 1
+        and asked_slot(reply_text) != "recipient"
+    ):
         contacts = await find_contacts_script(db, type_id)
         if contacts is not None and not slot_is_filled("recipient", slots):
             part = await _render_script_part(db, dialog, contacts, client)

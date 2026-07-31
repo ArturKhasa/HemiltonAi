@@ -48,8 +48,13 @@ _AFFIRMATIVE_RE = re.compile(
     re.I,
 )
 
-# Шаг «5. Оформление» уже показан клиенту: названа сумма заказа и способы оплаты.
-_CHECKOUT_PRESENTED_RE = re.compile(r"сумма заказа|по оплате у нас|способ\w*\s+оплат", re.I)
+# Шаг «5. Оформление» показан: названа сумма заказа и способы оплаты. Тем же
+# шаблоном проверяем и свежий ответ модели — если она рассказала про оплату сама,
+# слать следом скрипт нельзя, клиент получит одно и то же дважды.
+CHECKOUT_PRESENTED_RE = re.compile(
+    r"сумма заказа|по оплате у нас|способ\w*\s+оплат|оплатить всю сумму|"
+    r"внести\s+(?:всю сумму|бронь)", re.I,
+)
 
 # «5.1 Данные перед оформлением» — запрос ФИО и телефона получателя.
 _CONTACTS_CONDITION_RE = re.compile(r"данные\s+перед\s+оформлением", re.I)
@@ -151,7 +156,7 @@ async def checkout_presented(db: AsyncSession, dialog_id: int) -> bool:
             Message.role.in_((MessageRole.ai, MessageRole.curator)),
         )
     )
-    return any(_CHECKOUT_PRESENTED_RE.search(t or "") for (t,) in rows.all())
+    return any(CHECKOUT_PRESENTED_RE.search(t or "") for (t,) in rows.all())
 
 
 async def dialog_has_payment_link(db: AsyncSession, dialog_id: int) -> bool:
