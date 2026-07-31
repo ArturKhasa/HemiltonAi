@@ -31,6 +31,7 @@ from app.vk.spintax import resolve_spintax
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
 from app.ai.greeting import resolve_greeting
+from app.sales.price_placeholder import render_price_placeholders
 from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole, Script
 from app.utils.text import normalize_dashes, render_name_placeholder, strip_repeated_greeting
 
@@ -787,6 +788,7 @@ async def _run_scripted_greeting(
     text = render_name_placeholder(
         resolve_spintax(script.phrase_text), client.name if client else None
     )
+    text = await render_price_placeholders(db, text, type_id=dialog.type_id)
     text = normalize_dashes(text)
     text, image_urls = _split_image_urls(text)
 
@@ -880,6 +882,7 @@ async def _build_follow_up_part(
     text = render_name_placeholder(
         resolve_spintax(follow_up.phrase_text), client.name if client else None
     )
+    text = await render_price_placeholders(db, text, type_id=dialog.type_id)
     text = normalize_dashes(text)
     text, image_urls = _split_image_urls(text)
 
