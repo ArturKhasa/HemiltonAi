@@ -6,6 +6,7 @@
 import asyncio
 import hashlib
 import logging
+import re
 
 import httpx
 from sqlalchemy import select
@@ -117,3 +118,27 @@ async def collect_sent_image_hashes(db: AsyncSession, dialog_id: int) -> set[str
     if pending:
         hashes.update((await hash_image_urls(pending)).values())
     return hashes
+
+
+# Токены вложений внутри текста фразы: «[photo-<url>]», «[photo-<id>_<id>]»,
+# а также video/clip/audio_message. Их разбирает app.vk.sender при отправке.
+# Дефис необязателен: голосовые в выгрузке ОП записаны без него —
+# «[audio_message569993513_687712211]».
+_ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|video|clip|audio_message)-?[^\]\s]+\]")
+
+
+def carry_over_attachments(text: str, source_text: str) -> str:
+    """Вернуть в текст вложения исходной фразы, которые модель из неё выбросила.
+
+    И продающий агент, и пинговый переписывают готовую фразу своими словами и
+    теряют при этом токены вложений: из 70 отправленных пингов с медиа 33 ушли
+    без единой картинки, хотя в правиле она была. Смысл фразы модель сохраняет,
+    а вложение для неё — посторонний мусор в конце.
+
+    Токены дописываются одним блоком в конец: ВК показывает вложения отдельно от
+    текста, и место токена внутри сообщения ни на что не влияет.
+    """
+    missing = [t for t in _ATTACHMENT_TOKEN_RE.findall(source_text or "") if t not in (text or "")]
+    if not missing:
+        return text
+    return (text or "").rstrip() + "\n\n" + "\n".join(missing)

@@ -26,7 +26,13 @@ from app.ai.providers import get_model_name
 from app.ai.schemas import AgentOutput
 from app.ai.triggers import CURATOR_STATUS_NAME, curator_trigger
 from app.config import settings
-from app.utils.media import is_document_url, is_image_url, is_sticker_url, is_video_url
+from app.utils.media import (
+    carry_over_attachments,
+    is_document_url,
+    is_image_url,
+    is_sticker_url,
+    is_video_url,
+)
 from app.vk.spintax import resolve_spintax
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
@@ -66,27 +72,6 @@ _BARE_IMAGE_URL_RE = re.compile(
     re.IGNORECASE,
 )
 _IMAGES_BLOCK_RE = re.compile(r"\n*<<<IMAGES>>>\n?(.*?)\n?<<<END_IMAGES>>>", re.DOTALL)
-
-# Токен вложения из текста скрипта. Его разбирает app.vk.sender при отправке.
-_PHOTO_TOKEN_RE = re.compile(r"\[photo-[^\]\s]+\]")
-
-
-def _carry_over_script_photos(reply_text: str, script_text: str) -> str:
-    """Вернуть в ответ фото скрипта, которые модель из него выбросила.
-
-    Скрипт «5. Оформление» заканчивается словами «Прикрепляю наши отзывы!» и
-    тремя токенами фото. Модель берёт текст, фразу про отзывы оставляет, а
-    токены теряет — клиент получает обещание без единой картинки (диалоги 59 и
-    64). Дословные звенья связки этим не страдают: там текст не переписывается.
-
-    Токены дописываются одним блоком в конец: ВК показывает вложения отдельно от
-    текста, и место токена внутри сообщения всё равно ни на что не влияет.
-    """
-    missing = [t for t in _PHOTO_TOKEN_RE.findall(script_text or "") if t not in (reply_text or "")]
-    if not missing:
-        return reply_text
-    return (reply_text or "").rstrip() + "\n\n" + "\n".join(missing)
-
 
 def _fit(value: str | None, limit: int) -> str | None:
     """Подрезать строку под ширину колонки. Значение пришло от модели, и слишком
@@ -859,7 +844,9 @@ async def run_ai(
         _src = await db.get(Script, output.source_script_id)
         if _src is not None:
             _before = reply_text
-            reply_text = _carry_over_script_photos(reply_text, _src.phrase_text or "")
+            # Скрипт «5. Оформление» кончается словами «Прикрепляю наши отзывы!»
+            # и тремя токенами фото: фразу модель оставляет, токены теряет.
+            reply_text = carry_over_attachments(reply_text, _src.phrase_text or "")
             if reply_text != _before:
                 logger.info(
                     "[%s] script photos carried over | script=%s", ctx, output.source_script_id,

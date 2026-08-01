@@ -13,6 +13,7 @@ from app.db.models import (
 from app.config import settings
 from app.db.session import AsyncSessionLocal
 from app.logging_context import current_dialog_type
+from app.utils.media import carry_over_attachments
 from app.utils.time import msk_now
 from app.utils.text import normalize_dashes
 from app.vk.sender import VkMessagesForbiddenError, send_to_dialog
@@ -234,6 +235,9 @@ async def _send_ping(
         return True
 
     sent_text = custom_text or normalize_dashes(resolve_spintax(phrase_template))
+    # Агент переписывает фразу своими словами и теряет вложения: 33 пинга из 70
+    # ушли без картинки, хотя в правиле она была. Возвращаем их на место.
+    sent_text = carry_over_attachments(sent_text, phrase_template)
 
     # Content-level duplicate guard: the model can rewrite an already-sent message
     # almost verbatim (same pattern as sales client 8474931). Same normalization/
