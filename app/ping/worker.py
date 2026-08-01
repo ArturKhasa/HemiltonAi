@@ -128,6 +128,13 @@ def _strip_greeting(text: str) -> str:
     return f"{name}, {rest}" if name else rest
 
 
+def _deliverable(dialog: Dialog | None) -> bool:
+    """Есть ли куда отправлять. Тестовый диалог живёт только в панели: клиента в
+    ВК за ним нет, и send_to_dialog на нём падает с «no VK client binding».
+    Сообщение всё равно сохраняем — ради него тестовый диалог и заводят."""
+    return bool(dialog) and not dialog.is_test
+
+
 async def _last_outbound_text(db: AsyncSession, dialog: Dialog) -> str | None:
     """Text of the most recent manager/AI message in this dialog."""
     text = await db.scalar(
@@ -186,13 +193,14 @@ async def _send_ping(
     # Шаг без текста: manual_text уходит как есть, совсем пустой шаг — маркер для куратора.
     if not phrase_template and not custom_text:
         if rule.manual_text:
-            try:
-                await send_to_dialog(db, dialog, rule.manual_text)
-            except VkMessagesForbiddenError:
-                return "blocked"
-            except Exception as exc:
-                logger.error("ping: send failed | dialog=%s: %s", state.dialog_id, exc)
-                return False
+            if _deliverable(dialog):
+                try:
+                    await send_to_dialog(db, dialog, rule.manual_text)
+                except VkMessagesForbiddenError:
+                    return "blocked"
+                except Exception as exc:
+                    logger.error("ping: send failed | dialog=%s: %s", state.dialog_id, exc)
+                    return False
             msg = Message(
                 dialog_id=state.dialog_id,
                 role=MessageRole.ai,
@@ -245,13 +253,16 @@ async def _send_ping(
         )
         return "duplicate"
 
-    try:
-        await send_to_dialog(db, dialog, sent_text)
-    except VkMessagesForbiddenError:
-        return "blocked"
-    except Exception as exc:
-        logger.error("ping: send failed | dialog=%s: %s", state.dialog_id, exc)
-        return False
+    if not _deliverable(dialog):
+        logger.info("ping: тестовый диалог %s — пишем в панель, ВК не трогаем", state.dialog_id)
+    else:
+        try:
+            await send_to_dialog(db, dialog, sent_text)
+        except VkMessagesForbiddenError:
+            return "blocked"
+        except Exception as exc:
+            logger.error("ping: send failed | dialog=%s: %s", state.dialog_id, exc)
+            return False
 
     msg = Message(
         dialog_id=state.dialog_id,
@@ -657,7 +668,9 @@ async def discover() -> None:
         max_age_cutoff = now - timedelta(hours=settings.PING_DISCOVERY_MAX_AGE_HOURS)
         dialogs_result = await db.execute(
             select(Dialog).where(
-                Dialog.is_test == False,
+                # Тестовые диалоги тоже пингуем: воронку из 17 шагов иначе негде
+                # посмотреть, а уйти клиенту такой пинг не может — отправка в ВК
+                # для них пропускается (см. _deliverable).
                 Dialog.ai_paused == False,
                 Dialog.vk_blocked == False,
                 Dialog.id.not_in(existing_ids_subq),
