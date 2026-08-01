@@ -576,15 +576,23 @@ async def send_message(
     await db.flush()
     await db.commit()
 
-    # ИИ на паузе (оператор перехватил диалог или сработала эскалация к менеджеру) —
-    # сообщение сохраняем, но не отвечаем. То же поведение, что в вебхуке ВК, иначе
-    # в тестовом чате эскалация выглядела бы иначе, чем на живом трафике.
-    if dialog.ai_paused:
-        n_parts = 0
-    else:
-        from app.ai.runner import run_ai
-        output, ai_run, parts = await run_ai(db, dialog, client_message)
-        n_parts = len(parts)
+    from app.ai.dialog_lock import dialog_lock, superseded_by_newer_message
+
+    # Блокировка та же, что в вебхуке: тестировщик отправляет вторую реплику, не
+    # дождавшись ответа на первую, и без неё получал два параллельных прогона.
+    async with dialog_lock(dialog.id):
+        await db.refresh(dialog)
+        # ИИ на паузе (оператор перехватил диалог или сработала эскалация к менеджеру) —
+        # сообщение сохраняем, но не отвечаем. То же поведение, что в вебхуке ВК, иначе
+        # в тестовом чате эскалация выглядела бы иначе, чем на живом трафике.
+        if dialog.ai_paused or await superseded_by_newer_message(
+            db, dialog.id, client_message.id
+        ):
+            n_parts = 0
+        else:
+            from app.ai.runner import run_ai
+            output, ai_run, parts = await run_ai(db, dialog, client_message)
+            n_parts = len(parts)
 
     # Реплика клиента + все реплики хода: связка скриптов даёт больше одной
     # (приветствие, следом вопрос про имя/фамилию), и тестировщик должен увидеть

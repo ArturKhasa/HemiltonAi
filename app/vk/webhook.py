@@ -272,10 +272,27 @@ async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMe
 
     await db.commit()
 
-    if dialog.ai_paused:
-        logger.info("[%s] ai paused (operator took over) — message saved, no AI run", ctx)
-        return
+    from app.ai.dialog_lock import dialog_lock, superseded_by_newer_message
 
+    # Один прогон на диалог за раз. Клиент пишет вторую реплику, не дождавшись
+    # ответа на первую, а прогон идёт десятки секунд — без блокировки получалось
+    # два параллельных прогона и два ответа подряд (диалог 74).
+    async with dialog_lock(dialog.id):
+        await db.refresh(dialog)
+        if dialog.ai_paused:
+            logger.info("[%s] ai paused (operator took over) — message saved, no AI run", ctx)
+            return
+        if await superseded_by_newer_message(db, dialog.id, client_message.id):
+            logger.info("[%s] newer client message arrived — this turn yields", ctx)
+            return
+
+        await _reply_with_ai(db, dialog, client_message, ctx)
+
+
+async def _reply_with_ai(
+    db: AsyncSession, dialog: Dialog, client_message: Message, ctx: str,
+) -> None:
+    """Прогон модели и отправка всех реплик хода. Вызывается под блокировкой диалога."""
     from app.ai.runner import run_ai
     output, ai_run, parts = await run_ai(db, dialog, client_message)
 
