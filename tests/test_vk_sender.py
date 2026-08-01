@@ -4,6 +4,7 @@ import pytest
 from app.vk import sender
 from app.vk.sender import (
     MAX_MESSAGE_LEN,
+    _DEAD_ATTACHMENT_TOKEN_RE,
     VkApiError,
     VkMessagesForbiddenError,
     check_vk_response,
@@ -85,3 +86,25 @@ def test_make_random_id_positive_int32():
     for _ in range(100):
         rid = make_random_id()
         assert 0 < rid <= 0x7FFF_FFFF
+
+
+class TestClipToken:
+    """«[clip-<id>_<id>]» — тот же мёртвый VK-ID, что photo/video, только для
+    клипов. Его не было в списке вырезаемых, и токен уезжал клиенту голым
+    текстом в конце пинга «эта толстовка стоит каждого рубля»."""
+
+    def test_clip_id_token_is_stripped(self):
+        assert _DEAD_ATTACHMENT_TOKEN_RE.sub("", "Текст [clip-228420497_456239100]").strip() == "Текст"
+
+    @pytest.mark.parametrize("token", [
+        "[photo-228420497_456240496]",
+        "[video-44440184_456240651]",
+        "[audio_message569993513_687712211]",
+    ])
+    def test_other_dead_tokens_still_stripped(self, token):
+        assert _DEAD_ATTACHMENT_TOKEN_RE.sub("", f"Текст {token}").strip() == "Текст"
+
+    def test_url_token_is_not_a_dead_id(self):
+        """Ссылку трогать нельзя — её перезаливает resolve_attachment."""
+        text = "Текст [photo-https://sun9-29.vkuserphoto.ru/a.jpg]"
+        assert _DEAD_ATTACHMENT_TOKEN_RE.sub("", text) == text

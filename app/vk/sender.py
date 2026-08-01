@@ -35,7 +35,9 @@ _MAX_ATTACHMENTS = 10
 # 2) "[photo-https://...]" (например store.wazzup24.com) — реальная скачиваемая
 #    ссылка на файл. Перезаливается на СВОЁ сообщество через
 #    app.vk.photo_upload.resolve_attachment (с кэшем), см. extract_and_resolve_attachments.
-_DEAD_ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|video|audio_message)-?\d+_\d+\]")
+# «clip» — тот же мёртвый VK-ID, только для клипов. Его в списке не было, и токен
+# «[clip-228420497_456239100]» уезжал клиенту голым текстом прямо в конце пинга.
+_DEAD_ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|video|clip|audio_message)-?\d+_\d+\]")
 _PHOTO_URL_TOKEN_RE = re.compile(r"\[photo-(https?://[^\]]+)\]")
 _VIDEO_URL_TOKEN_RE = re.compile(r"\[video-(https?://[^\]]+)\]")
 
