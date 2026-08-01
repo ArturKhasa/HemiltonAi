@@ -211,6 +211,11 @@ def collect_slots(history: list[tuple[str, str]]) -> dict[str, str]:
 # строка «Номер Вашего заказа:» без номера бессмысленна.
 _CRM_PLACEHOLDER_RE = re.compile(r"\[(?:Заказ|Доставка|Корзина)[^\]]*\]")
 
+# Предложение вместе с завершающей пунктуацией и пробелами после неё.
+_SENTENCE_RE = re.compile(r"[^.!?]*(?:[.!?]+\s*|$)")
+# Метка вместо плейсхолдера на время разбивки — без точек и прочей пунктуации.
+_MARKER = "\x00"
+
 
 def _cart_line(slots: dict[str, str]) -> str:
     parts = [slots.get("product") or "свитшот"]
@@ -247,7 +252,18 @@ def render_order_placeholders(text: str, slots: dict[str, str]) -> str:
             if value:
                 line = line.replace(token, value)
         if _CRM_PLACEHOLDER_RE.search(line):
-            continue  # данных нет — строка без них не нужна
+            # Убираем только предложение с плейсхолдером: в скрипте 6 «Уточняем
+            # СДЭК» номер заказа стоит в одной строке с благодарностью за заказ,
+            # и выбрасывать её целиком значит потерять благодарность.
+            #
+            # Перед разбивкой плейсхолдер заменяем меткой: внутри «[Заказ.Номер]»
+            # есть точка, и без этого предложение рвётся ровно по ней.
+            masked = _CRM_PLACEHOLDER_RE.sub(_MARKER, line)
+            line = "".join(
+                part for part in _SENTENCE_RE.findall(masked) if _MARKER not in part
+            ).strip()
+            if not line:
+                continue
         kept.append(line)
 
     # Схлопываем пустые строки, оставшиеся от вырезанных.

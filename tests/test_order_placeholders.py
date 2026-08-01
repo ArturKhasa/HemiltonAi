@@ -66,6 +66,13 @@ class TestRenderOrderPlaceholders:
         assert "2. Размер:" in result  # заголовок остаётся
         assert "[Заказ.Рост]" not in result
 
+    def test_only_the_offending_sentence_is_cut(self):
+        """Скрипт «6. Уточняем СДЭК»: благодарность и номер заказа в одной строке.
+        Терять благодарность за оплаченный заказ из-за отсутствия номера нельзя."""
+        text = "Благодарю Вас за заказ и за доверие! Номер Вашего заказа: [Заказ.Номер]"
+        result = render_order_placeholders(text, SLOTS)
+        assert result == "Благодарю Вас за заказ и за доверие!"
+
     def test_text_without_placeholders_untouched(self):
         text = "Отлично, тогда подскажите ФИО и номер телефона получателя"
         assert render_order_placeholders(text, SLOTS) == text
