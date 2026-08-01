@@ -240,8 +240,10 @@
                   <img
                     v-else-if="part.type === 'image'"
                     :src="part.value"
-                    class="mt-1 rounded-lg max-w-full max-h-64 object-contain"
+                    @click="preview = { type: 'image', src: part.value }"
+                    class="mt-1 rounded-lg max-w-full max-h-64 object-contain cursor-zoom-in hover:opacity-90 transition-opacity"
                     loading="lazy"
+                    title="Открыть во весь экран"
                   />
                   <a
                     v-else-if="part.type === 'link'"
@@ -252,7 +254,7 @@
                   >{{ part.value }}</a>
                   <button
                     v-else-if="part.type === 'video'"
-                    @click="videoPreview = part"
+                    @click="preview = { type: 'video', ...part }"
                     class="inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 text-xs hover:bg-gray-200 transition-colors cursor-pointer"
                     title="Посмотреть видео"
                   >🎬 видео</button>
@@ -271,8 +273,10 @@
                     <img
                       v-else
                       :src="url"
-                      class="rounded-lg max-w-full max-h-64 object-contain"
+                      @click="preview = { type: 'image', src: url }"
+                      class="rounded-lg max-w-full max-h-64 object-contain cursor-zoom-in hover:opacity-90 transition-opacity"
                       loading="lazy"
+                      title="Открыть во весь экран"
                     />
                   </template>
                 </div>
@@ -385,34 +389,43 @@
       </div>
     </div>
 
-    <!-- Video preview modal -->
+    <!-- Attachment preview modal (video / photo) -->
     <div
-      v-if="videoPreview"
+      v-if="preview"
       class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
-      @click.self="videoPreview = null"
+      @click.self="preview = null"
     >
       <div class="bg-white rounded-2xl shadow-xl w-full max-w-3xl overflow-hidden">
         <div class="px-4 py-3 flex items-center justify-between border-b">
-          <span class="text-sm font-medium text-gray-700">🎬 Видео из сообщения</span>
-          <button @click="videoPreview = null" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+          <span class="text-sm font-medium text-gray-700">
+            {{ preview.type === 'video' ? '🎬 Видео из сообщения' : '📷 Фото из сообщения' }}
+          </span>
+          <button @click="preview = null" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
         </div>
-        <div class="bg-black aspect-video">
+
+        <div v-if="preview.type === 'video'" class="bg-black aspect-video">
           <iframe
-            :src="videoPreview.embed"
+            :src="preview.embed"
             class="w-full h-full"
             frameborder="0"
             allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
             allowfullscreen
           ></iframe>
         </div>
+        <div v-else class="bg-black flex items-center justify-center">
+          <img :src="preview.src" class="max-h-[75vh] max-w-full object-contain" />
+        </div>
+
         <div class="px-4 py-3 border-t">
           <a
-            :href="videoPreview.href"
+            :href="preview.type === 'video' ? preview.href : preview.src"
             target="_blank"
             rel="noopener"
             class="text-xs text-brand-600 underline break-all"
-          >Открыть в ВК: {{ videoPreview.href }}</a>
-          <p class="text-xs text-gray-400 mt-1">Если плеер пустой — ролик закрыт для встраивания, откройте по ссылке.</p>
+          >Открыть оригинал</a>
+          <p v-if="preview.type === 'video'" class="text-xs text-gray-400 mt-1">
+            Если плеер пустой — ролик закрыт для встраивания, откройте по ссылке.
+          </p>
         </div>
       </div>
     </div>
@@ -1723,8 +1736,8 @@ function parseMessageParts(text) {
   return parts.filter(p => p.type !== 'text' || p.value.trim())
 }
 
-// Открытый в модалке ролик, либо null.
-const videoPreview = ref(null)
+// Открытое в модалке вложение: {type:'video', embed, href} или {type:'image', src}.
+const preview = ref(null)
 
 function formatDate(d) {
   if (!d) return ''
