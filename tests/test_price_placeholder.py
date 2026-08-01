@@ -6,8 +6,13 @@
 """
 import pytest
 
+from app.config import settings
 from app.db.models import DialogType, Product
-from app.sales.price_placeholder import format_price, render_price_placeholders
+from app.sales.price_placeholder import (
+    format_price,
+    payment_link_configured,
+    render_price_placeholders,
+)
 
 
 @pytest.fixture
@@ -59,14 +64,36 @@ class TestRender:
 
 class TestPaymentLink:
     """Скрипт #382 обещает «вот счёт-ссылка», а ссылки в нём нет — менеджер
-    вставлял её руками. До платёжной интеграции подставляем заглушку."""
+    вставляет её руками. Пока платёжной интеграции нет, PAYMENT_LINK_URL пуст:
+    до оплаты диалог доводит куратор, а фраза про ссылку клиенту не уходит."""
 
-    async def test_placeholder_replaced(self, db, products):
+    async def test_link_substituted_when_configured(self, db, products, monkeypatch):
+        monkeypatch.setattr(settings, "PAYMENT_LINK_URL", "https://pay.example.org/500")
         got = await render_price_placeholders(db, "Вот счёт: [ссылка-оплаты]", type_id=1)
-        assert "[ссылка-оплаты]" not in got
-        assert "http" in got
+        assert got == "Вот счёт: https://pay.example.org/500"
 
-    async def test_works_together_with_price(self, db, products):
+    async def test_works_together_with_price(self, db, products, monkeypatch):
+        monkeypatch.setattr(settings, "PAYMENT_LINK_URL", "https://pay.example.org/500")
         got = await render_price_placeholders(
             db, "[цена:свитшот] — оплатить: [ссылка-оплаты]", type_id=1)
-        assert got.startswith("4 990 ₽ — оплатить: http")
+        assert got.endswith("— оплатить: https://pay.example.org/500")
+
+    async def test_sentence_dropped_when_no_link(self, db, products, monkeypatch):
+        """«Вот счёт-ссылка на 500 рублей:» без самой ссылки хуже, чем молчание."""
+        monkeypatch.setattr(settings, "PAYMENT_LINK_URL", "")
+        got = await render_price_placeholders(
+            db, "Спасибо за заказ. Вот счёт: [ссылка-оплаты]", type_id=1)
+        assert got == "Спасибо за заказ."
+
+    async def test_price_survives_when_link_is_cut(self, db, products, monkeypatch):
+        monkeypatch.setattr(settings, "PAYMENT_LINK_URL", "")
+        got = await render_price_placeholders(
+            db, "Сумма — [цена:свитшот].\nОплата: [ссылка-оплаты]", type_id=1)
+        assert got.startswith("Сумма —") and "[ссылка-оплаты]" not in got
+        assert "Оплата" not in got
+
+    def test_configured_flag(self, monkeypatch):
+        monkeypatch.setattr(settings, "PAYMENT_LINK_URL", "")
+        assert not payment_link_configured()
+        monkeypatch.setattr(settings, "PAYMENT_LINK_URL", "https://pay.example.org/500")
+        assert payment_link_configured()

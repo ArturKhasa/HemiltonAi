@@ -37,7 +37,7 @@ from app.vk.spintax import resolve_spintax
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
 from app.ai.greeting import resolve_greeting
-from app.sales.price_placeholder import render_price_placeholders
+from app.sales.price_placeholder import payment_link_configured, render_price_placeholders
 from app.sales.funnel_steps import (
     CHECKOUT_PRESENTED_RE,
     PAYMENT_LINK_RE,
@@ -72,6 +72,14 @@ _BARE_IMAGE_URL_RE = re.compile(
     re.IGNORECASE,
 )
 _IMAGES_BLOCK_RE = re.compile(r"\n*<<<IMAGES>>>\n?(.*?)\n?<<<END_IMAGES>>>", re.DOTALL)
+
+def _apply_status(dialog: Dialog, name: str, active_statuses) -> None:
+    """Поставить диалогу статус по имени. Нужен для решений, принятых уже ПОСЛЕ
+    основного блока смены статуса — он отрабатывает до сборки реплик."""
+    matching = next((s for s in active_statuses if s.name == name), None)
+    if matching is not None:
+        dialog.current_status_id = matching.id
+
 
 def _fit(value: str | None, limit: int) -> str | None:
     """Подрезать строку под ширину колонки. Значение пришло от модели, и слишком
@@ -328,6 +336,15 @@ async def run_ai(
         sent_script_id = (meta or {}).get("source_script_id")
         if sent_script_id:
             used_script_ids.add(sent_script_id)
+
+    # Пока счёт выставляет человек, скрипт «5.2 Ссылка на оплату» модели не
+    # показываем вовсе. Иначе она строит на нём ответ и обещает «вот счёт-ссылка
+    # на 500 рублей», а ссылки в сообщении нет — вырезать её мало, обещание
+    # остаётся.
+    if not payment_link_configured():
+        _link_script = await find_payment_link_script(db, type_id)
+        if _link_script is not None:
+            used_script_ids.add(_link_script.id)
 
     exclude_script_ids: set[int] | None = used_script_ids or None
     if exclude_script_ids:
@@ -955,12 +972,27 @@ async def run_ai(
          or (contacts_ready and await checkout_presented(db, dialog.id)))
         and not await dialog_has_payment_link(db, dialog.id)
     ):
-        link_script = await find_payment_link_script(db, type_id)
-        if link_script is not None and not PAYMENT_LINK_RE.search(reply_text):
-            part = await _render_script_part(db, dialog, link_script, client, slots)
-            if part is not None:
-                logger.info("[%s] payment link forced | script=%s", ctx, link_script.id)
-                parts.append(part)
+        if not payment_link_configured():
+            # Счёта у нас пока нет — выставляет его человек. Реплику отпускаем
+            # (клиент только что прислал ФИО и телефон, тишина в ответ хуже
+            # всего), а диалог передаём куратору и замолкаем. Так же устроены
+            # темы менеджера: см. curator_trigger ниже.
+            logger.info("[%s] оплата: ссылка не настроена — передаём куратору", ctx)
+            output = output.model_copy(update={
+                "next_status": CURATOR_STATUS_NAME,
+                "need_curator": False,
+                "curator_reason": "Пора выставлять счёт — ссылки на оплату у ИИ нет",
+            })
+            dialog.ai_paused = True
+            _apply_status(dialog, CURATOR_STATUS_NAME, active_statuses)
+            ai_run.status_after = CURATOR_STATUS_NAME
+        else:
+            link_script = await find_payment_link_script(db, type_id)
+            if link_script is not None and not PAYMENT_LINK_RE.search(reply_text):
+                part = await _render_script_part(db, dialog, link_script, client, slots)
+                if part is not None:
+                    logger.info("[%s] payment link forced | script=%s", ctx, link_script.id)
+                    parts.append(part)
 
     await db.commit()
     await db.refresh(ai_run)

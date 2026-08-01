@@ -36,14 +36,39 @@ def format_price(value) -> str:
     return f"{int(value):,}".replace(",", " ") + " ₽"
 
 
+def payment_link_configured() -> bool:
+    """Настроен ли реальный счёт. Нет — до оплаты диалог доводит куратор."""
+    from app.config import settings
+
+    return bool((settings.PAYMENT_LINK_URL or "").strip())
+
+
 def _render_payment_link(text: str) -> str:
     if not _PAYMENT_LINK_PLACEHOLDER_RE.search(text):
         return text
     from app.config import settings
     url = (settings.PAYMENT_LINK_URL or "").strip()
-    if "example.com" in url:
-        logger.warning("подставлена ЗАГЛУШКА ссылки на оплату — настоящих счетов ещё нет")
+    if not url:
+        # Ссылки нет — вырезаем предложение с плейсхолдером целиком. «Вот
+        # счёт-ссылка на 500 рублей:» без самой ссылки хуже, чем её отсутствие.
+        logger.info("ссылка на оплату не настроена — фраза со ссылкой вырезана")
+        return _strip_payment_sentence(text)
     return _PAYMENT_LINK_PLACEHOLDER_RE.sub(url, text)
+
+
+def _strip_payment_sentence(text: str) -> str:
+    kept = []
+    for line in text.split("\n"):
+        if not _PAYMENT_LINK_PLACEHOLDER_RE.search(line):
+            kept.append(line)
+            continue
+        masked = _PAYMENT_LINK_PLACEHOLDER_RE.sub("\x00", line)
+        line = "".join(
+            part for part in re.findall(r"[^.!?]*(?:[.!?]+\s*|$)", masked) if "\x00" not in part
+        ).strip()
+        if line:
+            kept.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
 async def render_price_placeholders(
