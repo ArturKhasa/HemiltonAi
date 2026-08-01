@@ -135,7 +135,8 @@ def _find_color(text: str) -> str | None:
     return None
 
 
-def _find_size(text: str) -> str | None:
+def _find_size(text: str) -> tuple[str, str] | None:
+    """(рост, вес) в сантиметрах и килограммах, либо None."""
     height = _HEIGHT_RE.search(text or "")
     if not height:
         return None
@@ -143,7 +144,7 @@ def _find_size(text: str) -> str | None:
     weight = _WEIGHT_RE.search(rest)
     if not weight:
         return None
-    return f"рост {height.group(1)} см, вес {weight.group(1)} кг"
+    return height.group(1), weight.group(1)
 
 
 def collect_slots(history: list[tuple[str, str]]) -> dict[str, str]:
@@ -171,7 +172,10 @@ def collect_slots(history: list[tuple[str, str]]) -> dict[str, str]:
             slots["recipient"] = fio.group(0)
         size = _find_size(text)
         if size:
-            slots["size"] = size
+            # Рост и вес хранятся ещё и по отдельности: скрипт итогов заказа
+            # печатает их разными строками ([Заказ.Рост] / [Заказ.Вес]).
+            slots["height"], slots["weight"] = size
+            slots["size"] = f"рост {size[0]} см, вес {size[1]} кг"
         city = _find_city(text)
         if city:
             slots["city"] = city
@@ -197,6 +201,57 @@ def collect_slots(history: list[tuple[str, str]]) -> dict[str, str]:
         asked = None
 
     return slots
+
+
+# Плейсхолдеры CRM в текстах скриптов ОП. CRM у нас больше нет, подставлять их
+# было нечем — и «Номер Вашего заказа: [Заказ.Номер]» вместе с «[Корзина]» и
+# «[Доставка.ФИО]» уходили клиенту как есть (диалог 68, сообщения 964 и 978).
+#
+# Что знаем из диалога — подставляем, остальное вырезаем вместе со строкой:
+# строка «Номер Вашего заказа:» без номера бессмысленна.
+_CRM_PLACEHOLDER_RE = re.compile(r"\[(?:Заказ|Доставка|Корзина)[^\]]*\]")
+
+
+def _cart_line(slots: dict[str, str]) -> str:
+    parts = [slots.get("product") or "свитшот"]
+    if slots.get("color"):
+        parts.append(slots["color"])
+    if slots.get("inscription"):
+        parts.append(f"надпись «{slots['inscription']}»")
+    return ", ".join(parts)
+
+
+def render_order_placeholders(text: str, slots: dict[str, str]) -> str:
+    """Подставить в текст данные заказа, собранные из диалога.
+
+    Строку с плейсхолдером, для которого данных нет (номер заказа — его выдаёт
+    учётная система, которой у нас нет), убираем целиком.
+    """
+    if not text or not _CRM_PLACEHOLDER_RE.search(text):
+        return text
+
+    known = {
+        "[Доставка.ФИО]": slots.get("recipient", ""),
+        "[Доставка.Телефон]": slots.get("phone", ""),
+        "[Заказ.Рост]": f"рост {slots['height']} см" if slots.get("height") else "",
+        "[Заказ.Вес]": f"вес {slots['weight']} кг" if slots.get("weight") else "",
+        "[Заказ.Примечания (внутренние)]": (
+            f"надпись «{slots['inscription']}»" if slots.get("inscription") else ""
+        ),
+        "[Корзина]": _cart_line(slots),
+    }
+
+    kept: list[str] = []
+    for line in text.split("\n"):
+        for token, value in known.items():
+            if value:
+                line = line.replace(token, value)
+        if _CRM_PLACEHOLDER_RE.search(line):
+            continue  # данных нет — строка без них не нужна
+        kept.append(line)
+
+    # Схлопываем пустые строки, оставшиеся от вырезанных.
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
 def format_slots_block(slots: dict[str, str]) -> str:

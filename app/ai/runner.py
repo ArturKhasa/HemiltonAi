@@ -45,7 +45,13 @@ from app.sales.funnel_steps import (
     find_praise_script,
     payment_option_chosen,
 )
-from app.sales.order_slots import asked_slot, collect_slots, format_slots_block, slot_is_filled
+from app.sales.order_slots import (
+    asked_slot,
+    collect_slots,
+    format_slots_block,
+    render_order_placeholders,
+    slot_is_filled,
+)
 from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole, Script
 from app.utils.text import normalize_dashes, render_name_placeholder, strip_repeated_greeting
 
@@ -443,8 +449,15 @@ async def run_ai(
     # обязаны уйти похвала, стоимость и доставка. Считаем ДО ответа модели — после
     # него последним нашим сообщением будет уже её реплика.
     praise_point = await answered_inscription_question(db, dialog.id)
-    design_point = await design_just_confirmed(db, dialog.id, text)
     payment_choice_point = await payment_option_chosen(db, dialog.id, text)
+    # Сверки «всё верно?» встречаются и после оплаты — при подведении итогов заказа
+    # и при согласовании макета. Без этой проверки «да» на итоговую сверку тянуло
+    # диалог обратно в оформление: клиент, уже приславший чек, получил условия
+    # оплаты второй раз (диалог 68, сообщение 979).
+    design_point = (
+        not await dialog_has_payment_link(db, dialog.id)
+        and await design_just_confirmed(db, dialog.id, text)
+    )
 
     logger.info(
         "[%s] calling agent | provider=%s | model=%s | context_turns=%d",
@@ -793,6 +806,15 @@ async def run_ai(
                 "[%s] unknown next_status from AI: %r", ctx, output.next_status
             )
 
+    # Эскалация снимает машину с диалога. Раньше ответ придерживался, а ИИ
+    # продолжал отвечать на каждую следующую реплику: диалог 68 — клиент просит
+    # вернуть предоплату (сообщение 966, «на проверку»), пишет «?», и ИИ сам
+    # предлагает «отменяем заказ окончательно?» (968, снова «на проверку»).
+    # Куратор получал очередь непоказанных ответов вместо одного диалога на разбор.
+    if output.need_curator and not dialog.ai_paused:
+        dialog.ai_paused = True
+        logger.info("[%s] need_curator=True — dialog paused for curator", ctx)
+
     ai_run = AIRun(
         dialog_id=dialog.id,
         input_message_id=client_message.id,
@@ -830,6 +852,7 @@ async def run_ai(
     # воронки. Раскрываем их на выходе, как и в дословных скриптах связки.
     reply_text = render_name_placeholder(reply_text, client.name if client else None)
     reply_text = await render_price_placeholders(db, reply_text, type_id=type_id)
+    reply_text = render_order_placeholders(reply_text, slots)
 
     # Фото скрипта, на котором построен ответ, не должны потеряться при пересказе.
     if output.source_script_id:
@@ -927,7 +950,7 @@ async def run_ai(
     ):
         contacts = await find_contacts_script(db, type_id)
         if contacts is not None and not slot_is_filled("recipient", slots):
-            part = await _render_script_part(db, dialog, contacts, client)
+            part = await _render_script_part(db, dialog, contacts, client, slots)
             if part is not None:
                 logger.info("[%s] contacts request forced | script=%s", ctx, contacts.id)
                 parts.append(part)
@@ -947,7 +970,7 @@ async def run_ai(
     ):
         link_script = await find_payment_link_script(db, type_id)
         if link_script is not None and not PAYMENT_LINK_RE.search(reply_text):
-            part = await _render_script_part(db, dialog, link_script, client)
+            part = await _render_script_part(db, dialog, link_script, client, slots)
             if part is not None:
                 logger.info("[%s] payment link forced | script=%s", ctx, link_script.id)
                 parts.append(part)
@@ -1114,7 +1137,7 @@ async def _build_follow_up_part(
         )
         return None, follow_up.id
 
-    part = await _render_script_part(db, dialog, follow_up, client)
+    part = await _render_script_part(db, dialog, follow_up, client, known_slots)
     if part is None:
         return None, follow_up.id
     logger.info(
@@ -1128,13 +1151,15 @@ async def _render_script_part(
     dialog: Dialog,
     script: Script,
     client: Client | None,
+    slots: dict[str, str] | None = None,
 ) -> ReplyPart | None:
-    """Дословная реплика по скрипту: имя, цены и ссылка на оплату подставлены,
-    фото вынесены во вложения. Модель этот текст не переписывает."""
+    """Дословная реплика по скрипту: имя, цены, ссылка на оплату и данные заказа
+    подставлены, фото вынесены во вложения. Модель этот текст не переписывает."""
     text = render_name_placeholder(
         resolve_spintax(script.phrase_text), client.name if client else None
     )
     text = await render_price_placeholders(db, text, type_id=dialog.type_id)
+    text = render_order_placeholders(text, slots or {})
     text = normalize_dashes(text)
     text, image_urls = _split_image_urls(text)
     if not text.strip() and not image_urls:

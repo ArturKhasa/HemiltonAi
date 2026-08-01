@@ -280,6 +280,7 @@ async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMe
     output, ai_run, parts = await run_ai(db, dialog, client_message)
 
     if output.need_curator:
+        # Пауза диалога проставлена в run_ai — здесь только придерживаем ответ.
         logger.info("[%s] need_curator=True — reply held for review", ctx)
         return
 
