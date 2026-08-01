@@ -185,13 +185,31 @@ async def detect_funnel_with_ai(
     history_text = "\n".join(lines)
 
     # Deterministic gate: without a quoted price every paid-track funnel is off the
-    # table, so skip the LLM entirely and pin regular (also saves the detection call).
-    if "regular" in funnels and not _manager_sent_price(history_text):
-        reason = "цены ещё не отправлялись — hot/thinking/expensive недоступны (код-гейт)"
+    # table, so skip the LLM entirely (also saves the detection call).
+    if not _manager_sent_price(history_text):
+        if "regular" in funnels:
+            reason = "цены ещё не отправлялись — платные воронки недоступны (код-гейт)"
+            logger.info(
+                "detect_funnel_ai: price gate -> regular | dialog=%s type_id=%s", dialog.id, type_id,
+            )
+            return "regular", reason
+        # Единственная настроенная воронка — «Знает цену», и до отправки цены она
+        # бессмысленна: клиент, который цены не видел, получил бы «Я Вам стоимость
+        # отправила, а вы мне что-то не отвечаете))». Пингов пока нет вообще.
         logger.info(
-            "detect_funnel_ai: price gate -> regular | dialog=%s type_id=%s", dialog.id, type_id,
+            "detect_funnel_ai: цены нет, воронки без цены не настроены — пингов не будет "
+            "| dialog=%s type_id=%s | funnels=%s", dialog.id, type_id, funnels,
         )
-        return "regular", reason
+        return None, None
+
+    # Выбирать не из чего — вызов модели вернул бы единственный вариант, но стоил бы
+    # запроса на каждый молчащий диалог.
+    if len(funnels) == 1:
+        logger.info(
+            "detect_funnel_ai: одна воронка в БД -> %s без вызова модели | dialog=%s",
+            funnels[0], dialog.id,
+        )
+        return funnels[0], "единственная настроенная воронка"
 
     funnels_list = ", ".join(f'"{f}"' for f in funnels)
     instructions = f"""\
@@ -221,7 +239,7 @@ expensive (только при явном тексте):
 2) После расчёта пишет: спасибо / спасибо за информацию / мне не надо / напишу потом / мне на будущее / напишу позже
 
 after_payment:
-1) Скинули ссылку на https://photo-book-payment.online, но не оплатил
+1) Ссылку на оплату отправили, но клиент не оплатил
 
 regular - Для всех остальных случаев
 
