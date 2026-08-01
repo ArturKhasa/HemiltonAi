@@ -216,19 +216,23 @@
                       #{{ g.id }} — {{ (g.marketing_tag || g.phrase_text).slice(0, 46) }}
                     </option>
                   </select>
-                  <div v-if="r.greeting_script_id" class="mt-1.5">
+                  <div class="mt-1.5">
                     <textarea
-                      v-model="greetingDrafts[r.greeting_script_id]"
+                      v-model="greetingDrafts[r.id]"
                       rows="4"
+                      placeholder="Пусто — уйдёт общее приветствие"
                       class="w-full border rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-brand-500 resize-y"
                     ></textarea>
                     <div class="flex items-center gap-2 mt-1">
                       <button
-                        @click="saveGreetingText(r.greeting_script_id)"
-                        :disabled="!greetingChanged(r.greeting_script_id)"
+                        @click="saveGreetingText(r)"
+                        :disabled="!greetingChanged(r)"
                         class="text-xs px-2.5 py-1 rounded-lg bg-brand-600 text-white disabled:opacity-40 hover:bg-brand-700"
                       >Сохранить текст</button>
-                      <span v-if="greetingSaved === r.greeting_script_id" class="text-xs text-green-600">сохранено</span>
+                      <span v-if="greetingSaved === r.id" class="text-xs text-green-600">сохранено</span>
+                      <span v-else-if="r.greeting_shared_with" class="text-xs text-amber-600">
+                        общий ещё с {{ r.greeting_shared_with }} — сохранение сделает свою копию
+                      </span>
                     </div>
                   </div>
                 </td>
@@ -419,6 +423,23 @@
               <option :value="null">— не задано —</option>
               <option v-for="t in dialogTypes" :key="t.id" :value="t.id">{{ t.display_name }}</option>
             </select>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 mb-1.5">Первое сообщение</label>
+            <textarea
+              v-model="refForm.greeting_text"
+              rows="5"
+              placeholder="Оставьте пустым — уйдёт общее приветствие"
+              class="w-full border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-brand-500 resize-y"
+            ></textarea>
+            <p class="text-xs text-gray-400 mt-1">
+              Текст, который клиент с этой метки получит первым. Фото — токеном
+              <span class="font-mono">[photo-ссылка]</span>, имя — <span class="font-mono">[Имя]</span>.
+            </p>
+            <p v-if="editRefTag && editRefTag.greeting_shared_with" class="text-xs text-amber-600 mt-1">
+              Этот текст сейчас общий ещё с {{ editRefTag.greeting_shared_with }} меткой(ами) —
+              при сохранении метка получит свою копию, остальные не изменятся.
+            </p>
           </div>
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Заметка</label>
@@ -747,18 +768,14 @@ const greetingScripts = computed(() =>
   scripts.value.filter(s => (s.condition || '').toLowerCase().includes('первое приветственное'))
 )
 
+// Черновик привязан к МЕТКЕ, а не к скрипту: один и тот же скрипт может стоять у
+// нескольких меток, и правка «под одну» не должна их путать между собой.
 function syncGreetingDrafts() {
-  for (const r of refTags.value) {
-    if (!r.greeting_script_id) continue
-    const src = scripts.value.find(s => s.id === r.greeting_script_id)
-    if (src) greetingDrafts.value[r.greeting_script_id] = src.phrase_text
-  }
+  for (const r of refTags.value) greetingDrafts.value[r.id] = r.greeting_text || ''
 }
 
-const greetingChanged = (id) => {
-  const src = scripts.value.find(s => s.id === id)
-  return !!src && greetingDrafts.value[id] !== undefined && greetingDrafts.value[id] !== src.phrase_text
-}
+const greetingChanged = (r) =>
+  greetingDrafts.value[r.id] !== undefined && greetingDrafts.value[r.id] !== (r.greeting_text || '')
 
 
 // Галка живёт на направлении: у каждого своя реклама и свой органический трафик.
@@ -791,14 +808,17 @@ async function loadRefTags() {
 function openRefCreate() {
   editRefTag.value = null
   refError.value = ''
-  refForm.value = { tag: '', type_id: activeTypeId.value, is_active: true, note: '' }
+  refForm.value = { tag: '', type_id: activeTypeId.value, is_active: true, note: '', greeting_text: '' }
   showRefModal.value = true
 }
 
 function openRefEdit(r) {
   editRefTag.value = r
   refError.value = ''
-  refForm.value = { tag: r.tag, type_id: r.type_id, is_active: r.is_active, note: r.note || '' }
+  refForm.value = {
+    tag: r.tag, type_id: r.type_id, is_active: r.is_active,
+    note: r.note || '', greeting_text: r.greeting_text || '',
+  }
   showRefModal.value = true
 }
 
@@ -807,14 +827,15 @@ async function saveRefTag() {
   refError.value = ''
   try {
     if (editRefTag.value) {
-      const res = await api.patch(`/ref-tags/${editRefTag.value.id}`, {
-        tag: refForm.value.tag, is_active: refForm.value.is_active, note: refForm.value.note,
-      })
-      const i = refTags.value.findIndex(x => x.id === editRefTag.value.id)
-      if (i !== -1) refTags.value[i] = res.data
+      await applyRefTag(await api.patch(`/ref-tags/${editRefTag.value.id}`, {
+        tag: refForm.value.tag, is_active: refForm.value.is_active,
+        note: refForm.value.note, greeting_text: refForm.value.greeting_text,
+      }))
     } else {
       const res = await api.post('/ref-tags/', refForm.value)
       refTags.value.push(res.data)
+      greetingDrafts.value[res.data.id] = res.data.greeting_text || ''
+      await ensureScriptLoaded(res.data.greeting_script_id)
     }
     showRefModal.value = false
   } catch (e) {
@@ -829,19 +850,32 @@ async function toggleRefActive(r) {
   r.is_active = res.data.is_active
 }
 
-async function bindGreeting(r, scriptId) {
-  // 0 вместо null: PATCH на бэке режет null-поля (exclude_none).
-  const res = await api.patch(`/ref-tags/${r.id}`, { greeting_script_id: scriptId })
-  r.greeting_script_id = res.data.greeting_script_id
-  syncGreetingDrafts()
+async function applyRefTag(res) {
+  const i = refTags.value.findIndex(x => x.id === res.data.id)
+  if (i !== -1) refTags.value[i] = res.data
+  greetingDrafts.value[res.data.id] = res.data.greeting_text || ''
+  // Метке могли завести собственное приветствие — без перечитывания списка
+  // выпадашка не найдёт его среди вариантов и покажется пустой.
+  await ensureScriptLoaded(res.data.greeting_script_id)
 }
 
-async function saveGreetingText(scriptId) {
-  const res = await api.patch(`/scripts/${scriptId}`, { phrase_text: greetingDrafts.value[scriptId] })
-  const i = scripts.value.findIndex(s => s.id === scriptId)
-  if (i !== -1) scripts.value[i] = res.data
-  greetingSaved.value = scriptId
-  setTimeout(() => { if (greetingSaved.value === scriptId) greetingSaved.value = null }, 2000)
+async function ensureScriptLoaded(scriptId) {
+  if (!scriptId || scripts.value.some(s => s.id === scriptId)) return
+  const res = await api.get('/scripts/', { params: { include_inactive: true } })
+  scripts.value = res.data
+}
+
+async function bindGreeting(r, scriptId) {
+  // 0 вместо null: PATCH на бэке режет null-поля (exclude_none).
+  await applyRefTag(await api.patch(`/ref-tags/${r.id}`, { greeting_script_id: scriptId }))
+}
+
+// Сохраняем через метку, а не через скрипт: бэк сам решит, править текст на месте
+// или завести метке свою копию, если этим приветствием пишут и другие метки.
+async function saveGreetingText(r) {
+  await applyRefTag(await api.patch(`/ref-tags/${r.id}`, { greeting_text: greetingDrafts.value[r.id] }))
+  greetingSaved.value = r.id
+  setTimeout(() => { if (greetingSaved.value === r.id) greetingSaved.value = null }, 2000)
 }
 
 async function doRefDelete() {
