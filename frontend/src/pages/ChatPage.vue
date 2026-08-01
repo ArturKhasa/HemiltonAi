@@ -250,6 +250,12 @@
                     rel="noopener"
                     class="block mt-1 text-brand-600 underline break-all"
                   >{{ part.value }}</a>
+                  <button
+                    v-else-if="part.type === 'video'"
+                    @click="videoPreview = part"
+                    class="inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 text-xs hover:bg-gray-200 transition-colors cursor-pointer"
+                    title="Посмотреть видео"
+                  >🎬 видео</button>
                   <span v-else class="inline-block mt-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 text-xs">{{ part.value }}</span>
                 </template>
                 <p v-if="msg.role === 'ai' && msg.selected_script" class="mt-1 text-xs text-gray-400">{{ msg.selected_script }}</p>
@@ -375,6 +381,38 @@
           <button v-if="filterShowTest" @click="showNewChat = true" class="bg-brand-600 text-white px-6 py-2.5 rounded-xl text-sm hover:bg-brand-700">
             + Новый чат
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Video preview modal -->
+    <div
+      v-if="videoPreview"
+      class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
+      @click.self="videoPreview = null"
+    >
+      <div class="bg-white rounded-2xl shadow-xl w-full max-w-3xl overflow-hidden">
+        <div class="px-4 py-3 flex items-center justify-between border-b">
+          <span class="text-sm font-medium text-gray-700">🎬 Видео из сообщения</span>
+          <button @click="videoPreview = null" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+        </div>
+        <div class="bg-black aspect-video">
+          <iframe
+            :src="videoPreview.embed"
+            class="w-full h-full"
+            frameborder="0"
+            allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+            allowfullscreen
+          ></iframe>
+        </div>
+        <div class="px-4 py-3 border-t">
+          <a
+            :href="videoPreview.href"
+            target="_blank"
+            rel="noopener"
+            class="text-xs text-brand-600 underline break-all"
+          >Открыть в ВК: {{ videoPreview.href }}</a>
+          <p class="text-xs text-gray-400 mt-1">Если плеер пустой — ролик закрыт для встраивания, откройте по ссылке.</p>
         </div>
       </div>
     </div>
@@ -1634,7 +1672,27 @@ function isAudioUrl(url) {
 // Разбирает текст фразы на сегменты текст/фото для красивого отображения в
 // тестовом чате: "[photo-<url>]" -> реальная картинка, "[photo/video/audio_message-
 // <id>_<id>]" (чужой VK ID без прямой ссылки, см. app/vk/sender.py) -> плейсхолдер.
-const ATTACHMENT_TOKEN_RE = /\[(photo|video|audio_message)-([^\]]+)\]/g
+const ATTACHMENT_TOKEN_RE = /\[(photo|video|clip|audio_message)-([^\]]+)\]/g
+
+// Ссылка целиком: «https://vkvideo.ru/video-44440184_456240651».
+const VK_VIDEO_URL_RE = /(?:video|clip)(-?\d+)_(\d+)/
+// Голый VK-ID: из токена «[video-44440184_456240651]» сюда приходит только
+// «44440184_456240651» — префикс вместе с минусом уже съеден при разборе токена.
+// Минус принадлежит владельцу-сообществу, поэтому возвращаем его на место.
+const VK_VIDEO_BARE_RE = /^(\d+)_(\d+)$/
+
+// Встроенный плеер ВК. Ролик открывается прямо в панели, не уводя из диалога.
+function vkVideoEmbed(payload) {
+  const raw = (payload || '').trim()
+  const m = VK_VIDEO_URL_RE.exec(raw) || VK_VIDEO_BARE_RE.exec(raw)
+  if (!m) return null
+  const [, rawOwner, id] = m
+  const owner = rawOwner.startsWith('-') ? rawOwner : `-${rawOwner}`
+  return {
+    embed: `https://vk.com/video_ext.php?oid=${owner}&id=${id}&hd=2`,
+    href: /^https?:\/\//i.test(raw) ? raw : `https://vkvideo.ru/video${owner}_${id}`,
+  }
+}
 
 function parseMessageParts(text) {
   const parts = []
@@ -1646,10 +1704,16 @@ function parseMessageParts(text) {
       parts.push({ type: 'text', value: text.slice(lastIndex, match.index) })
     }
     const [, kind, payload] = match
-    if (/^https?:\/\//i.test(payload)) {
+    const video = (kind === 'video' || kind === 'clip') ? vkVideoEmbed(payload) : null
+    if (video) {
+      parts.push({ type: 'video', ...video })
+    } else if (/^https?:\/\//i.test(payload)) {
       parts.push({ type: kind === 'photo' ? 'image' : 'link', value: payload })
     } else {
-      parts.push({ type: 'placeholder', value: kind === 'photo' ? '📷 фото' : kind === 'video' ? '🎬 видео' : '🎤 голосовое' })
+      const label = kind === 'photo' ? '📷 фото'
+        : (kind === 'video' || kind === 'clip') ? '🎬 видео'
+          : '🎤 голосовое'
+      parts.push({ type: 'placeholder', value: label })
     }
     lastIndex = match.index + match[0].length
   }
@@ -1658,6 +1722,9 @@ function parseMessageParts(text) {
   }
   return parts.filter(p => p.type !== 'text' || p.value.trim())
 }
+
+// Открытый в модалке ролик, либо null.
+const videoPreview = ref(null)
 
 function formatDate(d) {
   if (!d) return ''
