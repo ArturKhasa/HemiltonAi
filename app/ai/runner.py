@@ -46,6 +46,7 @@ from app.sales.funnel_steps import (
     design_just_confirmed,
     dialog_has_payment_link,
     find_contacts_script,
+    find_checkout_script,
     find_design_fixed_script,
     find_payment_link_script,
     find_praise_script,
@@ -855,20 +856,21 @@ async def run_ai(
 
     reply_text = output.reply_text
 
-    # Шаг фиксации дизайна расписан регламентом целиком: присоединение, следом
-    # сумма со способами оплаты. Модель на нём то и дело перепрыгивает к запросу
-    # ФИО — и связка ложится ЗА её репликой, то есть счёт приходит после того,
-    # как у клиента уже спросили контакты (диалог 84, 08:11). Своевольную реплику
-    # заменяем текстом скрипта: решать тут нечего, порядок задан.
-    if design_point and asked_slot(reply_text) == "recipient":
-        _fixed = await find_design_fixed_script(db, type_id)
-        if _fixed is not None and (_fixed.phrase_text or "").strip():
-            logger.info(
-                "[%s] шаг дизайна: модель прыгнула к контактам — отдаём скрипт %s",
-                ctx, _fixed.id,
-            )
-            reply_text = resolve_spintax(_fixed.phrase_text)
-            output = output.model_copy(update={"source_script_id": _fixed.id})
+    # Клиент подтвердил дизайн — дальше ровно один шаг: сумма заказа и способы
+    # оплаты. Реплику модели тут не используем вовсе.
+    #
+    # Раньше её оставляли, а скрипт добавляли следом, и выходило два сообщения
+    # об одном и том же: «Какой вариант оплаты выбираете: всю сумму сразу с
+    # подарком или бронь 500 ₽?» — и сразу за ним скрипт с тем же вопросом
+    # (диалог 85, 08:37). До этого модель успевала прыгнуть ещё дальше, к ФИО,
+    # и счёт приходил после запроса контактов. Выбирать ей тут не из чего.
+    if design_point:
+        _checkout = await find_checkout_script(db, type_id)
+        if _checkout is not None and (_checkout.phrase_text or "").strip():
+            logger.info("[%s] дизайн подтверждён — отдаём скрипт оформления %s", ctx, _checkout.id)
+            reply_text = resolve_spintax(_checkout.phrase_text)
+            output = output.model_copy(update={"source_script_id": _checkout.id})
+            design_point = False  # связку разворачивать больше нечем
 
     # Плейсхолдеры скрипта модель переносит в ответ как есть — «Оплата доставки
     # уже при получении. [Имя], а цвет какой выберем?» ушло клиенту в прогоне

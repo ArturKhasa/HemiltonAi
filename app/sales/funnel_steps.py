@@ -34,6 +34,9 @@ _DESIGN_FIXED_CONDITION_RE = re.compile(
     r"зафиксировали\s+дизайн|по\s+дизайну\s+зафиксировал", re.I
 )
 
+# «5. Оформление» — сумма заказа и способы оплаты.
+_CHECKOUT_CONDITION_RE = re.compile(r"5\.\s*Оформление", re.I)
+
 # «5.2 Ссылка на оплату» — единственный скрипт стадии payment_link со ссылкой.
 _PAYMENT_LINK_CONDITION_RE = re.compile(r"ссылк\w*\s+на\s+оплату", re.I)
 
@@ -105,6 +108,11 @@ async def find_praise_script(db: AsyncSession, type_id: int | None) -> Script | 
 
 async def find_design_fixed_script(db: AsyncSession, type_id: int | None) -> Script | None:
     return await _pick(db, type_id, _DESIGN_FIXED_CONDITION_RE)
+
+
+async def find_checkout_script(db: AsyncSession, type_id: int | None) -> Script | None:
+    """«5. Оформление» — сумма заказа и два способа оплаты."""
+    return await _pick(db, type_id, _CHECKOUT_CONDITION_RE)
 
 
 async def find_payment_link_script(db: AsyncSession, type_id: int | None) -> Script | None:
