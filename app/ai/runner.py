@@ -65,6 +65,7 @@ from app.utils.text import (
     render_name_placeholder,
     strip_foreign_name,
     strip_repeated_greeting,
+    vary_repeated_opening,
 )
 
 logger = logging.getLogger(__name__)
@@ -878,8 +879,12 @@ async def run_ai(
     reply_text = render_name_placeholder(reply_text, client.name if client else None)
     # Обращение по имени — только настоящим именем клиента. Надпись на кофте
     # моделью принимается за имя собеседника: «Иван, а цвет какой выберем?»
-    # клиенту, у которого в профиле имени нет вовсе.
-    reply_text = strip_foreign_name(reply_text, client.name if client else None)
+    # клиенту, у которого в профиле имени нет вовсе. Надпись из [Уже собрано]
+    # снимаем и в середине реплики: за текстом скрипта модель дописывает
+    # «\n\nОрех, а цвет для свитшота какой выберем?».
+    reply_text = strip_foreign_name(
+        reply_text, client.name if client else None, slots.get("inscription"),
+    )
     reply_text = await render_price_placeholders(db, reply_text, type_id=type_id)
     reply_text = render_order_placeholders(reply_text, slots)
 
@@ -904,6 +909,17 @@ async def run_ai(
     reply_text = strip_repeated_greeting(reply_text)
     if reply_text != before_strip:
         logger.info("[%s] stripped repeated greeting from reply", ctx)
+
+    # Скрипты отработки возражений открываются словом «Понимаю» почти все, и
+    # подряд идущие реплики выходят под копирку. Меняем первое слово, если
+    # предыдущие наши сообщения начинались тем же.
+    before_opener = reply_text
+    reply_text = vary_repeated_opening(reply_text, manager_history_texts)
+    if reply_text != before_opener:
+        logger.info(
+            "[%s] reply opened like the previous one — opener varied | %r -> %r",
+            ctx, before_opener[:24], reply_text[:24],
+        )
 
     # Hash the final attachment set so future turns dedup by content, not URL.
     file_hashes: list[str] = []

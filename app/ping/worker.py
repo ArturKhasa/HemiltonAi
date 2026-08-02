@@ -13,6 +13,7 @@ from app.db.models import (
 from app.config import settings
 from app.db.session import AsyncSessionLocal
 from app.logging_context import current_dialog_type
+from app.sales.order_slots import collect_slots
 from app.utils.media import carry_over_attachments
 from app.utils.time import msk_now
 from app.utils.text import normalize_dashes, strip_foreign_name
@@ -150,6 +151,28 @@ async def _last_outbound_text(db: AsyncSession, dialog: Dialog) -> str | None:
     return (text or "").strip() or None
 
 
+# Столько последних сообщений хватает, чтобы найти надпись: её называют в самом
+# начале воронки, но и полную историю ради одного слова тянуть незачем.
+_INSCRIPTION_HISTORY_LIMIT = 100
+
+
+async def _order_inscription(db: AsyncSession, dialog: Dialog | None) -> str | None:
+    """Надпись, которую клиент заказал на изделие. Ею модель зовёт клиента."""
+    if dialog is None:
+        return None
+    rows = await db.execute(
+        select(Message)
+        .where(Message.dialog_id == dialog.id)
+        .order_by(Message.created_at.desc())
+        .limit(_INSCRIPTION_HISTORY_LIMIT)
+    )
+    msgs = list(reversed(rows.scalars().all()))
+    slots = collect_slots(
+        [("client" if m.role == MessageRole.client else "manager", m.text) for m in msgs]
+    )
+    return slots.get("inscription")
+
+
 def _strip_repeated_name(text: str, prev_text: str | None) -> str:
     """Rule "имя максимум через раз": if the previous outbound message already
     opened with the SAME name vocative, drop the leading name from this one.
@@ -186,7 +209,11 @@ async def _send_ping(
         # Обращение чужим именем: пинг звал клиента «Пётр» по надписи на кофте,
         # хотя в профиле имени нет вовсе (клиент 289653120).
         client = await db.get(Client, dialog.client_id) if dialog else None
-        dename = strip_foreign_name(custom_text, client.name if client else None)
+        dename = strip_foreign_name(
+            custom_text,
+            client.name if client else None,
+            await _order_inscription(db, dialog),
+        )
         if dename != custom_text:
             logger.info("ping: убрано чужое обращение по имени | dialog=%s", state.dialog_id)
             custom_text = dename

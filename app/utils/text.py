@@ -145,7 +145,23 @@ _NOT_A_VOCATIVE = frozenset("""
 """.split())
 
 
-def strip_foreign_name(text: str, client_name: str | None) -> str:
+# Слово-обращение не в начале реплики, а в начале абзаца или предложения:
+# «Отлично, в Ваш город доставляем СДЭК...\n\nОрех, а цвет какой выберем?».
+# Так проверять любое слово нельзя — под шаблон попадают перечисления («Белый,
+# бежевый, серый») и города («Казань, отличный выбор»), поэтому здесь ищется
+# ровно одно слово: надпись, которую клиент заказал на изделие.
+def _inscription_vocative_re(word: str) -> re.Pattern:
+    return re.compile(
+        rf"(^|\n|[.!?…]\s+){re.escape(word)}\s*,\s+(\S)",
+        re.IGNORECASE,
+    )
+
+
+def strip_foreign_name(
+    text: str,
+    client_name: str | None,
+    inscription: str | None = None,
+) -> str:
     """Убрать обращение по имени, которое клиенту не принадлежит.
 
     Ответ на «какое имя или фамилию напишем на кофте?» — это НАДПИСЬ НА ИЗДЕЛИИ,
@@ -155,7 +171,17 @@ def strip_foreign_name(text: str, client_name: str | None) -> str:
     промпте это не удерживает.
 
     Имени в профиле нет — обращаться нельзя вообще, обращение снимается целиком.
+
+    `inscription` — надпись из [Уже собрано по заказу]. Ею модель зовёт клиента
+    и в середине реплики, за текстом скрипта: «...Оплата при получении.\n\nОрех,
+    а цвет для свитшота какой выберем?» — начало реплики там занято скриптом,
+    и проверки первого слова не хватает.
     """
+    text = _strip_leading_vocative(text, client_name)
+    return _strip_inscription_vocative(text, client_name, inscription)
+
+
+def _strip_leading_vocative(text: str, client_name: str | None) -> str:
     m = _LEADING_VOCATIVE_RE.match(text or "")
     if not m or m.group(1).lower() in _NOT_A_VOCATIVE:
         return text
@@ -166,3 +192,86 @@ def strip_foreign_name(text: str, client_name: str | None) -> str:
     if not rest:
         return text
     return rest[:1].upper() + rest[1:]
+
+
+def _strip_inscription_vocative(
+    text: str, client_name: str | None, inscription: str | None,
+) -> str:
+    word = (inscription or "").strip().strip(".,!?;:«»\"'")
+    # Надпись из нескольких слов («Хемильтон 2026») обращением не станет, а
+    # односложное «я» или «да» сняло бы половину нормальных фраз.
+    if not text or len(word) < 3 or " " in word:
+        return text
+    known = usable_name(client_name)
+    # Клиент заказал кофту со своим же именем — обращение настоящее.
+    if known and word.lower() == known.lower():
+        return text
+    return _inscription_vocative_re(word).sub(
+        lambda m: m.group(1) + m.group(2).upper(), text,
+    )
+
+
+# Отработка возражений в скриптах почти вся открывается словом «Понимаю», и
+# реплики выходят под копирку: «Понимаю Ваши сомнения. При оплате всей суммы...»,
+# «Понимаю, не буду настаивать...», «Понимаю Ваши сомнения. Без предоплаты...» —
+# три подряд (диалог 85, 08:57-08:59). Читается как автоответчик ровно там, где
+# нужно живое участие. Промпт просит не повторяться, но текст-то скриптовый.
+#
+# Замена только первого слова и только там, где она грамматически безопасна:
+# перед запятой стоит вводное слово, перед «Вас/Ваши» — глагол с тем же
+# управлением. Всё остальное оставляем как есть: лучше повтор, чем ломаная фраза.
+_OPENER_RE = re.compile(r"^\s*([А-ЯЁ][а-яё]+)")
+_VOCATIVE_OBJECT_RE = re.compile(r"^\s+(?:вас|ваши|ваше|вашу|ваш|вашего)\b", re.IGNORECASE)
+
+_OPENER_ALTERNATIVES: dict[str, dict[str, tuple[str, ...]]] = {
+    "понимаю": {
+        "aside": ("Согласна", "Хорошо", "Ясно"),
+        "verb": ("Прекрасно понимаю", "Слышу", "Полностью понимаю"),
+    },
+    "отлично": {"aside": ("Супер", "Здорово", "Замечательно")},
+    "хорошо": {"aside": ("Договорились", "Принято", "Отлично")},
+    "супер": {"aside": ("Отлично", "Здорово")},
+    "здорово": {"aside": ("Отлично", "Супер")},
+    "замечательно": {"aside": ("Отлично", "Прекрасно")},
+    "конечно": {"aside": ("Разумеется", "Безусловно")},
+    "спасибо": {"aside": ("Благодарю",)},
+}
+
+# Сколько наших последних сообщений считаем «подряд идущими».
+_OPENER_LOOKBACK = 2
+
+
+def _opening_word(text: str) -> str | None:
+    m = _OPENER_RE.match(text or "")
+    return m.group(1).lower() if m else None
+
+
+def vary_repeated_opening(text: str, previous_texts: list[str]) -> str:
+    """Сменить первое слово реплики, если предыдущие открывались тем же.
+
+    previous_texts — наши отправленные сообщения по возрастанию времени.
+    """
+    m = _OPENER_RE.match(text or "")
+    if not m:
+        return text
+    word = m.group(1).lower()
+    variants = _OPENER_ALTERNATIVES.get(word)
+    if not variants:
+        return text
+
+    recent = [w for w in (_opening_word(t) for t in previous_texts[-_OPENER_LOOKBACK:]) if w]
+    if word not in recent:
+        return text
+
+    tail = text[m.end():]
+    if tail[:1] in (",", ".", "!", "…", ":", ""):
+        shape = "aside"
+    elif _VOCATIVE_OBJECT_RE.match(tail):
+        shape = "verb"
+    else:
+        return text
+
+    for alt in variants.get(shape, ()):
+        if alt.split()[0].lower() not in recent:
+            return text[: m.start(1)] + alt + tail
+    return text

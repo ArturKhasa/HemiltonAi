@@ -51,3 +51,44 @@ class TestStripForeignName:
         # Вокатив ловим только с заглавной первой и строчными дальше — «ИРИНА»
         # это не обращение, а часть надписи капсом.
         assert strip_foreign_name(text, "Ирина") == text
+
+
+class TestInscriptionVocative:
+    """Надпись на изделии как обращение — не только в начале реплики.
+
+    «Отлично, в Ваш город доставляем СДЭК... \n\nОрех, а цвет для свитшота какой
+    выберем?»: начало занято текстом скрипта, и первое слово проверять поздно.
+    """
+
+    def test_after_blank_line(self):
+        got = strip_foreign_name(
+            "Оплата доставки при получении.\n\nОрех, а цвет какой выберем?",
+            None, "Орех",
+        )
+        assert got == "Оплата доставки при получении.\n\nА цвет какой выберем?"
+
+    def test_mid_sentence_start(self):
+        got = strip_foreign_name("Всё записала. Орех, а размер?", None, "Орех")
+        assert got == "Всё записала. А размер?"
+
+    def test_at_the_very_start_too(self):
+        assert strip_foreign_name("Орех, а размер?", None, "Орех") == "А размер?"
+
+    def test_inscription_equal_to_own_name_is_kept(self):
+        text = "Всё записала. Ирина, а размер?"
+        assert strip_foreign_name(text, "Ирина", "Ирина") == text
+
+    def test_inscription_elsewhere_in_text_untouched(self):
+        text = "Наносим надпись «Орех» на спину. Какой цвет ниток?"
+        assert strip_foreign_name(text, None, "Орех") == text
+
+    @pytest.mark.parametrize("inscription", [None, "", "Хемильтон 2026", "Я"])
+    def test_no_single_word_inscription_no_change(self, inscription):
+        text = "Доставим СДЭК.\n\nОрех, а цвет какой?"
+        assert strip_foreign_name(text, "Ирина", inscription) == text
+
+    def test_enumeration_is_not_a_vocative(self):
+        """Слово из перечисления совпадать с надписью не может, а строка с ним
+        начинается ровно так же — проверяем, что чужие слова не трогаем."""
+        text = "Есть варианты.\nБелый, бежевый, серый - какой ближе?"
+        assert strip_foreign_name(text, None, "Орех") == text
