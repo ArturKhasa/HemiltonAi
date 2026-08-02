@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Message, MessageRole, Script
+from app.sales.order_slots import asked_slot, has_size
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,38 @@ _DESIGN_FIXED_CONDITION_RE = re.compile(
 # «5. Оформление» — сумма заказа и способы оплаты.
 _CHECKOUT_CONDITION_RE = re.compile(r"5\.\s*Оформление", re.I)
 
+# «4.1 Согласовываем дизайн» — сверка раскладки нанесений перед фиксацией.
+# В выгрузке ОП условие записано с опечаткой («Предвратильно»), поэтому ловим
+# только по «согласовываем дизайн».
+_DESIGN_REVIEW_CONDITION_RE = re.compile(r"согласовываем\s+дизайн", re.I)
+
+# Пример надписи в тексте скрипта: «На груди по центру - надпись "РОССИЯ"».
+# Печатаем на изделии то, что заказал клиент, — подставляем его надпись сюда.
+_DESIGN_INSCRIPTION_RE = re.compile(r"надпись\s*[«\"„][^»\"“]*[»\"“]", re.I)
+
+# Ответ двигает заказ к оплате. Проверяем и текст, не только source_script_id:
+# фразу шага модель пишет и своими словами, без ссылки на скрипт.
+_FUNNEL_ADVANCE_TEXT_RE = re.compile(
+    r"фиксирую\s+под\s+вас|ставлю\s+(?:его\s+)?в\s+работу|передаю\s+(?:его\s+)?в\s+работу|"
+    r"зафиксировал\w*\s+дизайн|фио\s+и\s+(?:номер\s+)?телефон", re.I,
+)
+
+
+def render_design_inscription(text: str, inscription: str | None) -> str:
+    """Подставить надпись клиента в строку раскладки вместо примера «РОССИЯ»."""
+    if not inscription:
+        return text
+    return _DESIGN_INSCRIPTION_RE.sub(lambda _: f"надпись «{inscription}»", text, count=1)
+
+
+def reply_advances_funnel(reply_text: str, source_script_id: int | None,
+                          advancing_ids: set[int]) -> bool:
+    """Ответ фиксирует дизайн, называет сумму, просит контакты или счёт."""
+    if source_script_id is not None and source_script_id in advancing_ids:
+        return True
+    text = reply_text or ""
+    return bool(CHECKOUT_PRESENTED_RE.search(text) or _FUNNEL_ADVANCE_TEXT_RE.search(text))
+
 # «5.2 Ссылка на оплату» — единственный скрипт стадии payment_link со ссылкой.
 _PAYMENT_LINK_CONDITION_RE = re.compile(r"ссылк\w*\s+на\s+оплату", re.I)
 
@@ -50,6 +83,43 @@ _AFFIRMATIVE_RE = re.compile(
     r"подтверждаю|подходит|согласн\w+|оформляем|давайте)\b[\s\S]{0,20}$",
     re.I,
 )
+
+# Отказ клиента. «Спасибо не надо», «Не надо», «Не надо мне» — модель прочитала
+# их как согласие: на третье подряд она ответила «фиксирую под Вас этот вариант»
+# и следом развернула связку со счётом на 4 990 ₽ (диалог 89, 11:24-11:25).
+_REFUSAL_RE = re.compile(
+    r"^\W*(?:(?:нет|спасибо|ой|ну|да)\W+){0,2}"
+    r"(?:не\s+(?:надо|нужно|хочу|буду|интересует|интересно|актуально|готов\w*)"
+    r"|нет\b|отказ\w*|откажусь|передума\w+|отмен(?:а|ю|и|ите|ить|яем)\w*"
+    r"|ничего\s+не\s+(?:надо|нужно))",
+    re.I,
+)
+
+# «Нет, всё верно» — отрицание относится к сомнению, а не к заказу: шаг закрыт
+# согласием. Проверяем только у голого «нет»: «не хочу, всё верно» не бывает.
+_CONFIRMS_RE = re.compile(
+    r"вс[её]\s+верно|верно|так\s+и\s+есть|правильно|согласн\w+|подходит", re.I,
+)
+
+# «Не надо частями, давайте всю сумму» — это выбор способа оплаты, не отказ.
+_REFUSAL_WITH_CHOICE_RE = re.compile(r"вс[юей]\w*\s+сумм|частями|500|бронь", re.I)
+
+
+def client_refused(client_text: str) -> bool:
+    """Клиент отказывается — воронку двигать нельзя.
+
+    Отказ на сверке дизайна модель принимает за подтверждение, а дальше по
+    регламенту идут фиксация, сумма заказа и запрос данных получателя. Клиент
+    трижды сказал «не надо» и получил счёт.
+    """
+    text = (client_text or "").strip()
+    m = _REFUSAL_RE.match(text)
+    if not m or _REFUSAL_WITH_CHOICE_RE.search(text):
+        return False
+    if m.group(0).strip(" ,.!-").lower() == "нет" and _CONFIRMS_RE.search(text):
+        return False
+    return True
+
 
 # Шаг «5. Оформление» показан: названа сумма заказа и способы оплаты. Тем же
 # шаблоном проверяем и свежий ответ модели — если она рассказала про оплату сама,
@@ -106,6 +176,28 @@ async def find_praise_script(db: AsyncSession, type_id: int | None) -> Script | 
     return await _pick(db, type_id, _PRAISE_CONDITION_RE)
 
 
+async def find_design_review_script(db: AsyncSession, type_id: int | None) -> Script | None:
+    """«4.1 Согласовываем дизайн» — раскладка нанесений перед фиксацией."""
+    return await _pick(db, type_id, _DESIGN_REVIEW_CONDITION_RE)
+
+
+async def funnel_advancing_script_ids(db: AsyncSession, type_id: int | None) -> set[int]:
+    """Шаги, которые двигают заказ к оплате: фиксация дизайна, оформление,
+    данные получателя, ссылка на счёт. После отказа клиента ни один из них
+    уходить не должен."""
+    ids = set()
+    for finder in (
+        _DESIGN_FIXED_CONDITION_RE,
+        _CHECKOUT_CONDITION_RE,
+        _CONTACTS_CONDITION_RE,
+        _PAYMENT_LINK_CONDITION_RE,
+    ):
+        s = await _pick(db, type_id, finder)
+        if s is not None:
+            ids.add(s.id)
+    return ids
+
+
 async def find_design_fixed_script(db: AsyncSession, type_id: int | None) -> Script | None:
     return await _pick(db, type_id, _DESIGN_FIXED_CONDITION_RE)
 
@@ -142,6 +234,20 @@ async def design_just_confirmed(db: AsyncSession, dialog_id: int, client_text: s
         return False
     last = await _last_outgoing(db, dialog_id)
     return bool(last and _ASKS_CONFIRMATION_RE.search(last))
+
+
+async def size_just_given(db: AsyncSession, dialog_id: int, client_text: str) -> bool:
+    """Клиент назвал рост и вес в ответ на наш вопрос про размер — по регламенту
+    следующим ходом идёт сверка дизайна.
+
+    Свой пересказ вместо скрипта модель уже писала: «Элементы дизайна - только
+    надпись «Орех», расположение не уточнено» (диалог 89) — раскладка нанесений
+    из скрипта потерялась целиком, а вместе с ней и место надписи.
+    """
+    if not client_text or "?" in client_text or not has_size(client_text):
+        return False
+    last = await _last_outgoing(db, dialog_id)
+    return bool(last and asked_slot(last) == "size")
 
 
 async def find_contacts_script(db: AsyncSession, type_id: int | None) -> Script | None:

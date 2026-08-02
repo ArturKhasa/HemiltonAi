@@ -43,14 +43,20 @@ from app.sales.funnel_steps import (
     PAYMENT_LINK_RE,
     answered_inscription_question,
     checkout_presented,
+    client_refused,
     design_just_confirmed,
     dialog_has_payment_link,
     find_contacts_script,
     find_checkout_script,
     find_design_fixed_script,
+    find_design_review_script,
     find_payment_link_script,
     find_praise_script,
+    funnel_advancing_script_ids,
     payment_option_chosen,
+    render_design_inscription,
+    reply_advances_funnel,
+    size_just_given,
 )
 from app.sales.order_slots import (
     asked_slot,
@@ -200,6 +206,16 @@ _NO_QUESTION_RETRY_INSTRUCTION = (
 )
 # На этой стадии заказ уже передан на ведение — вопрос не нужен.
 _TERMINAL_STAGE = "paid"
+
+# «Спасибо не надо», «Не надо мне» — клиент отказывается, а модель читает это как
+# согласие: на третье подряд она написала «фиксирую под Вас этот вариант» и следом
+# ушёл счёт на 4 990 ₽ (диалог 89). Шаг не закрыт, пока не понятно, от чего отказ.
+_REFUSAL_RETRY_INSTRUCTION = (
+    "[Служебное] Клиент отказывается, а не подтверждает. Воронку двигать нельзя: "
+    "не фиксируй дизайн, не называй сумму заказа, не проси ФИО и телефон, не "
+    "выставляй счёт. Присоединись к клиенту и одним коротким вопросом уточни, от "
+    "чего именно отказ и что не подошло."
+)
 
 _REQUOTE_RETRY_INSTRUCTION = (
     "[Служебное] Клиент отвечает на ТВОЙ вопрос о том, что его остановило, а не "
@@ -457,8 +473,16 @@ async def run_ai(
     # Точка воронки «клиент ответил на вопрос про надпись»: по регламенту ОП следом
     # обязаны уйти похвала, стоимость и доставка. Считаем ДО ответа модели — после
     # него последним нашим сообщением будет уже её реплика.
-    praise_point = await answered_inscription_question(db, dialog.id)
-    payment_choice_point = await payment_option_chosen(db, dialog.id, text)
+    # Отказ клиента («Спасибо не надо») модель читает как согласие и идёт дальше
+    # по воронке. Ни одна точка связки на отказе разворачиваться не должна.
+    refused = client_refused(text)
+    if refused:
+        logger.info("[%s] клиент отказывается — воронку не двигаем | text=%r", ctx, text[:60])
+    praise_point = not refused and await answered_inscription_question(db, dialog.id)
+    payment_choice_point = not refused and await payment_option_chosen(db, dialog.id, text)
+    # Клиент назвал рост и вес — следующим ходом идёт сверка дизайна, и она
+    # уходит скриптом: свой пересказ модель пишет без раскладки нанесений.
+    design_review_point = not refused and await size_just_given(db, dialog.id, text)
     # Сверки «всё верно?» встречаются и после оплаты — при подведении итогов заказа
     # и при согласовании макета. Без этой проверки «да» на итоговую сверку тянуло
     # диалог обратно в оформление: клиент, уже приславший чек, получил условия
@@ -481,6 +505,7 @@ async def run_ai(
     # The provider bills every attempt, so token/cost metrics accumulate across them.
     acc_input = acc_output = acc_cache_read = acc_cache_write = 0
     dup_match: str | None = None
+    ignores_refusal = False
     for dup_attempt in (1, 2):
         uncached_tail = 1 + len(dynamic_context) + 2 * (dup_attempt - 1)
         result = None  # set on the openai-agents path; read by the failure logger
@@ -624,6 +649,13 @@ async def run_ai(
 
         dup_match = _find_duplicate_reply(output.reply_text, manager_history_texts)
         requote = _requotes_known_price(text, output.reply_text, manager_history_texts)
+        # Клиент отказался, а ответ всё равно фиксирует дизайн, называет сумму
+        # или просит контакты. Скрипты воронки ищем только на отказе — лишний
+        # проход по таблице скриптов на каждом ходу тут ни к чему.
+        ignores_refusal = refused and reply_advances_funnel(
+            output.reply_text, output.source_script_id,
+            await funnel_advancing_script_ids(db, type_id),
+        )
         # Вопрос спрашиваем только с самой модели: когда следом уходит связка
         # скриптов (своя у похвалы, своя у выбранного моделью скрипта), вопрос
         # задаёт последнее звено связки, а не эта реплика.
@@ -633,9 +665,17 @@ async def run_ai(
             and output.source_script_id is None
             and dialog.funnel_stage != _TERMINAL_STAGE
         )
-        if (not dup_match and not requote and not no_question) or dup_attempt == 2:
+        if (
+            not dup_match and not requote and not no_question and not ignores_refusal
+        ) or dup_attempt == 2:
             break
-        if requote:
+        if ignores_refusal:
+            logger.warning(
+                "[%s] клиент отказался, а ответ двигает воронку — retrying | reply_head=%r",
+                ctx, (output.reply_text or "")[:80],
+            )
+            correction = _REFUSAL_RETRY_INSTRUCTION
+        elif requote:
             logger.warning(
                 "[%s] reply re-quotes a known price in answer to an objection — retrying", ctx,
             )
@@ -657,6 +697,17 @@ async def run_ai(
         output = output.model_copy(update={
             "need_curator": True,
             "curator_reason": "Дубль: ответ почти дословно повторяет сообщение, уже отправленное клиенту",
+        })
+
+    # Отказ пережил повтор — дальше начинается счёт, а клиент говорит «не надо».
+    # Ответ придерживаем (см. вебхук) и отдаём диалог куратору: source_script_id
+    # снимаем, иначе следом развернётся связка с суммой заказа.
+    if ignores_refusal:
+        logger.warning("[%s] отказ проигнорирован и после повтора — куратору", ctx)
+        output = output.model_copy(update={
+            "source_script_id": None,
+            "need_curator": True,
+            "curator_reason": "Клиент отказывается, а ответ двигает заказ к оплате",
         })
     # Billed totals across all attempts, not just the last one.
     input_tokens, output_tokens = acc_input, acc_output
@@ -872,6 +923,20 @@ async def run_ai(
             reply_text = resolve_spintax(_checkout.phrase_text)
             output = output.model_copy(update={"source_script_id": _checkout.id})
             design_point = False  # связку разворачивать больше нечем
+
+    # Сверка дизайна — тоже полностью скриптовый шаг: в нём раскладка нанесений,
+    # которую клиент подтверждает. Пересказ модели её теряет — вместо «На груди
+    # по центру - надпись «Орех»» клиент прочитал «расположение не уточнено»
+    # (диалог 89, 11:24), а места нанесений не увидел вовсе. Надпись клиента
+    # подставляем в строку скрипта вместо примера «РОССИЯ».
+    if design_review_point:
+        _review = await find_design_review_script(db, type_id)
+        if _review is not None and (_review.phrase_text or "").strip():
+            logger.info("[%s] размер назван — отдаём сверку дизайна скриптом %s", ctx, _review.id)
+            reply_text = render_design_inscription(
+                resolve_spintax(_review.phrase_text), slots.get("inscription"),
+            )
+            output = output.model_copy(update={"source_script_id": _review.id})
 
     # Плейсхолдеры скрипта модель переносит в ответ как есть — «Оплата доставки
     # уже при получении. [Имя], а цвет какой выберем?» ушло клиенту в прогоне

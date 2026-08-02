@@ -147,6 +147,11 @@ def _find_size(text: str) -> tuple[str, str] | None:
     return height.group(1), weight.group(1)
 
 
+def has_size(text: str) -> bool:
+    """Рост и вес названы в этом сообщении («180 80», «рост 180 вес 80»)."""
+    return _find_size(text) is not None
+
+
 def collect_slots(history: list[tuple[str, str]]) -> dict[str, str]:
     """Факты заказа из истории. history — [(role, text)] по возрастанию времени,
     role: 'client' для клиента, любое другое значение — наша сторона.
