@@ -126,6 +126,19 @@ async def collect_sent_image_hashes(db: AsyncSession, dialog_id: int) -> set[str
 # «[audio_message569993513_687712211]».
 _ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|video|clip|audio_message)-?[^\]\s]+\]")
 
+# Ссылка в токене со всеми параметрами длиной под три сотни символов, и модель
+# переписывает её с ошибкой: в диалоге 91 она потеряла половину «attachment=
+# photo-44440184_457423551» в самом хвосте. Токен переставал совпадать со
+# скриптовым посимвольно, скриптовый дописывался как «потерянный», и клиент
+# получал одну и ту же вешалку с цветами дважды. Сравниваем по адресу без
+# query: параметры кадрирования на то, какая это картинка, не влияют.
+_TOKEN_URL_RE = re.compile(r"\[(photo|video|clip|audio_message)-?(https?://[^\]?]+)")
+
+
+def _attachment_key(token: str) -> str:
+    m = _TOKEN_URL_RE.match(token)
+    return f"{m.group(1)}:{m.group(2)}" if m else token
+
 
 def carry_over_attachments(text: str, source_text: str) -> str:
     """Вернуть в текст вложения исходной фразы, которые модель из неё выбросила.
@@ -138,7 +151,14 @@ def carry_over_attachments(text: str, source_text: str) -> str:
     Токены дописываются одним блоком в конец: ВК показывает вложения отдельно от
     текста, и место токена внутри сообщения ни на что не влияет.
     """
-    missing = [t for t in _ATTACHMENT_TOKEN_RE.findall(source_text or "") if t not in (text or "")]
+    present = {_attachment_key(t) for t in _ATTACHMENT_TOKEN_RE.findall(text or "")}
+    missing: list[str] = []
+    for token in _ATTACHMENT_TOKEN_RE.findall(source_text or ""):
+        key = _attachment_key(token)
+        if key in present:
+            continue
+        present.add(key)
+        missing.append(token)
     if not missing:
         return text
     return (text or "").rstrip() + "\n\n" + "\n".join(missing)

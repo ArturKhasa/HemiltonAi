@@ -54,6 +54,37 @@ class TestCarryOverAttachments:
         """Пинги несут не только фото: у шага 2 клип, у шага 7 видео-отзыв."""
         assert token in carry_over_attachments("Переписанный текст", f"Исходный {token}")
 
+    def test_mangled_url_tail_is_still_the_same_photo(self):
+        """Диалог 91: модель переписала ссылку с ошибкой в самом хвосте
+        («attachment=photo-444423551» вместо «...-44440184_457423551»), токен
+        перестал совпадать посимвольно — и клиент получил одну и ту же вешалку
+        с цветами двумя картинками."""
+        src = (
+            "[photo-https://sun9-23.vkuserphoto.ru/s/v1/ig2/GsUP.jpg"
+            "?quality=95&crop=0,0,1370,1148&attachment=photo-44440184_457423551]"
+        )
+        mangled = (
+            "[photo-https://sun9-23.vkuserphoto.ru/s/v1/ig2/GsUP.jpg"
+            "?quality=95&crop=0,0,1370,1148&attachment=photo-444423551]"
+        )
+        reply = f"А цвет для свитшота какой выберем?\n\n{mangled}"
+        result = carry_over_attachments(reply, f"Отлично, в Ваш город доставляем...\n\n{src}")
+        assert result == reply
+        assert result.count("[photo-") == 1
+
+    def test_different_photos_from_the_same_host_are_both_kept(self):
+        """Разные картинки одного домена различаются путём, а не параметрами."""
+        a = "[photo-https://sun9-23.vkuserphoto.ru/s/v1/ig2/AAA.jpg?quality=95]"
+        b = "[photo-https://sun9-23.vkuserphoto.ru/s/v1/ig2/BBB.jpg?quality=95]"
+        result = carry_over_attachments(f"Текст\n\n{a}", f"Скрипт\n\n{a}\n{b}")
+        assert a in result and b in result
+
+    def test_script_with_the_same_photo_twice_sends_it_once(self):
+        photo = "[photo-https://sun9-23.vkuserphoto.ru/s/v1/ig2/AAA.jpg?quality=95]"
+        other = "[photo-https://sun9-23.vkuserphoto.ru/s/v1/ig2/AAA.jpg?as=32x27]"
+        result = carry_over_attachments("Текст", f"Скрипт\n\n{photo}\n{other}")
+        assert result.count("[photo-") == 1
+
     def test_ping_rewrite_keeps_its_photo(self):
         """Реальный случай: агент переписал фразу шага 5 и выбросил картинку."""
         rule = (
