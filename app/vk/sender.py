@@ -24,22 +24,26 @@ _REQUEST_TIMEOUT = 15.0
 # VK messages.send принимает максимум 10 attachment-объектов на сообщение.
 _MAX_ATTACHMENTS = 10
 
-# Готовые фразы (импортированные из старой CRM/бот-платформы) хранят вложения прямо
-# в тексте, в двух формах:
-# 1) "[photo-<owner_id>_<media_id>]" / "[video-<id>_<id>]" / "[audio_message-<id>_<id>]"
-#    — уже готовый VK attachment токен чужого сообщества/аккаунта. VK принимает
-#    attachment только на объекты, принадлежащие ТОКЕНУ отправителя (своему
-#    сообществу) или загруженные через его upload-сервер — чужой ID тихо
-#    игнорируется (без ошибки в ответе, просто не прикрепляется). Восстановить
-#    нечем (нет прямой ссылки на файл) — вырезается как мусорный текст.
-# 2) "[photo-https://...]" (например store.wazzup24.com) — реальная скачиваемая
-#    ссылка на файл. Перезаливается на СВОЁ сообщество через
-#    app.vk.photo_upload.resolve_attachment (с кэшем), см. extract_and_resolve_attachments.
-# «clip» — тот же мёртвый VK-ID, только для клипов. Его в списке не было, и токен
-# «[clip-228420497_456239100]» уезжал клиенту голым текстом прямо в конце пинга.
-_DEAD_ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|video|clip|audio_message)-?\d+_\d+\]")
+# Готовые фразы (импортированные из старой CRM/бот-платформы) хранят вложения
+# прямо в тексте, тремя формами:
+#
+# 1) "[video-<owner>_<id>]" / "[clip-<owner>_<id>]" — ВИДЕО чужого сообщества.
+#    Прикрепляется как есть: проверено отправкой в ВК, оба ролика из выгрузки ОП
+#    (сообщества 228420497 и 44440184) дошли вложением, messages.getById
+#    показывает их в attachments.
+# 2) "[photo-https://...]" — скачиваемая ссылка. Перезаливается на СВОЁ
+#    сообщество через app.vk.photo_upload.resolve_attachment (с кэшем).
+# 3) "[photo-<owner>_<id>]" / "[audio_message<id>_<id>]" — чужой media-id без
+#    ссылки. Тут ВК уже разборчив: фото одного сообщества прикрепилось, другого
+#    и голосовое — молча выброшены. Полагаться нельзя, вырезаем как мусор; для
+#    фото рабочий путь — форма 2.
+_DEAD_ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|audio_message)-?\d+_\d+\]")
 _PHOTO_URL_TOKEN_RE = re.compile(r"\[photo-(https?://[^\]]+)\]")
 _VIDEO_URL_TOKEN_RE = re.compile(r"\[video-(https?://[^\]]+)\]")
+# "[video-1_2]" и "[clip-1_2]" — минус владельца-сообщества внутри числа.
+_VIDEO_ID_TOKEN_RE = re.compile(r"\[(?:video|clip)(-?\d+_\d+)\]")
+# Ссылка на ролик: https://vkvideo.ru/video-44440184_456240651 и clip-версия.
+_VIDEO_URL_IDS_RE = re.compile(r"(?:video|clip)(-?\d+_\d+)")
 
 
 async def extract_and_resolve_attachments(
@@ -63,15 +67,28 @@ async def extract_and_resolve_attachments(
         if att:
             attachments.append(att)
     cleaned = _PHOTO_URL_TOKEN_RE.sub("", text or "")
-    # Видео перезалить нечем, уходит ссылкой — но отдельной строкой в конце, а не
-    # там, где токен стоял в тексте. На месте она прилипала к вопросу («…важнее
-    # качество или итоговая цена? https://vkvideo.ru/clip-…») и читалась как
-    # опечатка; внизу ВК разворачивает её карточкой с превью.
-    video_urls = [m.group(1) for m in _VIDEO_URL_TOKEN_RE.finditer(cleaned)]
+
+    # Видео идёт вложением по id — и из голого токена, и из ссылки на vkvideo.
+    for m in _VIDEO_ID_TOKEN_RE.finditer(cleaned):
+        attachments.append(f"video{m.group(1)}")
+    cleaned = _VIDEO_ID_TOKEN_RE.sub("", cleaned)
+
+    # Ссылка, из которой id не вытащить (не vkvideo), вложением стать не может —
+    # оставляем её текстом, но отдельной строкой в конце: на месте токена она
+    # прилипала к вопросу и читалась как опечатка.
+    leftover_urls: list[str] = []
+    for m in _VIDEO_URL_TOKEN_RE.finditer(cleaned):
+        url = m.group(1)
+        ids = _VIDEO_URL_IDS_RE.search(url)
+        if ids:
+            attachments.append(f"video{ids.group(1)}")
+        else:
+            leftover_urls.append(url)
     cleaned = _VIDEO_URL_TOKEN_RE.sub("", cleaned)
+
     cleaned = _DEAD_ATTACHMENT_TOKEN_RE.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    for url in video_urls:
+    for url in leftover_urls:
         if url not in cleaned:
             cleaned = f"{cleaned}\n\n{url}" if cleaned else url
 

@@ -89,21 +89,24 @@ def test_make_random_id_positive_int32():
         assert 0 < rid <= 0x7FFF_FFFF
 
 
-class TestClipToken:
-    """«[clip-<id>_<id>]» — тот же мёртвый VK-ID, что photo/video, только для
-    клипов. Его не было в списке вырезаемых, и токен уезжал клиенту голым
-    текстом в конце пинга «эта толстовка стоит каждого рубля»."""
-
-    def test_clip_id_token_is_stripped(self):
-        assert _DEAD_ATTACHMENT_TOKEN_RE.sub("", "Текст [clip-228420497_456239100]").strip() == "Текст"
+class TestDeadTokens:
+    """Мёртвый media-id — тот, что ВК молча выбрасывает. Проверено отправкой:
+    фото чужого сообщества и голосовое не прикрепились, видео — прикрепилось,
+    поэтому video и clip из этого списка ушли (см. TestVideoAttachment)."""
 
     @pytest.mark.parametrize("token", [
-        "[photo-228420497_456240496]",
-        "[video-44440184_456240651]",
+        "[photo-44440184_457423829]",
         "[audio_message569993513_687712211]",
     ])
-    def test_other_dead_tokens_still_stripped(self, token):
+    def test_dead_tokens_stripped(self, token):
         assert _DEAD_ATTACHMENT_TOKEN_RE.sub("", f"Текст {token}").strip() == "Текст"
+
+    @pytest.mark.parametrize("token", [
+        "[video-44440184_456240651]",
+        "[clip-228420497_456239100]",
+    ])
+    def test_video_is_not_dead_anymore(self, token):
+        assert _DEAD_ATTACHMENT_TOKEN_RE.sub("", f"Текст {token}") == f"Текст {token}"
 
     def test_url_token_is_not_a_dead_id(self):
         """Ссылку трогать нельзя — её перезаливает resolve_attachment."""
@@ -111,31 +114,43 @@ class TestClipToken:
         assert _DEAD_ATTACHMENT_TOKEN_RE.sub("", text) == text
 
 
-class TestVideoLinkPlacement:
-    """Перезалить видео нечем, оно уходит ссылкой. Но на месте токена ссылка
-    прилипала к вопросу — «…важнее качество или итоговая цена? https://vkvideo…»
-    (пинг шага 2 на проде). Внизу отдельной строкой ВК рисует карточку.
+class TestVideoAttachment:
+    """Видео чужого сообщества ВК принимает вложением — проверено отправкой:
+    оба ролика из выгрузки ОП дошли, messages.getById показал их в attachments.
+    Раньше id вырезался как мёртвый, а ссылка уезжала голым текстом, прилипая к
+    вопросу: «…важнее качество или итоговая цена? https://vkvideo.ru/clip-…».
 
     db и group не нужны: перезаливка вызывается только для фото-токенов.
     """
 
-    async def test_link_moves_to_the_end(self):
-        text = "Что для Вас важнее: качество или цена? [video-https://vkvideo.ru/clip-228420497_456239100]"
-        cleaned, att = await extract_and_resolve_attachments(None, None, text)
-        assert cleaned == (
-            "Что для Вас важнее: качество или цена?\n\n"
-            "https://vkvideo.ru/clip-228420497_456239100"
-        )
+    async def test_bare_video_id_becomes_attachment(self):
+        cleaned, att = await extract_and_resolve_attachments(
+            None, None, "Вот наше производство [video-44440184_456240651]")
+        assert cleaned == "Вот наше производство"
+        assert att == "video-44440184_456240651"
+
+    async def test_clip_token_becomes_attachment(self):
+        cleaned, att = await extract_and_resolve_attachments(
+            None, None, "Качество или цена? [clip-228420497_456239100]")
+        assert cleaned == "Качество или цена?"
+        assert att == "video-228420497_456239100"
+
+    async def test_vkvideo_link_becomes_attachment(self):
+        cleaned, att = await extract_and_resolve_attachments(
+            None, None, "Смотрите [video-https://vkvideo.ru/video-44440184_456240651]")
+        assert cleaned == "Смотрите"
+        assert att == "video-44440184_456240651"
+
+    async def test_foreign_host_link_stays_text_at_the_end(self):
+        """Не vkvideo — id не вытащить, вложением не сделать."""
+        cleaned, att = await extract_and_resolve_attachments(
+            None, None, "Вопрос? [video-https://example.org/reel.mp4]")
+        assert cleaned == "Вопрос?\n\nhttps://example.org/reel.mp4"
         assert att is None
 
-    async def test_token_in_the_middle_is_moved_out(self):
-        text = "Начало [video-https://vkvideo.ru/video-1_2] и продолжение фразы."
-        cleaned, _ = await extract_and_resolve_attachments(None, None, text)
-        assert cleaned.startswith("Начало")
-        assert "и продолжение фразы." in cleaned
-        assert cleaned.endswith("https://vkvideo.ru/video-1_2")
-
-    async def test_url_already_in_text_is_not_duplicated(self):
-        text = "Смотрите https://vkvideo.ru/video-1_2 [video-https://vkvideo.ru/video-1_2]"
-        cleaned, _ = await extract_and_resolve_attachments(None, None, text)
-        assert cleaned.count("https://vkvideo.ru/video-1_2") == 1
+    async def test_dead_photo_and_voice_ids_still_stripped(self):
+        """Их ВК выбрасывает молча — проверено той же отправкой."""
+        cleaned, att = await extract_and_resolve_attachments(
+            None, None, "Текст [photo-44440184_457423829] [audio_message569993513_687712211]")
+        assert cleaned == "Текст"
+        assert att is None
