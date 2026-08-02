@@ -15,7 +15,7 @@ from app.db.session import AsyncSessionLocal
 from app.logging_context import current_dialog_type
 from app.utils.media import carry_over_attachments
 from app.utils.time import msk_now
-from app.utils.text import normalize_dashes
+from app.utils.text import normalize_dashes, strip_foreign_name
 from app.vk.sender import VkMessagesForbiddenError, send_to_dialog
 from app.vk.spintax import resolve_spintax
 
@@ -183,6 +183,13 @@ async def _send_ping(
         if degreeted != custom_text:
             logger.info("ping: stripped greeting | dialog=%s", state.dialog_id)
             custom_text = degreeted
+        # Обращение чужим именем: пинг звал клиента «Пётр» по надписи на кофте,
+        # хотя в профиле имени нет вовсе (клиент 289653120).
+        client = await db.get(Client, dialog.client_id) if dialog else None
+        dename = strip_foreign_name(custom_text, client.name if client else None)
+        if dename != custom_text:
+            logger.info("ping: убрано чужое обращение по имени | dialog=%s", state.dialog_id)
+            custom_text = dename
         prev_text = await _last_outbound_text(db, dialog)
         stripped = _strip_repeated_name(custom_text, prev_text)
         if stripped != custom_text:

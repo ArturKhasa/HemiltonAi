@@ -59,7 +59,12 @@ from app.sales.order_slots import (
     slot_is_filled,
 )
 from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole, Script
-from app.utils.text import normalize_dashes, render_name_placeholder, strip_repeated_greeting
+from app.utils.text import (
+    normalize_dashes,
+    render_name_placeholder,
+    strip_foreign_name,
+    strip_repeated_greeting,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -849,10 +854,30 @@ async def run_ai(
     await db.flush()
 
     reply_text = output.reply_text
+
+    # Шаг фиксации дизайна расписан регламентом целиком: присоединение, следом
+    # сумма со способами оплаты. Модель на нём то и дело перепрыгивает к запросу
+    # ФИО — и связка ложится ЗА её репликой, то есть счёт приходит после того,
+    # как у клиента уже спросили контакты (диалог 84, 08:11). Своевольную реплику
+    # заменяем текстом скрипта: решать тут нечего, порядок задан.
+    if design_point and asked_slot(reply_text) == "recipient":
+        _fixed = await find_design_fixed_script(db, type_id)
+        if _fixed is not None and (_fixed.phrase_text or "").strip():
+            logger.info(
+                "[%s] шаг дизайна: модель прыгнула к контактам — отдаём скрипт %s",
+                ctx, _fixed.id,
+            )
+            reply_text = resolve_spintax(_fixed.phrase_text)
+            output = output.model_copy(update={"source_script_id": _fixed.id})
+
     # Плейсхолдеры скрипта модель переносит в ответ как есть — «Оплата доставки
     # уже при получении. [Имя], а цвет какой выберем?» ушло клиенту в прогоне
     # воронки. Раскрываем их на выходе, как и в дословных скриптах связки.
     reply_text = render_name_placeholder(reply_text, client.name if client else None)
+    # Обращение по имени — только настоящим именем клиента. Надпись на кофте
+    # моделью принимается за имя собеседника: «Иван, а цвет какой выберем?»
+    # клиенту, у которого в профиле имени нет вовсе.
+    reply_text = strip_foreign_name(reply_text, client.name if client else None)
     reply_text = await render_price_placeholders(db, reply_text, type_id=type_id)
     reply_text = render_order_placeholders(reply_text, slots)
 

@@ -8,6 +8,7 @@ from app.vk.sender import (
     VkApiError,
     VkMessagesForbiddenError,
     check_vk_response,
+    extract_and_resolve_attachments,
     make_random_id,
     send_message,
     split_text,
@@ -108,3 +109,33 @@ class TestClipToken:
         """Ссылку трогать нельзя — её перезаливает resolve_attachment."""
         text = "Текст [photo-https://sun9-29.vkuserphoto.ru/a.jpg]"
         assert _DEAD_ATTACHMENT_TOKEN_RE.sub("", text) == text
+
+
+class TestVideoLinkPlacement:
+    """Перезалить видео нечем, оно уходит ссылкой. Но на месте токена ссылка
+    прилипала к вопросу — «…важнее качество или итоговая цена? https://vkvideo…»
+    (пинг шага 2 на проде). Внизу отдельной строкой ВК рисует карточку.
+
+    db и group не нужны: перезаливка вызывается только для фото-токенов.
+    """
+
+    async def test_link_moves_to_the_end(self):
+        text = "Что для Вас важнее: качество или цена? [video-https://vkvideo.ru/clip-228420497_456239100]"
+        cleaned, att = await extract_and_resolve_attachments(None, None, text)
+        assert cleaned == (
+            "Что для Вас важнее: качество или цена?\n\n"
+            "https://vkvideo.ru/clip-228420497_456239100"
+        )
+        assert att is None
+
+    async def test_token_in_the_middle_is_moved_out(self):
+        text = "Начало [video-https://vkvideo.ru/video-1_2] и продолжение фразы."
+        cleaned, _ = await extract_and_resolve_attachments(None, None, text)
+        assert cleaned.startswith("Начало")
+        assert "и продолжение фразы." in cleaned
+        assert cleaned.endswith("https://vkvideo.ru/video-1_2")
+
+    async def test_url_already_in_text_is_not_duplicated(self):
+        text = "Смотрите https://vkvideo.ru/video-1_2 [video-https://vkvideo.ru/video-1_2]"
+        cleaned, _ = await extract_and_resolve_attachments(None, None, text)
+        assert cleaned.count("https://vkvideo.ru/video-1_2") == 1

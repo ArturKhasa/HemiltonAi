@@ -63,9 +63,17 @@ async def extract_and_resolve_attachments(
         if att:
             attachments.append(att)
     cleaned = _PHOTO_URL_TOKEN_RE.sub("", text or "")
-    cleaned = _VIDEO_URL_TOKEN_RE.sub(lambda m: m.group(1), cleaned)
+    # Видео перезалить нечем, уходит ссылкой — но отдельной строкой в конце, а не
+    # там, где токен стоял в тексте. На месте она прилипала к вопросу («…важнее
+    # качество или итоговая цена? https://vkvideo.ru/clip-…») и читалась как
+    # опечатка; внизу ВК разворачивает её карточкой с превью.
+    video_urls = [m.group(1) for m in _VIDEO_URL_TOKEN_RE.finditer(cleaned)]
+    cleaned = _VIDEO_URL_TOKEN_RE.sub("", cleaned)
     cleaned = _DEAD_ATTACHMENT_TOKEN_RE.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    for url in video_urls:
+        if url not in cleaned:
+            cleaned = f"{cleaned}\n\n{url}" if cleaned else url
 
     if len(attachments) > _MAX_ATTACHMENTS:
         logger.warning("extract_and_resolve_attachments: %d attachments, capping at %d", len(attachments), _MAX_ATTACHMENTS)
