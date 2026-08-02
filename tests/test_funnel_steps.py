@@ -178,6 +178,30 @@ class TestPaymentOptionChosen:
         await self._ask_choice(db, funnel)
         assert not await payment_option_chosen(db, funnel["dialog"].id, answer)
 
+    async def test_installment_mention_is_not_the_choice_question(self, db, funnel):
+        """Отработка «дорого» тоже говорит про «всю сумму сразу», но выбора не
+        предлагает. Клиент отвечал «Да» на согласие с ценой — и получал следом
+        запрос ФИО и телефона, посреди выбора цвета."""
+        db.add(Message(
+            dialog_id=funnel["dialog"].id, role=MessageRole.ai,
+            text=(
+                "Понимаю, цена может показаться выше. У нас индивидуальный пошив по "
+                "Вашим меркам. Всю сумму сразу вносить не нужно - можно оплатить "
+                "частями. Подойдёт такой вариант?"
+            ),
+        ))
+        await db.commit()
+        assert not await payment_option_chosen(db, funnel["dialog"].id, "Да")
+
+    @pytest.mark.parametrize("question", [
+        "Как удобнее: внести всю сумму сразу и получить подарок или начать с 500 рублей?",
+        "Начнём с 500 рублей или сразу с подарком всю сумму внесёте?",
+    ])
+    async def test_model_paraphrase_still_recognised(self, db, funnel, question):
+        db.add(Message(dialog_id=funnel["dialog"].id, role=MessageRole.ai, text=question))
+        await db.commit()
+        assert await payment_option_chosen(db, funnel["dialog"].id, "давайте 500")
+
     async def test_choice_without_our_question_ignored(self, db, funnel):
         db.add(Message(
             dialog_id=funnel["dialog"].id, role=MessageRole.ai, text="Какой цвет выберем?",
