@@ -62,6 +62,52 @@ def render_design_inscription(text: str, inscription: str | None) -> str:
     return _DESIGN_INSCRIPTION_RE.sub(lambda _: f"надпись «{inscription}»", text, count=1)
 
 
+# Элементы раскладки. В скрипте она записана под патриотическую линейку — герб,
+# флаг и надпись «РОССИЯ», — но это пример, а не то, что заказал клиент: на
+# «Чебурек» ему пришло «На груди слева - герб РФ / На спине - герб РФ», хотя
+# герба он не просил. Строку оставляем, только если её элемент клиент называл.
+_DESIGN_ELEMENT_RES = {
+    "герб": re.compile(r"герб|орёл|орел", re.I),
+    "флаг": re.compile(r"флаг|триколор", re.I),
+    "надпись": re.compile(r"надпись", re.I),
+}
+
+
+def render_design_review(
+    text: str, inscription: str | None, client_texts: list[str],
+) -> str | None:
+    """Раскладка из скрипта, обрезанная до того, что заказал клиент.
+
+    Возвращает None, когда согласовывать нечего: ни надписи, ни герба, ни флага
+    клиент не называл — тогда шаг ведёт модель, ей есть что спросить.
+    """
+    requested = {
+        name for name, rx in _DESIGN_ELEMENT_RES.items()
+        if any(rx.search(t or "") for t in client_texts)
+    }
+    if inscription:
+        requested.add("надпись")
+    else:
+        requested.discard("надпись")
+    if not requested:
+        return None
+
+    kept: list[str] = []
+    layout_lines = 0
+    for line in (text or "").split("\n"):
+        elements = {name for name, rx in _DESIGN_ELEMENT_RES.items() if rx.search(line)}
+        if elements:
+            if not elements & requested:
+                continue
+            layout_lines += 1
+        kept.append(line)
+    if not layout_lines:
+        return None
+    return render_design_inscription(
+        re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip(), inscription,
+    )
+
+
 def reply_advances_funnel(reply_text: str, source_script_id: int | None,
                           advancing_ids: set[int]) -> bool:
     """Ответ фиксирует дизайн, называет сумму, просит контакты или счёт."""

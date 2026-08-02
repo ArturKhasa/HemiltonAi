@@ -54,7 +54,7 @@ from app.sales.funnel_steps import (
     find_praise_script,
     funnel_advancing_script_ids,
     payment_option_chosen,
-    render_design_inscription,
+    render_design_review,
     reply_advances_funnel,
     size_just_given,
 )
@@ -924,19 +924,28 @@ async def run_ai(
             output = output.model_copy(update={"source_script_id": _checkout.id})
             design_point = False  # связку разворачивать больше нечем
 
-    # Сверка дизайна — тоже полностью скриптовый шаг: в нём раскладка нанесений,
-    # которую клиент подтверждает. Пересказ модели её теряет — вместо «На груди
-    # по центру - надпись «Орех»» клиент прочитал «расположение не уточнено»
-    # (диалог 89, 11:24), а места нанесений не увидел вовсе. Надпись клиента
-    # подставляем в строку скрипта вместо примера «РОССИЯ».
+    # Сверка дизайна — тоже скриптовый шаг: в нём раскладка нанесений, которую
+    # клиент подтверждает. Пересказ модели её теряет — вместо «На груди по центру
+    # - надпись «Орех»» клиент прочитал «расположение не уточнено» (диалог 89).
+    #
+    # Но и скрипт целиком отдавать нельзя: он записан под патриотическую линейку,
+    # и клиент, заказавший одну надпись «Чебурек», получил в сверке ещё герб на
+    # груди, флаг на рукаве и герб на спине, которых не просил (диалог 90, 11:53).
+    # Оставляем те строки раскладки, элементы которых клиент называл сам.
     if design_review_point:
         _review = await find_design_review_script(db, type_id)
         if _review is not None and (_review.phrase_text or "").strip():
-            logger.info("[%s] размер назван — отдаём сверку дизайна скриптом %s", ctx, _review.id)
-            reply_text = render_design_inscription(
-                resolve_spintax(_review.phrase_text), slots.get("inscription"),
+            _client_texts = [m.text for m in local_msgs if m.role == MessageRole.client]
+            _client_texts.append(text)
+            _rendered = render_design_review(
+                resolve_spintax(_review.phrase_text), slots.get("inscription"), _client_texts,
             )
-            output = output.model_copy(update={"source_script_id": _review.id})
+            if _rendered:
+                logger.info(
+                    "[%s] размер назван — отдаём сверку дизайна скриптом %s", ctx, _review.id,
+                )
+                reply_text = _rendered
+                output = output.model_copy(update={"source_script_id": _review.id})
 
     # Плейсхолдеры скрипта модель переносит в ответ как есть — «Оплата доставки
     # уже при получении. [Имя], а цвет какой выберем?» ушло клиенту в прогоне
