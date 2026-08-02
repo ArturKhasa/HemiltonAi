@@ -254,7 +254,14 @@
         <div class="px-4 py-3 flex justify-between items-center border-b bg-gray-50">
           <div class="flex flex-col gap-0.5">
             <span class="text-sm text-gray-500">{{ vkGroups.length }} групп</span>
-            <span class="text-xs text-gray-400">Адрес вебхука для Callback API: <span class="font-mono text-gray-500">https://&lt;домен&gt;/webhook/vk</span></span>
+            <span class="text-xs text-gray-400 flex items-center gap-2">
+              Адрес вебхука для Callback API:
+              <span class="font-mono text-gray-600">{{ webhookUrl }}</span>
+              <button
+                @click="copyWebhookUrl"
+                class="px-1.5 py-0.5 rounded border text-gray-500 hover:bg-gray-100 transition-colors"
+              >{{ webhookCopied ? 'скопировано' : 'копировать' }}</button>
+            </span>
           </div>
           <button @click="openGroupCreate" class="bg-brand-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-brand-700 font-medium">
             + Добавить группу
@@ -286,7 +293,24 @@
                 <td class="px-4 py-3 text-gray-700 font-mono text-xs">{{ g.group_id }}</td>
                 <td class="px-4 py-3 text-gray-800">{{ g.name }}</td>
                 <td class="px-4 py-3 text-gray-500 font-mono text-xs">{{ g.access_token_mask }}</td>
-                <td class="px-4 py-3 text-gray-500 font-mono text-xs">{{ g.confirmation_code }}</td>
+                <!-- ВК выдаёт новый код каждый раз, когда пересоздают сервер
+                     Callback API, поэтому правится прямо в строке. -->
+                <td class="px-4 py-3">
+                  <div class="flex items-center gap-1.5">
+                    <input
+                      v-model="codeDrafts[g.id]"
+                      @keyup.enter="saveConfirmationCode(g)"
+                      placeholder="из настроек ВК"
+                      class="w-28 border rounded px-1.5 py-1 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-brand-500"
+                    />
+                    <button
+                      v-if="codeChanged(g)"
+                      @click="saveConfirmationCode(g)"
+                      class="text-xs px-2 py-1 rounded bg-brand-600 text-white hover:bg-brand-700"
+                    >OK</button>
+                    <span v-else-if="codeSaved === g.id" class="text-xs text-green-600">сохранено</span>
+                  </div>
+                </td>
                 <td class="px-4 py-3">
                   <span :class="['text-xs font-medium', g.has_secret ? 'text-green-600' : 'text-gray-300']">
                     {{ g.has_secret ? 'да' : 'нет' }}
@@ -894,6 +918,37 @@ const groupError = ref('')
 
 const groupForm = ref({ group_id: null, name: '', access_token: '', confirmation_code: '', secret_key: '', dialog_type_id: null, is_active: true })
 
+// Адрес вебхука — это тот же домен, с которого открыта панель: nginx отдаёт и
+// её, и /webhook/vk. Берём из адресной строки, чтобы он не расходился с
+// реальностью при переезде и его не приходилось спрашивать у разработчика.
+const webhookUrl = computed(() => `${window.location.origin}/webhook/vk`)
+const webhookCopied = ref(false)
+
+async function copyWebhookUrl() {
+  await navigator.clipboard.writeText(webhookUrl.value)
+  webhookCopied.value = true
+  setTimeout(() => { webhookCopied.value = false }, 2000)
+}
+
+// Код подтверждения меняется каждый раз, когда в ВК пересоздают сервер Callback
+// API, — правим его прямо в строке, не открывая форму со всеми полями.
+const codeDrafts = ref({})
+const codeSaved = ref(null)
+
+const codeChanged = (g) =>
+  codeDrafts.value[g.id] !== undefined && codeDrafts.value[g.id].trim() !== g.confirmation_code
+
+async function saveConfirmationCode(g) {
+  const code = (codeDrafts.value[g.id] || '').trim()
+  if (!code || code === g.confirmation_code) return
+  const res = await api.patch(`/vk-groups/${g.id}`, { confirmation_code: code })
+  const i = vkGroups.value.findIndex(x => x.id === g.id)
+  if (i !== -1) vkGroups.value[i] = res.data
+  codeDrafts.value[g.id] = res.data.confirmation_code
+  codeSaved.value = g.id
+  setTimeout(() => { if (codeSaved.value === g.id) codeSaved.value = null }, 2000)
+}
+
 const dialogTypeName = (id) => dialogTypes.value.find(t => t.id === id)?.display_name || `#${id}`
 
 const canSaveGroup = computed(() => {
@@ -908,6 +963,7 @@ async function loadGroups() {
   try {
     const res = await api.get('/vk-groups/')
     vkGroups.value = res.data
+    for (const g of vkGroups.value) codeDrafts.value[g.id] = g.confirmation_code
   } finally {
     groupsLoading.value = false
   }
