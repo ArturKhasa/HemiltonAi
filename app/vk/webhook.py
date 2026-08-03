@@ -37,10 +37,32 @@ class VkIncomingMessage:
     random_id: int
     files: list[str] = field(default_factory=list)
     audio_urls: list[str] = field(default_factory=list)
+    # Картинки стикеров держим отдельно от files: там фото клиента, а стикер —
+    # не фото. Модель их видит по-разному, см. runner._attachment_content.
+    sticker_files: list[str] = field(default_factory=list)
     admin_author_id: int | None = None
     # Метка рекламной ссылки, по которой пришёл клиент (vk.me/club123?ref=sweetgold).
     # ВК присылает её только в ПЕРВОМ сообщении диалога.
     ref: str | None = None
+
+
+# Размер превью стикера. Смысл («палец вверх», «сердечко», «грустный кот») виден
+# и на мелком, а картинка едет в модель на каждом ходу вместе с историей —
+# 128 px хватает и стоит дёшево. Анимированные ВК тоже отдаёт кадром PNG.
+_STICKER_MIN_PX = 128
+
+
+def _sticker_image_url(sticker: dict) -> str | None:
+    """Превью стикера: самое мелкое из тех, что не меньше _STICKER_MIN_PX."""
+    images = sticker.get("images") or sticker.get("images_with_background") or []
+    sized = [i for i in images if i.get("url")]
+    if not sized:
+        return None
+    big_enough = [i for i in sized if (i.get("width") or 0) >= _STICKER_MIN_PX]
+    pick = min(big_enough or sized, key=lambda i: i.get("width") or 0) if big_enough else max(
+        sized, key=lambda i: i.get("width") or 0
+    )
+    return pick.get("url")
 
 
 def _largest_photo_url(photo: dict) -> str | None:
@@ -67,6 +89,7 @@ def parse_message_event(payload: dict) -> VkIncomingMessage | None:
     text = (msg.get("text") or "").strip()
     files: list[str] = []
     audio_urls: list[str] = []
+    sticker_files: list[str] = []
     placeholders: list[str] = []
     for att in msg.get("attachments") or []:
         att_type = att.get("type")
@@ -82,6 +105,9 @@ def parse_message_event(payload: dict) -> VkIncomingMessage | None:
             placeholders.append("[голосовое сообщение]")
         elif att_type == "sticker":
             placeholders.append("[Стикер]")
+            sticker_url = _sticker_image_url(att.get("sticker") or {})
+            if sticker_url:
+                sticker_files.append(sticker_url)
         elif att_type == "video":
             placeholders.append("[видео]")
         elif att_type == "doc":
@@ -128,6 +154,7 @@ def parse_message_event(payload: dict) -> VkIncomingMessage | None:
         random_id=int(msg.get("random_id") or 0),
         files=files,
         audio_urls=audio_urls,
+        sticker_files=sticker_files,
         admin_author_id=msg.get("admin_author_id"),
     )
 
@@ -245,12 +272,14 @@ async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMe
 
     if client_message is None:
         msg_metadata: dict | None = None
-        if msg.files or msg.audio_urls:
+        if msg.files or msg.audio_urls or msg.sticker_files:
             msg_metadata = {}
             if msg.files:
                 msg_metadata["files"] = msg.files
             if msg.audio_urls:
                 msg_metadata["audio_urls"] = msg.audio_urls
+            if msg.sticker_files:
+                msg_metadata["sticker_files"] = msg.sticker_files
         client_message = Message(
             dialog_id=dialog.id,
             role=MessageRole.client,

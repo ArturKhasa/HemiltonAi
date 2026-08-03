@@ -240,15 +240,30 @@ def _requotes_known_price(client_text: str, reply: str, manager_texts: list[str]
     return bool(_prices_in(reply) & already)
 
 
-def _attachment_content(text: str, files: list[str]) -> list[dict]:
+# Подпись перед картинкой стикера. Без неё модель принимает её за фото клиента
+# и начинает обсуждать «присланный дизайн».
+_STICKER_IMAGE_LABEL = "[Стикер] — картинка стикера ниже, это не фото клиента и не макет:"
+
+
+def _attachment_content(
+    text: str, files: list[str], sticker_files: list[str] | None = None,
+) -> list[dict]:
     """Собирает multimodal-контент сообщения клиента: текст + вложения.
 
     Не-изображения превращаются в текстовые плейсхолдеры ([Стикер] и т.п.).
     Плейсхолдер не дублируется, если он уже есть в тексте сообщения
     (adapter подставляет его же вместо пустого текста).
+
+    Стикер отдаём картинкой — иначе «[Стикер]» для модели ничем не отличается
+    от любого другого: палец вверх, сердечко и «ну не знаю» читаются одинаково.
+    Перед картинкой идёт своя подпись: это стикер, а не фото дизайна.
     """
     content: list[dict] = [{"type": "input_text", "text": text}]
     seen_placeholders = {text}
+    for url in sticker_files or []:
+        content.append({"type": "input_text", "text": _STICKER_IMAGE_LABEL})
+        content.append({"type": "input_image", "image_url": url, "detail": "low"})
+        seen_placeholders.add("[Стикер]")
     for url in files:
         if is_sticker_url(url):
             placeholder = "[Стикер]"
@@ -433,9 +448,14 @@ async def run_ai(
     logger.info("[%s] local history loaded | messages=%d", ctx, len(local_msgs))
     for msg in local_msgs:
         if msg.role == MessageRole.client:
-            files = (msg.msg_metadata or {}).get("files", [])
-            if files:
-                input_messages.append({"role": "user", "content": _attachment_content(msg.text, files)})
+            meta = msg.msg_metadata or {}
+            files = meta.get("files", [])
+            stickers = meta.get("sticker_files", [])
+            if files or stickers:
+                input_messages.append({
+                    "role": "user",
+                    "content": _attachment_content(msg.text, files, stickers),
+                })
             else:
                 input_messages.append({"role": "user", "content": msg.text})
         elif msg.role in (MessageRole.ai, MessageRole.curator):
@@ -461,12 +481,14 @@ async def run_ai(
     for block in dynamic_context:
         input_messages.append({"role": "user", "content": block})
 
-    files = (client_message.msg_metadata or {}).get("files", [])
-    if files:
+    _meta = client_message.msg_metadata or {}
+    files = _meta.get("files", [])
+    stickers = _meta.get("sticker_files", [])
+    if files or stickers:
         image_files = [url for url in files if is_image_url(url)]
-        sticker_files = [url for url in files if is_sticker_url(url)]
+        sticker_files = stickers + [url for url in files if is_sticker_url(url)]
         logger.info("[%s] current message has files | images=%d stickers=%d", ctx, len(image_files), len(sticker_files))
-        input_messages.append({"role": "user", "content": _attachment_content(text, files)})
+        input_messages.append({"role": "user", "content": _attachment_content(text, files, stickers)})
     else:
         input_messages.append({"role": "user", "content": text})
 
