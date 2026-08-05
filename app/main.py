@@ -122,4 +122,12 @@ if frontend_dist.exists():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
-        return FileResponse(frontend_dist / "index.html")
+        # index.html не кэшируем: имена бандлов в нём хэшированные, и стоит
+        # браузеру придержать старый index — админка после деплоя продолжает
+        # работать на прошлой сборке. Правку реф-меток так и не увидели, пока
+        # не обновили страницу руками. Сами бандлы под хэшем — наоборот,
+        # неизменны, их можно держать сколько угодно.
+        return FileResponse(
+            frontend_dist / "index.html",
+            headers={"Cache-Control": "no-store, must-revalidate"},
+        )
