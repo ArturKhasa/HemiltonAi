@@ -36,7 +36,7 @@ from app.utils.media import (
 from app.vk.spintax import resolve_spintax
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
-from app.ai.greeting import resolve_greeting
+from app.ai.greeting import greeting_text, resolve_greeting
 from app.sales.price_placeholder import payment_link_configured, render_price_placeholders
 from app.sales.funnel_steps import (
     CHECKOUT_PRESENTED_RE,
@@ -1158,8 +1158,12 @@ async def _run_scripted_greeting(
     заводим с нулевой стоимостью — прогона модели не было, но диалогу нужна
     запись, на которую сошлётся output_message_id и дедуп вебхука.
     """
+    # Текст берём через greeting_text: у приветствия под рекламную метку в
+    # админке заполняют только картинки, и без подстановки общего текста клиент
+    # получает три фото и сразу вопрос про имя.
     text = render_name_placeholder(
-        resolve_spintax(script.phrase_text), client.name if client else None
+        resolve_spintax(await greeting_text(db, script, dialog.type_id)),
+        client.name if client else None,
     )
     text = await render_price_placeholders(db, text, type_id=dialog.type_id)
     text = normalize_dashes(text)

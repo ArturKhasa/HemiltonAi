@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.tools import _parse_tags
 from app.db.models import Client, Dialog, Message, MessageRole, Script
+from app.utils.media import attachment_tokens, strip_attachment_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,49 @@ async def pick_greeting_script(
 
     untagged = [s for s in candidates if not _parse_tags(s.marketing_tag)]
     return untagged[0] if untagged else None
+
+
+async def _default_greeting(db: AsyncSession, type_id: int | None) -> Script | None:
+    """Общее приветствие направления — то, что уходит клиенту без метки."""
+    q = select(Script).where(Script.is_active == True)
+    if type_id is not None:
+        q = q.where(Script.type_id == type_id)
+    rows = (await db.execute(q.order_by(Script.id))).scalars().all()
+    for s in rows:
+        if (
+            GREETING_CONDITION_MARKER in (s.condition or "").lower()
+            and not _parse_tags(s.marketing_tag)
+            and _has_words(s.phrase_text)
+        ):
+            return s
+    return None
+
+
+def _has_words(text: str | None) -> bool:
+    """В тексте есть что читать, а не только вложения."""
+    return bool(strip_attachment_tokens(text))
+
+
+async def greeting_text(db: AsyncSession, script: Script, type_id: int | None) -> str:
+    """Текст приветствия: свой у скрипта, а если в нём одни картинки — общий.
+
+    Под рекламную метку в админку загружают её картинки, а поле текста оставляют
+    пустым — «текст же есть по умолчанию». До сих пор такому клиенту уходили три
+    фото и сразу вопрос про имя, без единой строчки приветствия (метка aigerb1,
+    21:33). Берём текст общего приветствия, картинки оставляем меткины.
+    """
+    own = script.phrase_text or ""
+    if _has_words(own):
+        return own
+    fallback = await _default_greeting(db, type_id)
+    if fallback is None:
+        return own
+    logger.info(
+        "приветствие %s без текста — подставляем общее из %s", script.id, fallback.id,
+    )
+    tokens = attachment_tokens(own)
+    text = strip_attachment_tokens(fallback.phrase_text)
+    return (f"{text}\n\n" + "\n".join(tokens)) if tokens else text
 
 
 async def resolve_greeting(

@@ -135,6 +135,16 @@ _ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|video|clip|audio_message)-?[^\]\s
 _TOKEN_URL_RE = re.compile(r"\[(photo|video|clip|audio_message)-?(https?://[^\]?]+)")
 
 
+def attachment_tokens(text: str | None) -> list[str]:
+    """Токены вложений из текста фразы, по порядку."""
+    return _ATTACHMENT_TOKEN_RE.findall(text or "")
+
+
+def strip_attachment_tokens(text: str | None) -> str:
+    """Текст без токенов вложений — то, что клиент реально прочитает."""
+    return _ATTACHMENT_TOKEN_RE.sub("", text or "").strip()
+
+
 def _attachment_key(token: str) -> str:
     m = _TOKEN_URL_RE.match(token)
     return f"{m.group(1)}:{m.group(2)}" if m else token
