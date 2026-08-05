@@ -832,7 +832,12 @@ async function loadRefTags() {
 function openRefCreate() {
   editRefTag.value = null
   refError.value = ''
-  refForm.value = { tag: '', type_id: activeTypeId.value, is_active: true, note: '', greeting_text: '' }
+  // Со вкладки «все направления» activeTypeId пуст, и метка создавалась без
+  // направления — по умолчанию подставляем первое, как в приветствии ниже.
+  refForm.value = {
+    tag: '', type_id: activeTypeId.value ?? dialogTypes.value[0]?.id ?? null,
+    is_active: true, note: '', greeting_text: '',
+  }
   showRefModal.value = true
 }
 
