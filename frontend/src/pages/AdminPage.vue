@@ -216,19 +216,23 @@
                       #{{ g.id }} — {{ (g.marketing_tag || g.phrase_text).slice(0, 46) }}
                     </option>
                   </select>
-                  <div class="mt-1.5">
+                  <div v-if="greetingDrafts[r.id]" class="mt-1.5">
                     <textarea
-                      v-model="greetingDrafts[r.id]"
+                      v-model="greetingDrafts[r.id].body"
                       rows="4"
                       placeholder="Пусто — уйдёт общее приветствие"
                       class="w-full border rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-brand-500 resize-y"
                     ></textarea>
-                    <div class="flex items-center gap-2 mt-1">
+                    <div class="mt-2">
+                      <label class="block text-xs text-gray-500 mb-1">Картинки</label>
+                      <GreetingImages v-model="greetingDrafts[r.id].tokens" />
+                    </div>
+                    <div class="flex items-center gap-2 mt-2">
                       <button
                         @click="saveGreetingText(r)"
                         :disabled="!greetingChanged(r)"
                         class="text-xs px-2.5 py-1 rounded-lg bg-brand-600 text-white disabled:opacity-40 hover:bg-brand-700"
-                      >Сохранить текст</button>
+                      >Сохранить</button>
                       <span v-if="greetingSaved === r.id" class="text-xs text-green-600">сохранено</span>
                       <span v-else-if="r.greeting_shared_with" class="text-xs text-amber-600">
                         общий ещё с {{ r.greeting_shared_with }} — сохранение сделает свою копию
@@ -451,15 +455,19 @@
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Первое сообщение</label>
             <textarea
-              v-model="refForm.greeting_text"
+              v-model="refForm.greeting.body"
               rows="5"
               placeholder="Оставьте пустым — уйдёт общее приветствие"
               class="w-full border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-brand-500 resize-y"
             ></textarea>
             <p class="text-xs text-gray-400 mt-1">
-              Текст, который клиент с этой метки получит первым. Фото — токеном
-              <span class="font-mono">[photo-ссылка]</span>, имя — <span class="font-mono">[Имя]</span>.
+              Текст, который клиент с этой метки получит первым. Имя —
+              <span class="font-mono">[Имя]</span>.
             </p>
+            <div class="mt-3">
+              <label class="block text-xs text-gray-500 mb-1.5">Картинки приветствия</label>
+              <GreetingImages v-model="refForm.greeting.tokens" />
+            </div>
             <p v-if="editRefTag && editRefTag.greeting_shared_with" class="text-xs text-amber-600 mt-1">
               Этот текст сейчас общий ещё с {{ editRefTag.greeting_shared_with }} меткой(ами) —
               при сохранении метка получит свою копию, остальные не изменятся.
@@ -631,6 +639,7 @@
 import { ref, computed, onMounted } from 'vue'
 import api from '../api'
 import { useAuthStore } from '../stores/auth'
+import GreetingImages from '../components/GreetingImages.vue'
 
 const auth = useAuthStore()
 
@@ -782,11 +791,29 @@ const showRefModal = ref(false)
 const editRefTag = ref(null)
 const refDeleteTarget = ref(null)
 const refError = ref('')
-const refForm = ref({ tag: '', type_id: null, is_active: true, note: '' })
+const refForm = ref({ tag: '', type_id: null, is_active: true, note: '', greeting: { body: '', tokens: [] } })
 
 // Черновики текстов приветствий: правим у себя, сохраняем по кнопке.
+// Каждый — { body, tokens }: текст без вложений и список токенов вложений.
+// В базе они лежат одной строкой, но править ссылки руками среди текста —
+// то, из-за чего картинки в приветствии и не менялись.
 const greetingDrafts = ref({})
 const greetingSaved = ref(null)
+
+const ATTACHMENT_TOKEN_RE = /\[(?:photo|video|clip|audio_message)-?[^\]\s]+\]/g
+
+function splitGreeting(text) {
+  const tokens = (text || '').match(ATTACHMENT_TOKEN_RE) || []
+  const body = (text || '').replace(ATTACHMENT_TOKEN_RE, '').replace(/\n{3,}/g, '\n\n').trim()
+  return { body, tokens }
+}
+
+function joinGreeting(draft) {
+  const body = (draft?.body || '').trim()
+  const tokens = draft?.tokens || []
+  if (!tokens.length) return body
+  return body ? `${body}\n\n${tokens.join('\n')}` : tokens.join('\n')
+}
 
 const greetingScripts = computed(() =>
   scripts.value.filter(s => (s.condition || '').toLowerCase().includes('первое приветственное'))
@@ -795,11 +822,14 @@ const greetingScripts = computed(() =>
 // Черновик привязан к МЕТКЕ, а не к скрипту: один и тот же скрипт может стоять у
 // нескольких меток, и правка «под одну» не должна их путать между собой.
 function syncGreetingDrafts() {
-  for (const r of refTags.value) greetingDrafts.value[r.id] = r.greeting_text || ''
+  for (const r of refTags.value) greetingDrafts.value[r.id] = splitGreeting(r.greeting_text)
 }
 
+// Сравниваем собранный текст с собранным же: в исходном токены могут стоять с
+// другими отбивками, и «изменено» загоралось бы сразу после загрузки.
 const greetingChanged = (r) =>
-  greetingDrafts.value[r.id] !== undefined && greetingDrafts.value[r.id] !== (r.greeting_text || '')
+  greetingDrafts.value[r.id] !== undefined
+  && joinGreeting(greetingDrafts.value[r.id]) !== joinGreeting(splitGreeting(r.greeting_text))
 
 
 // Галка живёт на направлении: у каждого своя реклама и свой органический трафик.
@@ -836,7 +866,7 @@ function openRefCreate() {
   // направления — по умолчанию подставляем первое, как в приветствии ниже.
   refForm.value = {
     tag: '', type_id: activeTypeId.value ?? dialogTypes.value[0]?.id ?? null,
-    is_active: true, note: '', greeting_text: '',
+    is_active: true, note: '', greeting: splitGreeting(''),
   }
   showRefModal.value = true
 }
@@ -846,7 +876,7 @@ function openRefEdit(r) {
   refError.value = ''
   refForm.value = {
     tag: r.tag, type_id: r.type_id, is_active: r.is_active,
-    note: r.note || '', greeting_text: r.greeting_text || '',
+    note: r.note || '', greeting: splitGreeting(r.greeting_text),
   }
   showRefModal.value = true
 }
@@ -858,12 +888,15 @@ async function saveRefTag() {
     if (editRefTag.value) {
       await applyRefTag(await api.patch(`/ref-tags/${editRefTag.value.id}`, {
         tag: refForm.value.tag, is_active: refForm.value.is_active,
-        note: refForm.value.note, greeting_text: refForm.value.greeting_text,
+        note: refForm.value.note, greeting_text: joinGreeting(refForm.value.greeting),
       }))
     } else {
-      const res = await api.post('/ref-tags/', refForm.value)
+      const { greeting, ...fields } = refForm.value
+      const res = await api.post('/ref-tags/', {
+        ...fields, greeting_text: joinGreeting(greeting),
+      })
       refTags.value.push(res.data)
-      greetingDrafts.value[res.data.id] = res.data.greeting_text || ''
+      greetingDrafts.value[res.data.id] = splitGreeting(res.data.greeting_text)
       await ensureScriptLoaded(res.data.greeting_script_id)
     }
     showRefModal.value = false
@@ -882,7 +915,7 @@ async function toggleRefActive(r) {
 async function applyRefTag(res) {
   const i = refTags.value.findIndex(x => x.id === res.data.id)
   if (i !== -1) refTags.value[i] = res.data
-  greetingDrafts.value[res.data.id] = res.data.greeting_text || ''
+  greetingDrafts.value[res.data.id] = splitGreeting(res.data.greeting_text)
   // Метке могли завести собственное приветствие — без перечитывания списка
   // выпадашка не найдёт его среди вариантов и покажется пустой.
   await ensureScriptLoaded(res.data.greeting_script_id)
@@ -902,7 +935,9 @@ async function bindGreeting(r, scriptId) {
 // Сохраняем через метку, а не через скрипт: бэк сам решит, править текст на месте
 // или завести метке свою копию, если этим приветствием пишут и другие метки.
 async function saveGreetingText(r) {
-  await applyRefTag(await api.patch(`/ref-tags/${r.id}`, { greeting_text: greetingDrafts.value[r.id] }))
+  await applyRefTag(await api.patch(`/ref-tags/${r.id}`, {
+    greeting_text: joinGreeting(greetingDrafts.value[r.id]),
+  }))
   greetingSaved.value = r.id
   setTimeout(() => { if (greetingSaved.value === r.id) greetingSaved.value = null }, 2000)
 }
