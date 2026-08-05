@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.logging_context import PerTypeFileHandler
+from app.storage.local import media_root
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s — %(message)s"
 _LOG_DATE = "%Y-%m-%d %H:%M:%S"
@@ -110,6 +111,12 @@ app.include_router(feedback_router, prefix="/api")
 app.include_router(ref_tags_router, prefix="/api")
 # Вебхук ВК без /api-префикса: адрес в настройках Callback API — /webhook/vk.
 app.include_router(vk_webhook_router)
+
+# Файлы из админки: каталог создаём сами и монтируем ДО SPA-роута ниже, иначе
+# «/media/...» уехал бы в index.html вместе со всеми неизвестными адресами.
+_media_root = media_root()
+_media_root.mkdir(parents=True, exist_ok=True)
+app.mount("/media", StaticFiles(directory=_media_root), name="media")
 
 frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
 if frontend_dist.exists():

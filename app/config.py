@@ -47,12 +47,13 @@ class Settings(BaseSettings):
     # (таблица vk_groups), не в env — групп много, их добавляют через админку.
     VK_API_VERSION: str = "5.199"
 
-    S3_BUCKET: str = ""
-    S3_ENDPOINT_URL: str = ""
-    S3_ACCESS_KEY: str = ""
-    S3_SECRET_KEY: str = ""
-    S3_REGION: str = ""
-    S3_PUBLIC_URL: str = ""
+    # Загруженные из админки файлы лежат на самом сервере (был S3, стало незачем).
+    # Путь относительный — считается от корня проекта; в прод-компоуз каталог
+    # смонтирован томом, иначе деплой уносил бы картинки вместе с контейнером.
+    MEDIA_ROOT: str = "data/media"
+    # Домен, по которому файлы доступны снаружи: ссылку читают и модель, и ВК.
+    # Пусто — ссылки относительные, годятся только для браузера админки.
+    MEDIA_PUBLIC_URL: str = ""
 
     PING_INTERVAL_SECONDS: int = 60
     PING_ENABLED: bool = True

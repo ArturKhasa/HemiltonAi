@@ -28,6 +28,7 @@ services:
     volumes:
       - ./app:/app/app
       - ./logs:/app/logs
+      - ./data/media:/app/data/media
     command: >
       sh -c "alembic upgrade head && python -m app.commands.seed &&
       uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"

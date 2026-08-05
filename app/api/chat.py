@@ -13,7 +13,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import ensure_type_access, get_allowed_type_ids, require_role
-from app.storage.s3 import upload_file as s3_upload_file
+from app.storage.local import safe_extension, save_file
 from app.config import settings
 from app.db.models import AIRun, Client, Dialog, DialogPingState, DialogStatusConfig, DialogType, Message, MessageFeedback, MessageRole, User
 from app.db.session import get_db
@@ -545,9 +545,8 @@ async def upload_file(
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="File cannot be empty")
-    ext = file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else "jpg"
-    filename = f"chat/{dialog_id}/{uuid.uuid4().hex}.{ext}"
-    url = await s3_upload_file(data, filename, content_type=file.content_type or "image/jpeg")
+    key = f"chat/{dialog_id}/{uuid.uuid4().hex}.{safe_extension(file.filename)}"
+    url = await save_file(data, key, content_type=file.content_type or "image/jpeg")
     return {"url": url}
 
 
