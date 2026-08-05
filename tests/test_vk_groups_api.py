@@ -86,3 +86,36 @@ async def test_curator_forbidden(client, curator_headers):
         "group_id": 9, "name": "g", "access_token": "t", "confirmation_code": "c",
     })
     assert resp.status_code == 403
+
+
+async def test_group_with_clients_is_not_deleted(client, db, admin_headers):
+    """Клиенты ссылаются на группу внешним ключом: удаление роняло запрос
+    пятисоткой (группа 1 с 58 клиентами на проде). Теперь — понятный отказ."""
+    from app.db.models import Client as ClientModel
+
+    resp = await client.post("/api/vk-groups/", headers=admin_headers, json={
+        "group_id": 4242, "name": "Сообщество", "access_token": "vk1.a.tok",
+        "confirmation_code": "conf",
+    })
+    group_pk = resp.json()["id"]
+    db.add(ClientModel(vk_user_id=555, vk_group_id=group_pk, source="vk:4242"))
+    await db.commit()
+
+    resp = await client.delete(f"/api/vk-groups/{group_pk}", headers=admin_headers)
+    assert resp.status_code == 409
+    assert "1 клиент" in resp.json()["detail"]
+
+    # Группа на месте — историю не потеряли.
+    listing = await client.get("/api/vk-groups/", headers=admin_headers)
+    assert any(g["id"] == group_pk for g in listing.json())
+
+
+async def test_group_without_clients_is_deleted(client, db, admin_headers):
+    resp = await client.post("/api/vk-groups/", headers=admin_headers, json={
+        "group_id": 4343, "name": "Пустая", "access_token": "vk1.a.tok",
+        "confirmation_code": "conf",
+    })
+    group_pk = resp.json()["id"]
+    assert (await client.delete(f"/api/vk-groups/{group_pk}", headers=admin_headers)).status_code == 204
+    listing = await client.get("/api/vk-groups/", headers=admin_headers)
+    assert all(g["id"] != group_pk for g in listing.json())

@@ -3,11 +3,11 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_role
-from app.db.models import User, VkGroup
+from app.db.models import Client, User, VkGroup
 from app.db.session import get_db
 
 router = APIRouter(prefix="/vk-groups", tags=["vk-groups"])
@@ -125,5 +125,24 @@ async def delete_vk_group(
     group = await db.get(VkGroup, group_pk)
     if not group:
         raise HTTPException(status_code=404, detail="VK group not found")
+
+    # Клиенты ссылаются на группу внешним ключом, и удаление группы, через
+    # которую кто-то писал, роняло запрос пятисоткой (ForeignKeyViolation на
+    # clients_vk_group_id_fkey, группа 1 с 58 клиентами). Сносить вместе с
+    # группой всю переписку — не то, что имел в виду админ, нажимая «удалить»
+    # в списке групп, поэтому отказываем и объясняем, что делать.
+    clients = await db.scalar(
+        select(func.count(Client.id)).where(Client.vk_group_id == group.id)
+    )
+    if clients:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Через эту группу писали {clients} клиент(ов), их переписка ссылается "
+                f"на неё. Удалить нельзя — выключите группу переключателем «Активна», "
+                f"тогда ИИ перестанет на неё отвечать, а история останется."
+            ),
+        )
+
     await db.delete(group)
     await db.commit()

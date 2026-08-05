@@ -340,7 +340,7 @@
                 <td class="px-4 py-3">
                   <div class="flex gap-3">
                     <button @click="openGroupEdit(g)" class="text-brand-700 hover:text-brand-800 text-xs font-medium">Ред.</button>
-                    <button @click="groupDeleteTarget = g" class="text-red-400 hover:text-red-600 text-xs font-medium">Удал.</button>
+                    <button @click="groupDeleteTarget = g; groupDeleteError = ''" class="text-red-400 hover:text-red-600 text-xs font-medium">Удал.</button>
                   </div>
                 </td>
               </tr>
@@ -619,7 +619,10 @@
     <div v-if="groupDeleteTarget" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
       <div class="bg-white rounded-xl shadow-xl w-full max-w-sm p-6">
         <h2 class="font-semibold text-gray-800 mb-2">Удалить группу «{{ groupDeleteTarget.name }}»?</h2>
-        <p class="text-sm text-gray-500 mb-6">ID группы: {{ groupDeleteTarget.group_id }}. Вебхуки от неё перестанут обрабатываться.</p>
+        <p class="text-sm text-gray-500 mb-4">ID группы: {{ groupDeleteTarget.group_id }}. Вебхуки от неё перестанут обрабатываться.</p>
+        <p v-if="groupDeleteError" class="text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2 mb-4">
+          {{ groupDeleteError }}
+        </p>
         <div class="flex justify-end gap-2">
           <button @click="groupDeleteTarget = null" class="px-4 py-2 text-sm text-gray-600 border rounded-lg hover:bg-gray-50">Отмена</button>
           <button
@@ -954,6 +957,7 @@ const vkGroups = ref([])
 const showGroupModal = ref(false)
 const editGroup = ref(null)
 const groupDeleteTarget = ref(null)
+const groupDeleteError = ref('')
 const groupError = ref('')
 
 const groupForm = ref({ group_id: null, name: '', access_token: '', confirmation_code: '', secret_key: '', dialog_type_id: null, is_active: true })
@@ -1077,10 +1081,15 @@ async function toggleGroupActive(g) {
 
 async function doDeleteGroup() {
   groupSaving.value = true
+  groupDeleteError.value = ''
   try {
     await api.delete(`/vk-groups/${groupDeleteTarget.value.id}`)
     vkGroups.value = vkGroups.value.filter(g => g.id !== groupDeleteTarget.value.id)
     groupDeleteTarget.value = null
+  } catch (e) {
+    // Группу с перепиской бэк удалить не даст — раньше отказ пропадал молча,
+    // и окно просто «не закрывалось».
+    groupDeleteError.value = e.response?.data?.detail || 'Не удалось удалить группу'
   } finally {
     groupSaving.value = false
   }
