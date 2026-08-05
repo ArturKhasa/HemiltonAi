@@ -55,11 +55,38 @@
       </div>
     </div>
 
-    <div class="flex gap-2">
+    <!-- Файл с компьютера: раньше картинку сначала надо было куда-то выложить,
+         чтобы получить ссылку. Сюда же кидается перетаскиванием. -->
+    <div
+      @dragover.prevent="dragging = true"
+      @dragleave.prevent="dragging = false"
+      @drop.prevent="onDrop"
+      :class="[
+        'border border-dashed rounded-lg px-3 py-2.5 text-center transition-colors',
+        dragging ? 'border-brand-500 bg-brand-50' : 'border-gray-300 bg-gray-50',
+      ]"
+    >
+      <button
+        @click="picker?.click()"
+        :disabled="uploading"
+        class="text-xs px-3 py-1.5 rounded-lg bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-40"
+      >{{ uploading ? 'Загружаю…' : 'Загрузить с компьютера' }}</button>
+      <span class="text-xs text-gray-400 block mt-1">или перетащите файлы сюда</span>
+      <input
+        ref="picker"
+        type="file"
+        accept="image/*"
+        multiple
+        class="hidden"
+        @change="onPick"
+      />
+    </div>
+
+    <div class="flex gap-2 mt-2">
       <input
         v-model="draft"
         @keyup.enter="add"
-        placeholder="Ссылка на картинку или photo-44440184_457423551"
+        placeholder="…или ссылка / photo-44440184_457423551"
         class="flex-1 min-w-0 border rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500"
       />
       <button
@@ -70,14 +97,15 @@
     </div>
     <p v-if="error" class="text-xs text-red-500 mt-1">{{ error }}</p>
     <p v-else class="text-xs text-gray-400 mt-1">
-      Ссылку берите из ВК («открыть оригинал» → адрес картинки). Фото перезаливается
-      в наше сообщество при первой отправке.
+      Файл ложится на наш сервер. Ссылку можно взять и из ВК («открыть оригинал» →
+      адрес картинки) — такое фото перезаливается в сообщество при первой отправке.
     </p>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive } from 'vue'
+import api from '../api'
 
 const props = defineProps({
   modelValue: { type: Array, default: () => [] },
@@ -86,6 +114,9 @@ const emit = defineEmits(['update:modelValue'])
 
 const draft = ref('')
 const error = ref('')
+const picker = ref(null)
+const uploading = ref(false)
+const dragging = ref(false)
 // Ссылка может уже не открываться (ВК протухает старые), тогда вместо битой
 // картинки показываем плашку — но токен не выбрасываем, это решение админа.
 const broken = reactive({})
@@ -133,6 +164,49 @@ function add() {
 
 function remove(i) {
   emit('update:modelValue', props.modelValue.filter((_, idx) => idx !== i))
+}
+
+// Файлы грузим по одному и добавляем по мере готовности: на десяти картинках
+// разом ждать «всё или ничего» неприятно, а упавшая одна не должна уносить
+// остальные.
+async function upload(files) {
+  const images = [...files].filter(f => f.type.startsWith('image/'))
+  if (!images.length) {
+    error.value = 'Это не картинка'
+    return
+  }
+  error.value = ''
+  uploading.value = true
+  // Копим список у себя: prop приедет обратно только со следующей отрисовкой
+  // родителя, и вторая картинка из пачки затёрла бы первую.
+  let next = [...props.modelValue]
+  try {
+    for (const file of images) {
+      const form = new FormData()
+      form.append('file', file)
+      try {
+        const res = await api.post('/media/upload', form, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        })
+        next = [...next, `[photo-${res.data.url}]`]
+        emit('update:modelValue', next)
+      } catch (e) {
+        error.value = `${file.name}: ${e.response?.data?.detail || 'не загрузилось'}`
+      }
+    }
+  } finally {
+    uploading.value = false
+    if (picker.value) picker.value.value = ''
+  }
+}
+
+function onPick(event) {
+  if (event.target.files?.length) upload(event.target.files)
+}
+
+function onDrop(event) {
+  dragging.value = false
+  if (event.dataTransfer?.files?.length) upload(event.dataTransfer.files)
 }
 
 function move(i, delta) {

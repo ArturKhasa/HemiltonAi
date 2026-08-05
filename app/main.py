@@ -97,6 +97,7 @@ from app.api.vk import router as vk_webhook_router
 from app.api.vk_groups import router as vk_groups_router
 from app.api.feedback import router as feedback_router
 from app.api.ref_tags import router as ref_tags_router
+from app.api.media import router as media_router
 
 app.include_router(auth_router, prefix="/api/auth")
 app.include_router(dialogs_router, prefix="/api")
@@ -109,6 +110,7 @@ app.include_router(ping_rules_router, prefix="/api")
 app.include_router(vk_groups_router, prefix="/api")
 app.include_router(feedback_router, prefix="/api")
 app.include_router(ref_tags_router, prefix="/api")
+app.include_router(media_router, prefix="/api")
 # Вебхук ВК без /api-префикса: адрес в настройках Callback API — /webhook/vk.
 app.include_router(vk_webhook_router)
 

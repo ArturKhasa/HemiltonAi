@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     # Домен, по которому файлы доступны снаружи: ссылку читают и модель, и ВК.
     # Пусто — ссылки относительные, годятся только для браузера админки.
     MEDIA_PUBLIC_URL: str = ""
+    # Потолок для загрузки из админки: фото с телефона бывает и на 8 МБ.
+    MEDIA_MAX_UPLOAD_MB: int = 20
 
     PING_INTERVAL_SECONDS: int = 60
     PING_ENABLED: bool = True
