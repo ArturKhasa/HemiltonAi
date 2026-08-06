@@ -38,6 +38,9 @@ _MAX_ATTACHMENTS = 10
 #    и голосовое — молча выброшены. Полагаться нельзя, вырезаем как мусор; для
 #    фото рабочий путь — форма 2.
 _DEAD_ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|audio_message)-?\d+_\d+\]")
+# Токен, в котором ни ссылки, ни id — модель придумала его сама. Пробел внутри
+# разрешён: именно так и выглядит выдумка («[photo-фиолетовый свитшот]»).
+_JUNK_ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|video|clip|audio_message)-?[^\]\n]*\]")
 _PHOTO_URL_TOKEN_RE = re.compile(r"\[photo-(https?://[^\]]+)\]")
 _VIDEO_URL_TOKEN_RE = re.compile(r"\[video-(https?://[^\]]+)\]")
 # "[video-1_2]" и "[clip-1_2]" — минус владельца-сообщества внутри числа.
@@ -87,6 +90,14 @@ async def extract_and_resolve_attachments(
     cleaned = _VIDEO_URL_TOKEN_RE.sub("", cleaned)
 
     cleaned = _DEAD_ATTACHMENT_TOKEN_RE.sub("", cleaned)
+    # Выдуманный токен: «Фиолетовый свитшот выглядит так: [photo-фиолетовый
+    # свитшот]» ушло клиенту как есть (прогон 1369). Инструмент ответил «Фото не
+    # найдено» — такого цвета в матрице нет, — а модель всё равно сослалась на
+    # картинку. Ни ссылки, ни id внутри нет, прикреплять нечего — вырезаем.
+    junk = _JUNK_ATTACHMENT_TOKEN_RE.findall(cleaned)
+    if junk:
+        logger.warning("выдуманные токены вложений вырезаны | tokens=%s", junk[:3])
+        cleaned = _JUNK_ATTACHMENT_TOKEN_RE.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     for url in leftover_urls:
         if url not in cleaned:

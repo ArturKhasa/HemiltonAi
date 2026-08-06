@@ -89,8 +89,14 @@ class ProductService(object):
     async def search_loose(
         self, query: str, type_id: int | None = None, limit: int = 10
     ) -> tuple[str | None, list[Product]]:
-        """Запасной проход по самому длинному слову запроса, когда точного
-        совпадения нет: «беж свитшот» ничего не даёт, «свитшот» — даёт.
+        """Запасной проход по одному слову запроса, когда точного совпадения нет:
+        «беж свитшот» ничего не даёт, «свитшот» — даёт.
+
+        Слова пробуем от длинного к короткому и берём ПЕРВОЕ, по которому что-то
+        нашлось. Раньше брали только самое длинное, и «фиолетовый свитшот» уходил
+        в пустоту: «фиолетовый» длиннее «свитшота», такого цвета в матрице нет, и
+        агент не видел ни одного свитшота — а значит и не мог сказать клиенту,
+        какие цвета есть (замечание ОП от 6 августа).
 
         Возвращает (слово, товары); вызывающий обязан сказать агенту, что это
         расширенный поиск, — иначе тот примет находку за точный ответ.
@@ -98,8 +104,11 @@ class ProductService(object):
         terms = build_search_terms(query)
         if len(terms) < 2:
             return None, []
-        widest = max(terms, key=len)
-        return widest, await self._by_terms([widest], type_id, limit)
+        for term in sorted(terms, key=len, reverse=True):
+            found = await self._by_terms([term], type_id, limit)
+            if found:
+                return term, found
+        return None, []
 
     async def create(
         self, name: str, price=None, min_price=None, size_chart: str | None = None,

@@ -263,6 +263,10 @@ def make_search_products(type_id: int | None):
         Пустой результат означает, что не подошёл запрос, а НЕ что товара нет в
         наличии. В этом случае переспроси одним словом и ни в коем случае не
         сообщай клиенту, что позиция закончилась.
+
+        А вот если по слову «свитшот» товары нашлись, а с названным цветом среди
+        них нет — цвета действительно нет. Так и скажи прямо и перечисли те, что
+        есть; «уточню в каталоге» вместо ответа клиенту не пиши.
         """
         logger.info("[tool] search_products called | type_id=%s | query=%r", type_id, query)
         result = await run_product_search(query, type_id)
@@ -281,7 +285,11 @@ def make_get_product_photo(type_id: int | None):
         """Найти фото товара по названию (см. search_products) и получить токен для
         вставки в reply_text. Скопируй результат буквально в текст ответа клиенту —
         при отправке система сама превратит его в настоящее фото-вложение. Не
-        вставляй сырой URL фото в reply_text без этого токена."""
+        вставляй сырой URL фото в reply_text без этого токена.
+
+        Ответ «Фото не найдено» означает именно это: фото нет. Токен в таком
+        случае НЕ ВЫДУМЫВАЙ — «[photo-фиолетовый свитшот]» уходит клиенту
+        битым вложением (замечание ОП от 6 августа)."""
         logger.info("[tool] get_product_photo called | type_id=%s | product_name=%r", type_id, product_name)
         async with AsyncSessionLocal() as db:
             products = await ProductService(db).search(product_name, type_id=type_id, limit=1)

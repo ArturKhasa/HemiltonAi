@@ -127,3 +127,31 @@ class TestNoFalsePositives:
         db.add(Product(name="Свитшот Фиолетовый", price=5990, is_active=False, type_id=1))
         await db.commit()
         assert await _names(products, "фиолетовый свитшот") == []
+
+
+class TestLooseSearchFallsThrough:
+    """«фиолетовый свитшот»: такого цвета в матрице нет, а «фиолетовый» длиннее
+    «свитшота» — расширенный поиск шёл только по нему и не находил ничего.
+    Агент не видел ни одного свитшота и не мог сказать, какие цвета есть."""
+
+    async def test_unknown_colour_still_lists_the_item(self, db):
+        from app.db.models import Product
+        from app.sales.products import ProductService
+
+        for name in ("Свитшот Черный", "Свитшот Бежевый", "Худи Черное"):
+            db.add(Product(name=name, price=5990, is_active=True, type_id=1))
+        await db.commit()
+
+        term, found = await ProductService(db).search_loose("фиолетовый свитшот", type_id=1)
+        assert term == "свитшот"
+        assert {p.name for p in found} == {"Свитшот Черный", "Свитшот Бежевый"}
+
+    async def test_nothing_matches_at_all(self, db):
+        from app.db.models import Product
+        from app.sales.products import ProductService
+
+        db.add(Product(name="Свитшот Черный", price=5990, is_active=True, type_id=1))
+        await db.commit()
+
+        term, found = await ProductService(db).search_loose("фиолетовая шапка", type_id=1)
+        assert term is None and found == []

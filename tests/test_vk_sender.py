@@ -154,3 +154,41 @@ class TestVideoAttachment:
             None, None, "Текст [photo-44440184_457423829] [audio_message569993513_687712211]")
         assert cleaned == "Текст"
         assert att is None
+
+
+class TestJunkAttachmentToken:
+    """«Фиолетовый свитшот выглядит так: [photo-фиолетовый свитшот]» ушло клиенту
+    как есть (прогон 1369): инструмент ответил «Фото не найдено» — такого цвета в
+    матрице нет, — а модель всё равно сослалась на картинку."""
+
+    async def test_made_up_token_is_cut(self, db):
+        from app.db.models import VkGroup
+        from app.vk.sender import extract_and_resolve_attachments
+
+        group = VkGroup(group_id=1, name="g", access_token="t", confirmation_code="c")
+        db.add(group)
+        await db.commit()
+
+        text, attachment = await extract_and_resolve_attachments(
+            db, group, "Фиолетовый свитшот выглядит так: [photo-фиолетовый свитшот]",
+        )
+        assert "[photo-" not in text
+        assert attachment is None
+
+    async def test_real_token_survives(self, db, monkeypatch):
+        from app.db.models import VkGroup
+        from app.vk import sender
+
+        group = VkGroup(group_id=1, name="g", access_token="t", confirmation_code="c")
+        db.add(group)
+        await db.commit()
+
+        async def fake_resolve(_db, _group, url):
+            return "photo1_2"
+
+        monkeypatch.setattr("app.vk.photo_upload.resolve_attachment", fake_resolve)
+        text, attachment = await sender.extract_and_resolve_attachments(
+            db, group, "Вот наши цвета [photo-https://example.ru/a.jpg]",
+        )
+        assert attachment == "photo1_2"
+        assert text == "Вот наши цвета"

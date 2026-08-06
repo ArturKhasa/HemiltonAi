@@ -184,6 +184,35 @@ def _find_duplicate_reply(reply: str, manager_texts: list[str]) -> str | None:
     return None
 
 
+# Один и тот же абзац живёт в нескольких скриптах ОП: «Ткани таааак подорожали,
+# это просто ужас!» есть и в 477, и в 478 — клиент прочитал его дважды за девять
+# минут (прогоны 1353 и 1381). Реплики целиком при этом разные, и проверка выше
+# их не ловит: у неё порог на всё сообщение.
+_DUP_CHUNK_THRESHOLD = 0.9
+# Короткие строки повторяются законно: «Всё верно?», «Что скажете?», подпись.
+_DUP_CHUNK_MIN_LENGTH = 60
+
+
+def _chunks(text: str) -> list[str]:
+    """Абзацы реплики, нормализованные для сравнения."""
+    parts = re.split(r"\n\s*\n|\n", text or "")
+    return [c for c in (_normalize_for_dup(p) for p in parts) if len(c) >= _DUP_CHUNK_MIN_LENGTH]
+
+
+def _find_repeated_chunk(reply: str, manager_texts: list[str]) -> str | None:
+    """Абзац ответа, который клиент уже читал в другом нашем сообщении."""
+    from difflib import SequenceMatcher
+
+    sent = [c for t in manager_texts for c in _chunks(t)]
+    if not sent:
+        return None
+    for chunk in _chunks(reply):
+        for prev in sent:
+            if SequenceMatcher(None, chunk, prev).ratio() >= _DUP_CHUNK_THRESHOLD:
+                return chunk
+    return None
+
+
 
 # Клиент отвечает одним словом на «что остановило — цена или сроки?». Это ОТВЕТ,
 # а не новый вопрос о стоимости, но модель читает «цена» буквально и присылает
@@ -216,6 +245,15 @@ _REFUSAL_RETRY_INSTRUCTION = (
     "не фиксируй дизайн, не называй сумму заказа, не проси ФИО и телефон, не "
     "выставляй счёт. Присоединись к клиенту и одним коротким вопросом уточни, от "
     "чего именно отказ и что не подошло."
+)
+
+# Абзац из скрипта, который клиент уже читал в другом сообщении: «Ткани таааак
+# подорожали…» стоит и в 477, и в 478, и ушёл дважды за девять минут.
+_REPEATED_CHUNK_RETRY_INSTRUCTION = (
+    "[Служебное] Один из абзацев твоего ответа клиент уже читал — этот текст есть "
+    "в двух скриптах, и второй раз он звучит как заевшая пластинка. Скажи то же "
+    "самое своими словами и короче или вовсе опусти этот абзац: остальную часть "
+    "ответа сохрани."
 )
 
 _REQUOTE_RETRY_INSTRUCTION = (
@@ -682,6 +720,7 @@ async def run_ai(
         acc_cache_write += cache_write_tokens
 
         dup_match = _find_duplicate_reply(output.reply_text, manager_history_texts)
+        repeated_chunk = _find_repeated_chunk(output.reply_text, manager_history_texts)
         requote = _requotes_known_price(text, output.reply_text, manager_history_texts)
         # Клиент отказался, а ответ всё равно фиксирует дизайн, называет сумму
         # или просит контакты. Скрипты воронки ищем только на отказе — лишний
@@ -701,9 +740,15 @@ async def run_ai(
         )
         if (
             not dup_match and not requote and not no_question and not ignores_refusal
+            and not repeated_chunk
         ) or dup_attempt == 2:
             break
-        if ignores_refusal:
+        if repeated_chunk:
+            logger.warning(
+                "[%s] абзац уже был отправлен — retrying | chunk=%r", ctx, repeated_chunk[:80],
+            )
+            correction = _REPEATED_CHUNK_RETRY_INSTRUCTION
+        elif ignores_refusal:
             logger.warning(
                 "[%s] клиент отказался, а ответ двигает воронку — retrying | reply_head=%r",
                 ctx, (output.reply_text or "")[:80],
