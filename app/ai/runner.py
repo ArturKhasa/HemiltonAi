@@ -26,6 +26,7 @@ from app.ai.providers import get_model_name
 from app.ai.schemas import AgentOutput
 from app.ai.triggers import CURATOR_STATUS_NAME, curator_trigger
 from app.config import settings
+from app.utils.time import human_msk_now
 from app.utils.media import (
     carry_over_attachments,
     is_document_url,
@@ -327,6 +328,17 @@ async def run_ai(
     # These messages are appended right before the current client message and kept in the
     # uncached tail (see cache_uncached_tail below).
     dynamic_context: list[str] = []
+
+    # Текущая дата. В контексте её не было вовсе: на «хочу к 9 августа» модель не
+    # знала, три это дня или три месяца, и отвечала «подстроимся под Вас» вместо
+    # честного «не успеем» (замечание ОП от 6 августа). Строка меняется каждую
+    # минуту, поэтому идёт в динамический хвост, а не в кэшируемый системный
+    # промпт.
+    dynamic_context.append(
+        f"[Сегодня]\n{human_msk_now()}\n"
+        "Изготовление занимает 10-14 дней плюс доставка 2-3 дня. Считай сроки от "
+        "этой даты и не обещай того, что в них не укладывается."
+    )
 
     # FunnelAgent: detect the current sales-script stage BEFORE the SalesAgent runs, so
     # the reply is grounded in where the conversation actually stands. Persisted on the

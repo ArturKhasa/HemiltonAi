@@ -21,6 +21,7 @@ from app.config import settings
 from app.db.models import AIRun, Client, Dialog, DialogPingState, Message, MessageRole, PingRule
 from app.ai.feedback import load_active_feedback_rules
 from app.ping.prompts import get_ping_prompt
+from app.utils.time import human_msk_now
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +443,14 @@ async def run_ping_agent(
     # Per-turn dynamic context goes into separate user messages (NOT the system prompt)
     # so the system prompt stays byte-stable and cacheable.
     dynamic_context: list[str] = []
+
+    # Дата: пинг рассуждает про «клиент молчит со вчера» и обещает сроки, а какое
+    # сегодня число, до сих пор не знал (см. app.utils.time.human_msk_now).
+    dynamic_context.append(
+        f"[Сегодня]\n{human_msk_now()}\n"
+        "Изготовление занимает 10-14 дней плюс доставка 2-3 дня. Считай сроки от "
+        "этой даты и не обещай того, что в них не укладывается."
+    )
 
     feedback_rules = await load_active_feedback_rules(db, type_id, is_ping=True)
     if feedback_rules:
