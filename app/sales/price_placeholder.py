@@ -89,7 +89,10 @@ async def render_price_placeholders(
     for m in matches:
         before_discount = bool(m.group(1))
         query = m.group(2).strip()
-        products = await svc.search(query, type_id=type_id, limit=1)
+        # limit=1 нельзя: LIMIT отсекает строки в SQL, до сортировки «точное
+        # название вперёд» (см. ProductService.search), и «[цена:Доп. принт]»
+        # доставал градиентный принт.
+        products = await svc.search(query, type_id=type_id, limit=5)
         price = None
         if products:
             p = products[0]

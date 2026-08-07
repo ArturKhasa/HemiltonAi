@@ -124,3 +124,22 @@ class TestExactNameWins:
 
         found = await ProductService(db).search("свитшот", type_id=1, limit=5)
         assert [p.name for p in found] == ["Свитшот Черный", "Свитшот Белый"]
+
+
+class TestPlaceholderTakesTheExactProduct:
+    """LIMIT отсекал строки в SQL до сортировки «точное название вперёд», и
+    «[цена:Доп. принт]» подставлял цену градиентного принта."""
+
+    async def test_plain_print_price_not_the_gradient_one(self, db):
+        from app.db.models import Product
+        from app.sales.price_placeholder import render_price_placeholders
+
+        db.add(Product(name="Доп. принт - градиент", price=2590, min_price=1990, is_active=True, type_id=1))
+        db.add(Product(name="Доп. принт", price=1190, min_price=890, is_active=True, type_id=1))
+        await db.commit()
+
+        got = await render_price_placeholders(
+            db, "скидочка - [цена:Доп. принт] вместо [цена-до-скидки:Доп. принт]", type_id=1,
+        )
+        # format_price ставит неразрывные пробелы, чтобы сумма не рвалась переносом.
+        assert got == "скидочка - 890\u00a0₽ вместо 1\u00a0190\u00a0₽"

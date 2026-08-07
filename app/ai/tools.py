@@ -292,7 +292,7 @@ def make_get_product_photo(type_id: int | None):
         битым вложением (замечание ОП от 6 августа)."""
         logger.info("[tool] get_product_photo called | type_id=%s | product_name=%r", type_id, product_name)
         async with AsyncSessionLocal() as db:
-            products = await ProductService(db).search(product_name, type_id=type_id, limit=1)
+            products = await ProductService(db).search(product_name, type_id=type_id, limit=5)
         if not products or not products[0].photo_url:
             return "Фото не найдено для этого товара."
         return f"[photo-{products[0].photo_url}]"
