@@ -296,6 +296,39 @@ async def size_just_given(db: AsyncSession, dialog_id: int, client_text: str) ->
     return bool(last and asked_slot(last) == "size")
 
 
+# Пинг «Давайте начистоту, из-за чего молчите?» со списком причин 1-7 (скрипты
+# 440 и 466). Клиент отвечает одной цифрой, и для модели это просто «1» —
+# смысла в ней столько же, сколько в опечатке.
+_ASKS_HONEST_RE = re.compile(r"начистоту|из-за чего молчите", re.I)
+
+HONEST_OPTIONS = {
+    "1": "Заказ не актуален",
+    "2": "Сомневаюсь в предоплате",
+    "3": "У вас дорого",
+    "4": "Планирую делать заказ позже",
+    "5": "Нет времени пообщаться",
+    "6": "Думаю что вы мошенники",
+    "7": "Другое",
+}
+
+# Причины, после которых продажу ведёт человек: заказ отменён и обвинение в
+# мошенничестве — не те возражения, которые отрабатывают скриптом.
+HONEST_CURATOR_OPTIONS = frozenset({"1", "6"})
+
+_BARE_DIGIT_RE = re.compile(r"^\W*([1-7])\W*$")
+
+
+async def honest_answer(db: AsyncSession, dialog_id: int, client_text: str) -> str | None:
+    """Цифра, которой клиент ответил на список «давайте начистоту», либо None."""
+    m = _BARE_DIGIT_RE.match((client_text or "").strip())
+    if not m:
+        return None
+    last = await _last_outgoing(db, dialog_id)
+    if not last or not _ASKS_HONEST_RE.search(last):
+        return None
+    return m.group(1)
+
+
 async def find_contacts_script(db: AsyncSession, type_id: int | None) -> Script | None:
     return await _pick(db, type_id, _CONTACTS_CONDITION_RE)
 

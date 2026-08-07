@@ -54,6 +54,9 @@ from app.sales.funnel_steps import (
     find_payment_link_script,
     find_praise_script,
     funnel_advancing_script_ids,
+    HONEST_CURATOR_OPTIONS,
+    HONEST_OPTIONS,
+    honest_answer,
     payment_option_chosen,
     render_design_review,
     reply_advances_funnel,
@@ -269,6 +272,29 @@ def _prices_in(text: str) -> set[str]:
     return {re.sub(r"\D", "", m) for m in _MONEY_RE.findall(text or "")}
 
 
+def _drop_conflicting_prices(parts, manager_texts: list[str], ctx: str):
+    """Убрать реплики, называющие сумму, отличную от уже названной в диалоге.
+
+    Порядок сохраняем: первая названная цена и есть цена заказа, спорит с ней
+    всегда та, что пришла следом.
+    """
+    quoted: set[str] = set()
+    for t in manager_texts:
+        quoted |= _prices_in(t)
+    kept = []
+    for part in parts:
+        prices = _prices_in(part.text)
+        if prices and quoted and not (prices & quoted):
+            logger.warning(
+                "[%s] реплика с другой ценой не отправлена | было=%s | стало=%s",
+                ctx, sorted(quoted), sorted(prices),
+            )
+            continue
+        quoted |= prices
+        kept.append(part)
+    return kept
+
+
 def _requotes_known_price(client_text: str, reply: str, manager_texts: list[str]) -> bool:
     """Ответ повторяет уже названную сумму в ответ на возражение одним словом."""
     if not _OBJECTION_ANSWER_RE.match((client_text or "").strip()):
@@ -377,6 +403,17 @@ async def run_ai(
         "Изготовление занимает 10-14 дней плюс доставка 2-3 дня. Считай сроки от "
         "этой даты и не обещай того, что в них не укладывается."
     )
+
+    # Ответ цифрой на пинговый список «давайте начистоту, из-за чего молчите?».
+    # Для модели «1» — просто символ; расшифровываем, иначе она продолжает
+    # продавать поверх «заказ не актуален» (диалог 111, 10:40).
+    honest = await honest_answer(db, dialog.id, text)
+    if honest:
+        dynamic_context.append(
+            "[Клиент ответил на список «давайте начистоту»]\n"
+            f"{honest} — {HONEST_OPTIONS[honest]}"
+        )
+        logger.info("[%s] ответ на «начистоту»: %s — %s", ctx, honest, HONEST_OPTIONS[honest])
 
     # FunnelAgent: detect the current sales-script stage BEFORE the SalesAgent runs, so
     # the reply is grounded in where the conversation actually stands. Persisted on the
@@ -885,6 +922,20 @@ async def run_ai(
     # Вышивка и опт: и то и другое считается индивидуально, цены высокие, ошибка
     # дорого стоит — темы ведёт менеджер, не ИИ. Стоит последним, ПОСЛЕ всех гейтов
     # выше: иначе переход из «Горячий клиент» сбросил бы эскалацию обратно в None.
+    # «Заказ не актуален» и «думаю, что вы мошенники» — не возражения, которые
+    # отрабатывают скриптом: дальше разговор ведёт человек. Реплику отпускаем,
+    # как и на прочих темах менеджера, и замолкаем.
+    if honest in HONEST_CURATOR_OPTIONS:
+        logger.info(
+            "[%s] «начистоту»: %s — %s → куратор", ctx, honest, HONEST_OPTIONS[honest],
+        )
+        output = output.model_copy(update={
+            "next_status": CURATOR_STATUS_NAME,
+            "need_curator": False,
+            "curator_reason": f"Клиент выбрал «{HONEST_OPTIONS[honest]}»",
+        })
+        dialog.ai_paused = True
+
     trigger = curator_trigger(text)
     if trigger:
         # На саму реплику с триггером отвечаем, дальше замолкаем и ждём менеджера.
@@ -1189,6 +1240,12 @@ async def run_ai(
                 if part is not None:
                     logger.info("[%s] payment link forced | script=%s", ctx, link_script.id)
                     parts.append(part)
+
+    # Две разные суммы за один заказ. Клиент 44731492 получил подряд «5 990 ₽
+    # (вместо 7 380 ₽)» и «4 990 ₽ (вместо 5 990 ₽)» — на стадии pricing лежат
+    # девять активных скриптов с одним условием и разными числами, и связка со
+    # скриптом модели разошлись. Пока прайс не почищен, второй ценой молчим.
+    parts = _drop_conflicting_prices(parts, manager_history_texts, ctx)
 
     await db.commit()
     await db.refresh(ai_run)
