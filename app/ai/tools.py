@@ -1,5 +1,6 @@
 """Agent-callable tools injected via openai-agents SDK function_tool."""
 import logging
+import re
 
 from agents import function_tool
 
@@ -82,6 +83,42 @@ def _parse_tags(raw: str | None) -> set[str]:
     return {t.strip() for t in (raw or "").split(",") if t.strip()}
 
 
+# Семейства товаров. Клиент 44731492 покупал толстовку, попросил показать, как
+# она выглядит, и получил скрипт 406 — «Этот костюм мы отшиваем в 4-х цветах»
+# с фотографиями костюма (07:54). Скрипт лежит на стадии None, то есть виден
+# всегда, и по условию «Дополнительные фотографии изделий» подходит под любой
+# запрос показать товар.
+#
+# Свитшот, толстовка и худи — одно семейство: в скриптах ОП эти слова стоят
+# вперемешку про одну и ту же вещь («Стоимость толстовки» в ветке свитшота).
+_PRODUCT_FAMILIES = {
+    "кофта": ("свитшот", "толстовк", "худи", "кофт"),
+    "костюм": ("костюм",),
+    "футболка": ("футболк",),
+    "лонгслив": ("лонгслив",),
+    "жилетка": ("жилетк",),
+    "кепка": ("кепк",),
+}
+
+# Допродажа НАРОЧНО говорит о другом товаре: «предлагаю добавить футболку»
+# уместно в диалоге про толстовку, и отсекать такие скрипты нельзя.
+_UPSELL_RE = re.compile(r"доп\.|допрод|второе издели|комплект|в подарок", re.IGNORECASE)
+
+
+def _families(text: str | None) -> set[str]:
+    lowered = (text or "").lower().replace("ё", "е")
+    return {
+        family for family, stems in _PRODUCT_FAMILIES.items()
+        if any(stem in lowered for stem in stems)
+    }
+
+
+def client_product_family(product: str | None) -> str | None:
+    """Семейство товара, который выбрал клиент («свитшот» → «кофта»)."""
+    families = _families(product)
+    return next(iter(families)) if len(families) == 1 else None
+
+
 def _norm_condition(s) -> str:
     """Conditions are hand-typed in the админка — collapse whitespace (tabs/newlines) for comparison."""
     return " ".join(str(getattr(s, "condition", "") or "").split())
@@ -92,6 +129,7 @@ def format_scripts_list(
     client_tags: set[str] | None,
     current_stage: str | None = None,
     exclude_script_ids: set[int] | None = None,
+    client_product: str | None = None,
 ) -> str:
     """Filter scripts by the client's marketing tags + current funnel stage, render the output.
 
@@ -145,6 +183,21 @@ def format_scripts_list(
             if len(_parse_tags(s.marketing_tag)) == max_tags_by_cond[_norm_condition(s)]
         ]
 
+    # Скрипт про другой товар клиенту, который уже выбрал вещь, показывать
+    # нечего: он не «дополнительное фото», а другой товар целиком.
+    family = client_product_family(client_product)
+    if family:
+        kept = []
+        for s in scripts:
+            if _UPSELL_RE.search(_norm_condition(s) or ""):
+                kept.append(s)
+                continue
+            about = _families(s.phrase_text) | _families(_norm_condition(s))
+            if about and family not in about:
+                continue
+            kept.append(s)
+        scripts = kept
+
     lines = []
     for s in scripts:
         if exclude_script_ids and s.id in exclude_script_ids:
@@ -164,6 +217,7 @@ def make_list_scripts(
     client_id: int | None = None,
     current_stage: str | None = None,
     exclude_script_ids: set[int] | None = None,
+    client_product: str | None = None,
 ):
     """Return a list_scripts tool scoped to a specific dialog type.
 
@@ -198,7 +252,7 @@ def make_list_scripts(
         )
         return format_scripts_list(
             scripts, client_tags, current_stage=current_stage,
-            exclude_script_ids=exclude_script_ids,
+            exclude_script_ids=exclude_script_ids, client_product=client_product,
         )
     return list_scripts
 

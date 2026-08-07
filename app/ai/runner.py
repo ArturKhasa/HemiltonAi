@@ -272,6 +272,36 @@ def _prices_in(text: str) -> set[str]:
     return {re.sub(r"\D", "", m) for m in _MONEY_RE.findall(text or "")}
 
 
+# Один вопрос за ход. «В какой город нужна доставка?» задали трижды подряд:
+# его несли два ценовых скрипта и скрипт доставки (диалог 111, 07:37-07:38).
+# Ценовые дубли выключены, но связка может свести любые два звена с одинаковым
+# хвостом, поэтому повтор снимается на выходе.
+_QUESTION_RE = re.compile(r"[^.!?\n]*\?")
+
+
+def _drop_repeated_questions(parts, ctx: str):
+    """Убрать из поздних реплик вопрос, который уже задан в этом же ходу."""
+    asked: set[str] = set()
+    kept = []
+    for part in parts:
+        text = part.text or ""
+        for q in _QUESTION_RE.findall(text):
+            key = _normalize_for_dup(q)
+            if not key:
+                continue
+            if key in asked:
+                logger.warning("[%s] повтор вопроса в том же ходу снят | %r", ctx, q.strip()[:60])
+                text = text.replace(q, "")
+            else:
+                asked.add(key)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        if not text and not part.image_urls:
+            continue
+        part.text = text
+        kept.append(part)
+    return kept
+
+
 def _drop_conflicting_prices(parts, manager_texts: list[str], ctx: str):
     """Убрать реплики, называющие сумму, отличную от уже названной в диалоге.
 
@@ -476,18 +506,6 @@ async def run_ai(
         logger.info("[%s] excluding recently used scripts | script_ids=%s", ctx, sorted(exclude_script_ids))
 
     dialog_provider = getattr(dialog, "ai_provider", None) or settings.AI_PROVIDER
-    agent = build_sales_agent(
-        instructions,
-        type_id=type_id,
-        provider=dialog_provider,
-        client_id=client.id if client else None,
-        funnel_stage=dialog.funnel_stage,
-        exclude_script_ids=exclude_script_ids,
-    )
-    logger.info(
-        "[%s] agent built | model=%s | provider=%s",
-        ctx, get_model_name(dialog_provider), dialog_provider,
-    )
 
     audio_urls: list[str] = (client_message.msg_metadata or {}).get("audio_urls", [])
     if audio_urls:
@@ -562,6 +580,23 @@ async def run_ai(
         dynamic_context.append(slots_block)
         logger.info("[%s] order slots injected | %s", ctx, sorted(slots))
 
+    # Агент собирается ПОСЛЕ разбора слотов: списку скриптов нужно знать, какую
+    # вещь выбрал клиент, иначе на «покажите, как выглядит» модели предлагается
+    # и скрипт про костюм (диалог 111, 07:54).
+    agent = build_sales_agent(
+        instructions,
+        type_id=type_id,
+        provider=dialog_provider,
+        client_id=client.id if client else None,
+        funnel_stage=dialog.funnel_stage,
+        exclude_script_ids=exclude_script_ids,
+        client_product=slots.get("product"),
+    )
+    logger.info(
+        "[%s] agent built | model=%s | provider=%s | товар=%s",
+        ctx, get_model_name(dialog_provider), dialog_provider, slots.get("product"),
+    )
+
     # Dynamic per-turn context (funnel stage, feedback rules) as separate user messages,
     # placed right before the current client message so they sit in the uncached tail and
     # don't bust the cached system prompt / history prefix.
@@ -630,6 +665,7 @@ async def run_ai(
                         cache_uncached_tail=uncached_tail,
                         funnel_stage=dialog.funnel_stage,
                         exclude_script_ids=exclude_script_ids,
+                        client_product=slots.get("product"),
                     ),
                     timeout=settings.AI_RUNNER_TIMEOUT,
                 )
@@ -1246,6 +1282,7 @@ async def run_ai(
     # девять активных скриптов с одним условием и разными числами, и связка со
     # скриптом модели разошлись. Пока прайс не почищен, второй ценой молчим.
     parts = _drop_conflicting_prices(parts, manager_history_texts, ctx)
+    parts = _drop_repeated_questions(parts, ctx)
 
     await db.commit()
     await db.refresh(ai_run)
