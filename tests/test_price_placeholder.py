@@ -97,3 +97,30 @@ class TestPaymentLink:
         assert not payment_link_configured()
         monkeypatch.setattr(settings, "PAYMENT_LINK_URL", "https://pay.example.org/500")
         assert payment_link_configured()
+
+
+class TestExactNameWins:
+    """«Доп. принт» содержится и в «Доп. принт - градиент», а тот стоит в матрице
+    раньше — плейсхолдер подставлял 1 990 ₽ вместо 890 ₽."""
+
+    async def test_exact_match_is_first(self, db):
+        from app.db.models import Product
+        from app.sales.products import ProductService
+
+        db.add(Product(name="Доп. принт - градиент", price=2590, min_price=1990, is_active=True, type_id=1))
+        db.add(Product(name="Доп. принт", price=1190, min_price=890, is_active=True, type_id=1))
+        await db.commit()
+
+        found = await ProductService(db).search("Доп. принт", type_id=1, limit=5)
+        assert found[0].name == "Доп. принт"
+
+    async def test_partial_query_keeps_matrix_order(self, db):
+        from app.db.models import Product
+        from app.sales.products import ProductService
+
+        db.add(Product(name="Свитшот Черный", price=5990, min_price=4990, is_active=True, type_id=1))
+        db.add(Product(name="Свитшот Белый", price=5990, min_price=4990, is_active=True, type_id=1))
+        await db.commit()
+
+        found = await ProductService(db).search("свитшот", type_id=1, limit=5)
+        assert [p.name for p in found] == ["Свитшот Черный", "Свитшот Белый"]

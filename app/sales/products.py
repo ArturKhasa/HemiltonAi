@@ -80,11 +80,21 @@ class ProductService(object):
     async def search(
         self, query: str, type_id: int | None = None, limit: int = 10
     ) -> list[Product]:
-        """Товары, чьё название содержит основы ВСЕХ слов запроса (в любом порядке)."""
+        """Товары, чьё название содержит основы ВСЕХ слов запроса (в любом порядке).
+
+        Точное совпадение названия идёт первым: «Доп. принт» содержится и в «Доп.
+        принт - градиент», а тот стоит в матрице раньше — и плейсхолдер
+        «[цена:Доп. принт]» подставлял бы 1 990 ₽ вместо 890 ₽.
+        """
         terms = build_search_terms(query)
         if not terms:
             return []
-        return await self._by_terms(terms, type_id, limit)
+        rows = await self._by_terms(terms, type_id, limit)
+        wanted = (query or "").strip().lower().replace("ё", "е")
+        exact = [p for p in rows if (p.name or "").strip().lower().replace("ё", "е") == wanted]
+        if not exact:
+            return rows
+        return exact + [p for p in rows if p not in exact]
 
     async def search_loose(
         self, query: str, type_id: int | None = None, limit: int = 10
