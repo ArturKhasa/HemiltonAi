@@ -8,6 +8,7 @@ import asyncio
 import logging
 import re
 import uuid
+from dataclasses import dataclass, field
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -187,37 +188,53 @@ def make_random_id() -> int:
     return uuid.uuid4().int & 0x7FFF_FFFF
 
 
+@dataclass
+class SentMessage:
+    """Результат отправки: VK id последней части и все random_id, которыми мы
+    отправляли.
+
+    random_id нужны на входе: ВК присылает нам message_reply и о наших
+    отправках тоже, и отличить своё эхо от сообщения живого менеджера можно
+    только по нему (см. app.vk.webhook.handle_message_reply)."""
+    message_id: int | None = None
+    random_ids: list[int] = field(default_factory=list)
+
+
 async def send_message(
     access_token: str,
     peer_id: int,
     text: str,
     vk_group_id: int | None = None,
     attachment: str | None = None,
-) -> int | None:
+) -> SentMessage:
     """Отправка текста в ЛС пользователю от имени сообщества.
 
     Длинный текст уходит несколькими сообщениями. attachment (если задан) уходит
     вместе с ПОСЛЕДНИМ чанком — обычно фразы, на которые ссылаются вложения,
-    заканчиваются ими. Возвращает VK message id последней отправленной части
-    (None, если текст пуст и вложений нет).
+    заканчиваются ими. Возвращает VK message id последней отправленной части и
+    список random_id всех частей (message_id=None, если отправлять было нечего).
     """
     chunks = split_text(text)
     if not chunks and not attachment:
-        return None
+        return SentMessage()
     if not chunks:
         chunks = [""]
     sem = _group_semaphore(vk_group_id or 0)
-    last_id: int | None = None
+    sent = SentMessage()
     async with sem:
         for i, chunk in enumerate(chunks):
-            params = {"peer_id": peer_id, "message": chunk, "random_id": make_random_id()}
+            random_id = make_random_id()
+            params = {"peer_id": peer_id, "message": chunk, "random_id": random_id}
             if attachment and i == len(chunks) - 1:
                 params["attachment"] = attachment
-            last_id = await vk_api_call(access_token, "messages.send", params)
-    return last_id
+            # random_id запоминаем ДО вызова: ВК успевает прислать нам эхо
+            # раньше, чем вернёт ответ, и к этому моменту id уже должен быть наш.
+            sent.random_ids.append(random_id)
+            sent.message_id = await vk_api_call(access_token, "messages.send", params)
+    return sent
 
 
-async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> int | None:
+async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> SentMessage:
     """Отправка в диалог: находит клиента и его группу, шлёт от её имени.
 
     Вложения из фраз ("[photo-url]" и т.п., см. extract_and_resolve_attachments)
@@ -225,7 +242,8 @@ async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> int | N
 
     На 900/901/902 помечает диалог vk_blocked и пробрасывает
     VkMessagesForbiddenError — вызывающий не должен ретраить.
-    Возвращает VK message id последней части (для external_message_id).
+    Возвращает SentMessage: VK id последней части (для external_message_id) и
+    random_id всех частей (для распознавания собственного эха).
     """
     if dialog.vk_blocked:
         raise VkMessagesForbiddenError(None, "dialog is marked vk_blocked")

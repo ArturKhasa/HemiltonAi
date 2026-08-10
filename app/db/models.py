@@ -120,6 +120,11 @@ class Dialog(Base):
     # Детектится FunnelAgent на каждое сообщение клиента ПЕРЕД SalesAgent. Ортогональна
     # funnel_type (температура лида) и status (CRM-статусов больше нет, статусы локальные). Оба агента (Sales, Ping) читают это поле.
     funnel_stage = Column(String(32), nullable=True)
+    # Цены, уже названные клиенту в этом диалоге: {название товара: сумма}.
+    # Матрица — источник правды для НОВОГО диалога; идущий диалог держит своё
+    # число, иначе правка прайса поднимает цену человеку, с которым уже
+    # договорились (см. миграцию 045).
+    quoted_prices = Column(JSONB().with_variant(JSON(), "sqlite"), nullable=True)
     created_at = Column(DateTime, default=msk_now)
     updated_at = Column(DateTime, default=msk_now, onupdate=msk_now)
     last_message_at = Column(DateTime, nullable=True)

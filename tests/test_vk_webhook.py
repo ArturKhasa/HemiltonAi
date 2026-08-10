@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from app.ai.runner import ReplyPart
 from app.ai.schemas import AgentOutput
 from app.db.models import AIRun, Client, Dialog, DialogType, Message, MessageRole, VkGroup
+from app.vk.sender import SentMessage
 from app.vk.webhook import (
     handle_message_new,
     handle_message_reply,
@@ -117,7 +118,7 @@ def fake_sender(monkeypatch):
         # Настоящий ВК выдаёт каждому сообщению свой id; на повторяющемся падает
         # уникальный индекс (dialog_id, external_message_id), которым дедуплицируются
         # вебхуки, — так что счётчик тут не украшение.
-        return 800 + len(sent)
+        return SentMessage(message_id=800 + len(sent), random_ids=[900 + len(sent)])
 
     monkeypatch.setattr("app.vk.sender.send_to_dialog", _fake_send)
     return sent
@@ -257,9 +258,12 @@ async def test_message_new_ai_paused_saves_but_no_ai(db, vk_group, fake_ai, fake
 async def test_message_reply_operator_pauses_ai(db, vk_group, fake_ai, fake_sender):
     # Клиент написал — диалог существует.
     await handle_message_new(db, vk_group, parse_message_event(_event()))
-    # Живой оператор ответил из интерфейса ВК: random_id=0.
+    # Живой оператор ответил из интерфейса ВК. random_id у него НЕнулевой —
+    # его проставляет клиент ВК, а не только мы; раньше по этому признаку
+    # сообщение отбрасывалось и роль curator не появлялась никогда.
     reply = parse_message_event(_event(
-        "message_reply", from_id=-111222, text="Оператор на связи", message_id=99, random_id=0,
+        "message_reply", from_id=-111222, text="Оператор на связи", message_id=99,
+        random_id=777001,
     ))
     reply.peer_id = 555
     await handle_message_reply(db, vk_group, reply)
@@ -273,11 +277,13 @@ async def test_message_reply_operator_pauses_ai(db, vk_group, fake_ai, fake_send
 
 async def test_message_reply_own_api_send_ignored(db, vk_group, fake_ai, fake_sender):
     await handle_message_new(db, vk_group, parse_message_event(_event()))
-    # Эхо нашей же отправки через messages.send: random_id != 0.
+    # Эхо нашей же отправки: random_id совпадает с тем, которым мы отправляли
+    # (fake_sender вернул 901 на первую отправку).
     reply = parse_message_event(_event(
         "message_reply", from_id=-111222, text="Да, есть в наличии!", message_id=100,
-        random_id=123456,
+        random_id=901,
     ))
+    reply.peer_id = 555
     await handle_message_reply(db, vk_group, reply)
 
     dialog = (await db.execute(select(Dialog))).scalars().first()

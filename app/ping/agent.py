@@ -22,6 +22,7 @@ from app.db.models import AIRun, Client, Dialog, DialogPingState, Message, Messa
 from app.ai.feedback import load_active_feedback_rules
 from app.ping.prompts import get_ping_prompt
 from app.utils.time import human_msk_now
+from app.vk.outgoing import delivered_only
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,7 @@ async def detect_funnel_with_ai(
         .order_by(Message.created_at.desc())
         .limit(30)
     )
-    msgs = list(reversed(msgs_result.scalars().all()))
+    msgs = delivered_only(list(reversed(msgs_result.scalars().all())))
     lines = [
         f"[{'Клиент' if m.role == MessageRole.client else 'Менеджер'}]: {m.text}"
         for m in msgs
@@ -323,7 +324,9 @@ async def _fetch_dialog_history(db: AsyncSession, dialog: Dialog) -> str:
         .order_by(Message.created_at.desc())
         .limit(20)
     )
-    msgs = list(reversed(result.scalars().all()))
+    # Недоставленное клиенту в историю не идёт: агент решал по нему, что шаг
+    # воронки уже пройден, и пропускал пинг, которого клиент не получал.
+    msgs = delivered_only(list(reversed(result.scalars().all())))
     lines = []
     for m in msgs:
         role = "Клиент" if m.role == MessageRole.client else "Менеджер"

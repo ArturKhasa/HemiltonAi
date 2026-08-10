@@ -77,13 +77,45 @@ def _strip_payment_sentence(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
+def _pin_price(dialog, product_name: str, price):
+    """Цена этого товара для этого диалога: уже названная либо новая.
+
+    Матрица — источник правды, пока цену не произнесли вслух. После этого правка
+    матрицы не должна доезжать до клиента, с которым уже договорились: 10 августа
+    прайс поправили в 12:25, и диалог 142, где в 09:56 согласовали 4 990 ₽, в
+    13:15 получил счёт на 5 990 ₽.
+
+    Понизить можно — это уступка при возражении, ради неё существует
+    «[минимальная-цена:]». Поднять нельзя ни при каких условиях.
+    """
+    if dialog is None or not product_name:
+        return price
+    pinned = (dialog.quoted_prices or {}).get(product_name)
+    value = int(price)
+    if pinned is not None and value > int(pinned):
+        logger.info(
+            "цена диалога %s зафиксирована: товар %r, матрица %s, отдаём %s",
+            dialog.id, product_name, value, int(pinned),
+        )
+        return int(pinned)
+    if pinned is None or value < int(pinned):
+        # dict пересобираем целиком: SQLAlchemy не увидит мутацию вложенного
+        # словаря в JSON-колонке и не запишет изменение.
+        dialog.quoted_prices = {**(dialog.quoted_prices or {}), product_name: value}
+    return value
+
+
 async def render_price_placeholders(
-    db: AsyncSession, text: str, type_id: int | None = None,
+    db: AsyncSession, text: str, type_id: int | None = None, dialog=None,
 ) -> str:
     """Подставить акционные цены товаров вместо «[цена:запрос]».
 
     Товар не нашёлся — плейсхолдер убираем вместе со скобками, оставив запрос
     как обычное слово: лучше фраза без цифры, чем «[цена:свитшот]» у клиента.
+
+    `dialog` — диалог, в который уйдёт текст. Передан: цена товара закрепляется
+    за диалогом и больше не растёт (см. _pin_price). Не передан (например,
+    предпросмотр скрипта в админке): отдаём текущую цену матрицы.
     """
     text = _render_payment_link(text or "")
     matches = list(_PRICE_PLACEHOLDER_RE.finditer(text))
@@ -103,6 +135,7 @@ async def render_price_placeholders(
         if products:
             p = products[0]
             price = (p.min_price if p.min_price is not None else p.price) if minimal else p.price
+            price = _pin_price(dialog, p.name, price)
         if price is None:
             logger.warning("price placeholder %r: товар не найден, убираю плейсхолдер", query)
             result = result.replace(m.group(0), query)

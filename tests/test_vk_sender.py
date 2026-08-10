@@ -68,10 +68,13 @@ async def test_send_message_passes_random_id_and_chunks(monkeypatch):
     monkeypatch.setattr(sender, "vk_api_call", fake_api_call)
 
     text = "x" * (MAX_MESSAGE_LEN * 2 + 10)
-    last_id = await send_message("tok", 42, text, vk_group_id=1)
+    sent = await send_message("tok", 42, text, vk_group_id=1)
 
     assert len(calls) == 3  # текст порезан на 3 части
-    assert last_id == 1003
+    assert sent.message_id == 1003
+    # random_id возвращаются наружу: по ним вебхук отличает наше эхо от
+    # сообщения живого менеджера (см. app.vk.outgoing.is_our_echo).
+    assert len(sent.random_ids) == 3
     random_ids = set()
     for token, method, params in calls:
         assert token == "tok"
@@ -81,6 +84,7 @@ async def test_send_message_passes_random_id_and_chunks(monkeypatch):
         assert params["random_id"]  # random_id обязателен и ненулевой
         random_ids.add(params["random_id"])
     assert len(random_ids) == 3  # у каждой части свой random_id
+    assert set(sent.random_ids) == random_ids
 
 
 def test_make_random_id_positive_int32():

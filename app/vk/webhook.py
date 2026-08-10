@@ -336,11 +336,20 @@ async def _reply_with_ai(
         logger.info("[%s] need_curator=True — reply held for review", ctx)
         return
 
+    from app.vk.outgoing import mark_delivered, mark_failed
     from app.vk.sender import VkApiError, VkMessagesForbiddenError, send_to_dialog
     sent = 0
+
+    def _fail_from(idx: int) -> None:
+        """Пометить недоставленными сбойную часть и весь хвост за ней: до них
+        очередь уже не дойдёт, а в базе они лежат с самого run_ai."""
+        for rest in parts[idx:]:
+            mark_failed(rest.message)
+
     for i, part in enumerate(parts):
         if not part.text and not part.image_urls:
             logger.info("[%s] empty reply part %d — skipped", ctx, i)
+            mark_failed(part.message)
             continue
         # Фото-вложения через VK upload API пока не поддержаны — URL уходят текстом,
         # ВК сам рендерит превью ссылок.
@@ -355,22 +364,24 @@ async def _reply_with_ai(
             await asyncio.sleep(FOLLOW_UP_DELAY_SECONDS)
 
         try:
-            vk_message_id = await send_to_dialog(db, dialog, outgoing_text)
+            result = await send_to_dialog(db, dialog, outgoing_text)
         except VkMessagesForbiddenError:
+            _fail_from(i)
             await db.commit()  # vk_blocked проставлен в send_to_dialog
             return
         except (VkApiError, Exception):
             logger.exception("[%s] vk reply send failed | part=%d", ctx, i)
+            _fail_from(i)
             break
 
-        # Проставляем VK id на исходящее сообщение: message_reply о нашей же отправке
-        # придёт в вебхук, и по этому id (и random_id≠0) мы его отличим от оператора.
-        if vk_message_id and not part.message.external_message_id:
-            part.message.external_message_id = str(vk_message_id)
+        # Проставляем VK id и random_id на исходящее сообщение: message_reply о
+        # нашей же отправке придёт в вебхук, и отличить его от сообщения живого
+        # оператора можно только по ним (см. app.vk.outgoing.is_our_echo).
+        mark_delivered(part.message, result)
         sent += 1
         logger.info(
             "[%s] vk reply sent | part=%d/%d | vk_message_id=%s",
-            ctx, i + 1, len(parts), vk_message_id,
+            ctx, i + 1, len(parts), result.message_id,
         )
 
     if sent:
@@ -379,10 +390,21 @@ async def _reply_with_ai(
 
 
 async def handle_message_reply(db: AsyncSession, group: VkGroup, msg: VkIncomingMessage) -> None:
-    """Исходящее сообщение сообщества. Наши API-отправки (random_id ≠ 0) пропускаем;
-    сообщение живого оператора сохраняем как curator и ставим ИИ на паузу."""
-    if msg.random_id:
-        return  # наша же отправка через messages.send — эхо не обрабатываем
+    """Исходящее сообщение сообщества.
+
+    Своё эхо пропускаем, чужое сохраняем как curator и ставим ИИ на паузу.
+
+    «Своё» раньше определялось как `random_id != 0` — в расчёте на то, что
+    random_id проставляем только мы. Это неверно: его проставляет любой
+    отправитель, включая клиент ВК живого менеджера. По выгрузке из ВК random_id
+    ненулевой у ВСЕХ исходящих, поэтому отсекались 100 % чужих сообщений и в
+    базе не появилось ни одного сообщения с ролью curator за всю историю. ИИ
+    из-за этого перебивал менеджера, а пинги не выключались (замечание ОП от
+    10 августа, 13:49: «Здесь с макетом подключался уже менеджер в работу, потом
+    снова включилась ии»).
+    """
+    from app.ping.worker import stop_pings
+    from app.vk.outgoing import is_our_echo
 
     client = await _get_or_create_client(db, group, msg.peer_id)
     type_id, type_name = await _resolve_dialog_type(db, group)
@@ -390,16 +412,9 @@ async def handle_message_reply(db: AsyncSession, group: VkGroup, msg: VkIncoming
     dialog = await _get_or_create_dialog(db, client, type_id)
     ctx = f"vk={group.group_id}/{msg.peer_id}"
 
-    if msg.external_message_id:
-        existing = await db.scalar(
-            select(Message.id).where(
-                Message.dialog_id == dialog.id,
-                Message.external_message_id == msg.external_message_id,
-            )
-        )
-        if existing is not None:
-            await db.commit()
-            return
+    if await is_our_echo(db, dialog.id, msg.random_id, msg.external_message_id):
+        await db.commit()
+        return
 
     message = Message(
         dialog_id=dialog.id,
@@ -413,7 +428,11 @@ async def handle_message_reply(db: AsyncSession, group: VkGroup, msg: VkIncoming
     dialog.last_message_at = msk_now()
     if not dialog.ai_paused:
         dialog.ai_paused = True
-        logger.info("[%s] operator replied from VK — AI paused", ctx)
+        logger.info(
+            "[%s] чужое исходящее (random_id=%s) — диалог ведёт человек, ИИ на паузе",
+            ctx, msg.random_id,
+        )
+    await stop_pings(db, dialog.id, "диалог перехвачен из ВК")
     try:
         await db.commit()
     except IntegrityError:

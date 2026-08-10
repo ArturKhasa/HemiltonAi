@@ -17,6 +17,7 @@ from app.sales.order_slots import collect_slots
 from app.utils.media import carry_over_attachments
 from app.utils.time import msk_now
 from app.utils.text import normalize_dashes, strip_foreign_name
+from app.vk.outgoing import delivered_only, mark_delivered, was_delivered
 from app.vk.sender import VkMessagesForbiddenError, send_to_dialog
 from app.vk.spintax import resolve_spintax
 
@@ -139,16 +140,19 @@ def _deliverable(dialog: Dialog | None) -> bool:
 
 async def _last_outbound_text(db: AsyncSession, dialog: Dialog) -> str | None:
     """Text of the most recent manager/AI message in this dialog."""
-    text = await db.scalar(
-        select(Message.text)
+    rows = await db.execute(
+        select(Message)
         .where(
             Message.dialog_id == dialog.id,
             Message.role.in_((MessageRole.ai, MessageRole.curator)),
         )
         .order_by(Message.created_at.desc())
-        .limit(1)
+        .limit(5)
     )
-    return (text or "").strip() or None
+    for msg in rows.scalars().all():
+        if was_delivered(msg):
+            return (msg.text or "").strip() or None
+    return None
 
 
 # Столько последних сообщений хватает, чтобы найти надпись: её называют в самом
@@ -228,9 +232,10 @@ async def _send_ping(
     # Шаг без текста: manual_text уходит как есть, совсем пустой шаг — маркер для куратора.
     if not phrase_template and not custom_text:
         if rule.manual_text:
+            result = None
             if _deliverable(dialog):
                 try:
-                    await send_to_dialog(db, dialog, rule.manual_text)
+                    result = await send_to_dialog(db, dialog, rule.manual_text)
                 except VkMessagesForbiddenError:
                     return "blocked"
                 except Exception as exc:
@@ -247,6 +252,8 @@ async def _send_ping(
                 },
             )
             db.add(msg)
+            if result is not None:
+                mark_delivered(msg, result)
             dialog.last_message_at = now
             logger.info("ping: manual_text sent | dialog=%s step=%s", state.dialog_id, state.current_step)
         else:
@@ -279,23 +286,25 @@ async def _send_ping(
     from app.ai.runner import _find_duplicate_reply
 
     prior_rows = await db.execute(
-        select(Message.text).where(
+        select(Message).where(
             Message.dialog_id == state.dialog_id,
             Message.role.in_((MessageRole.ai, MessageRole.curator)),
         )
     )
-    if _find_duplicate_reply(sent_text, [t for (t,) in prior_rows.all() if t]):
+    prior_texts = [m.text for m in delivered_only(list(prior_rows.scalars().all())) if m.text]
+    if _find_duplicate_reply(sent_text, prior_texts):
         logger.info(
             "ping: text near-duplicates an already sent message, skip | dialog=%s step=%s",
             state.dialog_id, state.current_step,
         )
         return "duplicate"
 
+    result = None
     if not _deliverable(dialog):
         logger.info("ping: тестовый диалог %s — пишем в панель, ВК не трогаем", state.dialog_id)
     else:
         try:
-            await send_to_dialog(db, dialog, sent_text)
+            result = await send_to_dialog(db, dialog, sent_text)
         except VkMessagesForbiddenError:
             return "blocked"
         except Exception as exc:
@@ -315,6 +324,11 @@ async def _send_ping(
         },
     )
     db.add(msg)
+    # Без VK id и random_id ВК вернёт нам этот же пинг как message_reply, и мы
+    # примем его за сообщение живого оператора — диалог встанет на паузу сам от
+    # себя. Раньше возвращаемое значение send_to_dialog здесь выбрасывалось.
+    if result is not None:
+        mark_delivered(msg, result)
     dialog.last_message_at = now
     if ai_run is not None:
         await db.flush()
@@ -553,6 +567,26 @@ async def _init_ping_state(
         "ping: state created | dialog=%s funnel=%s next_due=%s",
         dialog.id, funnel, next_due,
     )
+
+
+async def stop_pings(db: AsyncSession, dialog_id: int, reason: str) -> None:
+    """Закрыть пинг-воронку диалога прямо сейчас.
+
+    `_process_state` гасит пинги по `ai_paused`, но только когда до диалога
+    дойдёт очередь воркера — а очередной пинг может уйти раньше. Диалог, который
+    забрал человек, должен замолкать в тот же момент: «пинги должны отключаться,
+    когда диалог переведён на менеджера».
+    """
+    state = await db.scalar(
+        select(DialogPingState).where(
+            DialogPingState.dialog_id == dialog_id,
+            DialogPingState.is_completed == False,
+        )
+    )
+    if state is None:
+        return
+    state.is_completed = True
+    logger.info("ping: остановлены | dialog=%s | %s", dialog_id, reason)
 
 
 async def force_ping_funnel(db: AsyncSession, dialog: Dialog, funnel: str, now) -> None:

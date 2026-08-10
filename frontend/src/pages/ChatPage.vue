@@ -340,9 +340,34 @@
 
         <!-- Input -->
         <div class="bg-white border-t p-4">
-          <div v-if="activeDialog?.is_test === false" class="text-center text-sm text-gray-400 py-2">
-            Реальный диалог — только просмотр
-          </div>
+          <!-- Боевой диалог: ответ живого менеджера. Раньше сюда писать было
+               нельзя вовсе («только просмотр»), и диалог с меткой «Нужен куратор»
+               оставалось разве что смотреть. Отправка забирает диалог у ИИ. -->
+          <template v-if="activeDialog?.is_test === false">
+            <div class="flex items-center gap-2 mb-2 text-xs text-gray-500">
+              <span>✍️ Ответ от лица менеджера уйдёт клиенту в ВК.</span>
+              <span v-if="!aiPaused" class="text-amber-600">ИИ встанет на паузу, пинги остановятся.</span>
+              <span v-else class="text-gray-400">ИИ уже на паузе.</span>
+            </div>
+            <form @submit.prevent="sendAsManager" class="flex gap-3">
+              <textarea
+                v-model="managerInput"
+                :disabled="sendingManager"
+                @keydown.enter.exact.prevent="sendAsManager"
+                placeholder="Ответить клиенту... (Enter — отправить)"
+                rows="1"
+                class="flex-1 border rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none disabled:opacity-50"
+              />
+              <button
+                type="submit"
+                :disabled="sendingManager || !managerInput.trim()"
+                class="bg-brand-600 text-white px-5 py-2.5 rounded-xl hover:bg-brand-700 disabled:opacity-50 text-sm font-medium"
+              >
+                {{ sendingManager ? 'Отправка...' : 'Ответить' }}
+              </button>
+            </form>
+            <p v-if="managerError" class="text-xs text-red-600 mt-2">{{ managerError }}</p>
+          </template>
           <template v-else>
           <div v-if="pendingFiles.length" class="flex flex-wrap gap-2 mb-2">
             <div v-for="(f, i) in pendingFiles" :key="i" class="relative">
@@ -1628,6 +1653,36 @@ async function sendMessage() {
   } finally {
     sending.value = false
     await scrollBottom()
+  }
+}
+
+const managerInput = ref('')
+const sendingManager = ref(false)
+const managerError = ref('')
+
+async function sendAsManager() {
+  const text = managerInput.value.trim()
+  if (!text || sendingManager.value) return
+
+  sendingManager.value = true
+  managerError.value = ''
+  const seq = _openSeq
+  const dialogId = activeDialogId.value
+  try {
+    const res = await api.post(`/chat/${dialogId}/reply`, { text, files: [] })
+    if (seq !== _openSeq) return
+    messages.value.push(res.data)
+    managerInput.value = ''
+    // Отправка сама ставит ИИ на паузу — отражаем это в тумблере, не перезагружая чат.
+    aiPaused.value = true
+    const d = dialogs.value.find(x => x.id === dialogId)
+    if (d) d.ai_paused = true
+    await scrollBottom()
+  } catch (e) {
+    if (seq !== _openSeq) return
+    managerError.value = e.response?.data?.detail || e.message
+  } finally {
+    sendingManager.value = false
   }
 }
 
