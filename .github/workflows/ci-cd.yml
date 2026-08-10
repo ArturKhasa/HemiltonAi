@@ -56,7 +56,7 @@ jobs:
   deploy:
     name: Deploy to production
     needs: [backend, frontend, docker]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -70,6 +70,6 @@ jobs:
           script: |
             set -eu
             cd /opt/hemilton
-            git pull --ff-only origin master
+            git pull --ff-only origin main
             docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
             docker compose -f docker-compose.prod.yml ps
