@@ -21,8 +21,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Message, MessageRole, Script
 from app.sales.order_slots import asked_slot, has_size
+from app.vk.outgoing import delivered_only, was_delivered
 
 logger = logging.getLogger(__name__)
+
+# Сколько последних исходящих просматриваем в поисках доставленного. Подряд
+# недоставленных бывает не больше одного хода, пяти хватает с запасом.
+_OUTGOING_LOOKBACK = 5
+
+
+async def _outgoing_texts(db: AsyncSession, dialog_id: int) -> list[str]:
+    """Тексты всех наших сообщений диалога, дошедших до клиента."""
+    rows = await db.execute(
+        select(Message).where(
+            Message.dialog_id == dialog_id,
+            Message.role.in_((MessageRole.ai, MessageRole.curator)),
+        )
+    )
+    return [m.text for m in delivered_only(list(rows.scalars().all()))]
 
 # «2. Похвала» — присоединение после ответа на вопрос про имя/фамилию. Именно с
 # него начинается связка «похвала → стоимость → доставка».
@@ -258,15 +274,25 @@ async def find_payment_link_script(db: AsyncSession, type_id: int | None) -> Scr
 
 
 async def _last_outgoing(db: AsyncSession, dialog_id: int) -> str | None:
-    return await db.scalar(
-        select(Message.text)
+    """Последнее наше сообщение, которое клиент действительно получил.
+
+    Недоставленное сюда попадать не должно: на нём построены все точки воронки
+    («клиент ответил на наш вопрос про надпись», «подтвердил сверку дизайна»), а
+    отвечать он мог только на то, что видел.
+    """
+    rows = await db.execute(
+        select(Message)
         .where(
             Message.dialog_id == dialog_id,
             Message.role.in_((MessageRole.ai, MessageRole.curator)),
         )
         .order_by(Message.id.desc())
-        .limit(1)
+        .limit(_OUTGOING_LOOKBACK)
     )
+    for msg in rows.scalars().all():
+        if was_delivered(msg):
+            return msg.text
+    return None
 
 
 async def design_just_confirmed(db: AsyncSession, dialog_id: int, client_text: str) -> bool:
@@ -350,13 +376,9 @@ async def payment_option_chosen(db: AsyncSession, dialog_id: int, client_text: s
 
 async def checkout_presented(db: AsyncSession, dialog_id: int) -> bool:
     """Сумма заказа и способы оплаты уже показаны — счёт выставлять можно."""
-    rows = await db.execute(
-        select(Message.text).where(
-            Message.dialog_id == dialog_id,
-            Message.role.in_((MessageRole.ai, MessageRole.curator)),
-        )
+    return any(
+        CHECKOUT_PRESENTED_RE.search(t or "") for t in await _outgoing_texts(db, dialog_id)
     )
-    return any(CHECKOUT_PRESENTED_RE.search(t or "") for (t,) in rows.all())
 
 
 async def dialog_has_payment_link(db: AsyncSession, dialog_id: int) -> bool:
@@ -365,13 +387,9 @@ async def dialog_has_payment_link(db: AsyncSession, dialog_id: int) -> bool:
     Сверяем в Python, а не regexp-оператором СУБД: шаблон один и тот же и для
     истории, и для свежего ответа модели, а диалог короткий.
     """
-    rows = await db.execute(
-        select(Message.text).where(
-            Message.dialog_id == dialog_id,
-            Message.role.in_((MessageRole.ai, MessageRole.curator)),
-        )
+    return any(
+        PAYMENT_LINK_RE.search(t or "") for t in await _outgoing_texts(db, dialog_id)
     )
-    return any(PAYMENT_LINK_RE.search(t or "") for (t,) in rows.all())
 
 
 async def answered_inscription_question(db: AsyncSession, dialog_id: int) -> bool:
@@ -382,13 +400,5 @@ async def answered_inscription_question(db: AsyncSession, dialog_id: int) -> boo
     """
     from app.sales.order_slots import ASKS_INSCRIPTION_RE
 
-    last = await db.scalar(
-        select(Message.text)
-        .where(
-            Message.dialog_id == dialog_id,
-            Message.role.in_((MessageRole.ai, MessageRole.curator)),
-        )
-        .order_by(Message.id.desc())
-        .limit(1)
-    )
+    last = await _last_outgoing(db, dialog_id)
     return bool(last and ASKS_INSCRIPTION_RE.search(last))

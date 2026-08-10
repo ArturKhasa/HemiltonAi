@@ -1,6 +1,7 @@
 """Tester chat API — simulate AI conversation without VK."""
 import csv
 import io
+import logging
 import uuid
 from datetime import datetime
 
@@ -17,6 +18,8 @@ from app.storage.local import safe_extension, save_file
 from app.config import settings
 from app.db.models import AIRun, Client, Dialog, DialogPingState, DialogStatusConfig, DialogType, Message, MessageFeedback, MessageRole, User
 from app.db.session import get_db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -633,6 +636,89 @@ async def send_message(
         ))
 
     return out
+
+
+@router.post("/{dialog_id}/reply", response_model=ChatMessageOut)
+async def reply_as_manager(
+    dialog_id: int,
+    body: ChatMessageRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "curator")),
+):
+    """Ответ живого менеджера клиенту прямо из панели.
+
+    До этого написать в боевой диалог было неоткуда: эндпоинт выше обслуживает
+    только тестовые диалоги (там сообщение изображает КЛИЕНТА и запускает ИИ), а
+    в ВК менеджер уходил из нашего поля зрения совсем. Диалог с меткой «Нужен
+    куратор» было видно, а сделать с ним что-либо — нельзя.
+
+    Отправка сама забирает диалог у ИИ: ставит паузу и гасит пинги. Вернуть ИИ
+    можно тумблером (см. dialogs.set_ai_pause).
+    """
+    from app.ping.worker import stop_pings
+    from app.vk.outgoing import mark_delivered, mark_failed
+    from app.vk.sender import VkMessagesForbiddenError, send_to_dialog
+
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    dialog = await db.get(Dialog, dialog_id)
+    if not dialog:
+        raise HTTPException(status_code=404, detail="Dialog not found")
+    await ensure_type_access(current_user, dialog.type_id, db)
+
+    outgoing = text
+    if body.files:
+        outgoing = (outgoing + "\n" + "\n".join(body.files)).strip()
+
+    message = Message(
+        dialog_id=dialog_id,
+        role=MessageRole.curator,
+        text=text,
+        msg_metadata={"files": body.files, "sent_by_user_id": current_user.id},
+    )
+    db.add(message)
+
+    # Паузу ставим ДО отправки: пока идёт запрос в ВК, входящее сообщение
+    # клиента может запустить прогон, и ИИ ответит поверх менеджера.
+    if not dialog.ai_paused:
+        dialog.ai_paused = True
+    await stop_pings(db, dialog.id, f"ответ менеджера из панели (user={current_user.id})")
+    await db.flush()
+
+    if dialog.is_test:
+        # В тестовом диалоге клиента в ВК нет — сообщение живёт только в панели.
+        mark_delivered(message, None)
+    else:
+        try:
+            result = await send_to_dialog(db, dialog, outgoing)
+        except VkMessagesForbiddenError:
+            mark_failed(message)
+            await db.commit()
+            raise HTTPException(status_code=409, detail="Клиент запретил сообщения от сообщества")
+        except Exception as exc:
+            mark_failed(message)
+            await db.commit()
+            raise HTTPException(status_code=502, detail=f"ВК не принял сообщение: {exc}")
+        mark_delivered(message, result)
+
+    dialog.last_message_at = msk_now()
+    await db.commit()
+    await db.refresh(message)
+
+    logger.info(
+        "[dialog=%s] ответ менеджера отправлен | user=%s | ai_paused=True",
+        dialog_id, current_user.id,
+    )
+    return ChatMessageOut(
+        id=message.id,
+        role=message.role.value,
+        text=message.text,
+        created_at=message.created_at,
+        need_curator=False,
+        files=body.files,
+    )
 
 
 @router.delete("/dialogs")

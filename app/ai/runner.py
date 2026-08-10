@@ -34,11 +34,19 @@ from app.utils.media import (
     is_sticker_url,
     is_video_url,
 )
+from app.vk.outgoing import delivered_only
 from app.vk.spintax import resolve_spintax
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
 from app.ai.greeting import greeting_text, resolve_greeting
 from app.sales.price_placeholder import payment_link_configured, render_price_placeholders
+from app.sales.status_names import (
+    AWAITING_PREPAY,
+    HOT_ALLOWED_NEXT,
+    ORDER_CREATED,
+    can_await_prepay,
+    is_hot,
+)
 from app.sales.funnel_steps import (
     CHECKOUT_PRESENTED_RE,
     PAYMENT_LINK_RE,
@@ -549,7 +557,10 @@ async def run_ai(
         .order_by(Message.created_at.desc())
         .limit(_HISTORY_MAX_MESSAGES)
     )
-    local_msgs = list(reversed(local_history_result.scalars().all()))
+    # Не дошедшее до клиента в историю не идёт: строка сообщения пишется до
+    # отправки, и упавшая отправка оставляла модели ложное «я это уже сказала» —
+    # шаг воронки после этого не повторялся никогда (85 таких из 314 исходящих).
+    local_msgs = delivered_only(list(reversed(local_history_result.scalars().all())))
     logger.info("[%s] local history loaded | messages=%d", ctx, len(local_msgs))
     for msg in local_msgs:
         if msg.role == MessageRole.client:
@@ -591,6 +602,7 @@ async def run_ai(
         funnel_stage=dialog.funnel_stage,
         exclude_script_ids=exclude_script_ids,
         client_product=slots.get("product"),
+        dialog_id=dialog.id,
     )
     logger.info(
         "[%s] agent built | model=%s | provider=%s | товар=%s",
@@ -666,6 +678,7 @@ async def run_ai(
                         funnel_stage=dialog.funnel_stage,
                         exclude_script_ids=exclude_script_ids,
                         client_product=slots.get("product"),
+                        dialog_id=dialog.id,
                     ),
                     timeout=settings.AI_RUNNER_TIMEOUT,
                 )
@@ -687,6 +700,7 @@ async def run_ai(
                             cache_uncached_tail=uncached_tail,
                             funnel_stage=dialog.funnel_stage,
                             exclude_script_ids=exclude_script_ids,
+                            dialog_id=dialog.id,
                         ),
                         timeout=settings.AI_RUNNER_TIMEOUT,
                     )
@@ -916,21 +930,20 @@ async def run_ai(
     if output.need_curator and not output.next_status:
         output = output.model_copy(update={"next_status": CURATOR_STATUS_NAME})
 
-    # Жёсткий гейт: из «Горячий клиент» единственный разрешённый переход —
+    # Жёсткий гейт: из «горячего» единственный разрешённый переход —
     # «Ждем предоплату». Любой другой next_status сбрасываем (статус не меняется);
     # need_curator при этом сохраняется — уведомление куратора работает как раньше.
     if (
-        status_before_name == "Горячий клиент"
+        is_hot(status_before_name)
         and output.next_status
-        and output.next_status not in ("Горячий клиент", "Ждем предоплату")
+        and output.next_status not in HOT_ALLOWED_NEXT
     ):
         output = output.model_copy(update={"next_status": None})
 
     # «Ждем предоплату» = ссылка на оплату/реквизиты уже отправлены.
     if (
-        output.next_status == "Ждем предоплату"
-        and status_before_name
-        not in ("Есть расчет", "Горячий клиент", "Ждем предоплату", "Заказ оформлен")
+        output.next_status == AWAITING_PREPAY
+        and not can_await_prepay(status_before_name)
     ):
         logger.info(
             "[%s] blocked next_status 'Ждем предоплату' — status_before=%r too early",
@@ -944,8 +957,8 @@ async def run_ai(
     # улетает в пинг-воронку after_payment. Ссылку ищем в текущем ответе и во всех
     # уже отправленных сообщениях менеджера/ИИ.
     if (
-        output.next_status == "Ждем предоплату"
-        and status_before_name != "Ждем предоплату"
+        output.next_status == AWAITING_PREPAY
+        and status_before_name != AWAITING_PREPAY
         and not PAYMENT_LINK_RE.search(output.reply_text or "")
     ):
         if not await dialog_has_payment_link(db, dialog.id):
@@ -1004,14 +1017,13 @@ async def run_ai(
                 )
                 dialog.current_status_id = matching.id
                 # Статус меняется только локально — внешней системы статусов больше нет.
-                if output.next_status == "Ждем предоплату":
+                if output.next_status == AWAITING_PREPAY:
                     # Trust the model's «Ждем предоплату» only when the dialog actually
                     # reached the price stage. With an early client photo the FunnelAgent
                     # can jump to contacts and the model asks for prepayment on the FIRST
                     # message (client 8465497) — forcing the after_payment ping funnel
                     # then nags a client who never saw a price.
-                    _advanced_statuses = {"Есть расчет", "Горячий клиент", "Ждем предоплату", "Заказ оформлен"}
-                    if status_before_name in _advanced_statuses:
+                    if can_await_prepay(status_before_name):
                         from app.ping.worker import force_ping_funnel
                         from app.utils.time import msk_now
                         await force_ping_funnel(db, dialog, "after_payment", msk_now())
@@ -1020,7 +1032,7 @@ async def run_ai(
                             "[%s] skip force after_payment — status_before=%r too early, funnel left to detect_funnel_with_ai",
                             ctx, status_before_name,
                         )
-                elif output.next_status == "Заказ оформлен":
+                elif output.next_status == ORDER_CREATED:
                     from app.db.models import DialogPingState
                     _ps_res = await db.execute(select(DialogPingState).where(DialogPingState.dialog_id == dialog.id))
                     _ps = _ps_res.scalar_one_or_none()
@@ -1125,7 +1137,9 @@ async def run_ai(
     reply_text = strip_foreign_name(
         reply_text, client.name if client else None, slots.get("inscription"),
     )
-    reply_text = await render_price_placeholders(db, reply_text, type_id=type_id)
+    reply_text = await render_price_placeholders(
+        db, reply_text, type_id=type_id, dialog=dialog,
+    )
     reply_text = render_order_placeholders(reply_text, slots)
 
     # Фото скрипта, на котором построен ответ, не должны потеряться при пересказе.
@@ -1316,7 +1330,9 @@ async def _run_scripted_greeting(
         resolve_spintax(await greeting_text(db, script, dialog.type_id)),
         client.name if client else None,
     )
-    text = await render_price_placeholders(db, text, type_id=dialog.type_id)
+    text = await render_price_placeholders(
+        db, text, type_id=dialog.type_id, dialog=dialog,
+    )
     text = normalize_dashes(text)
     text, image_urls = _split_image_urls(text)
 
@@ -1471,7 +1487,9 @@ async def _render_script_part(
     text = render_name_placeholder(
         resolve_spintax(script.phrase_text), client.name if client else None
     )
-    text = await render_price_placeholders(db, text, type_id=dialog.type_id)
+    text = await render_price_placeholders(
+        db, text, type_id=dialog.type_id, dialog=dialog,
+    )
     text = render_order_placeholders(text, slots or {})
     text = normalize_dashes(text)
     text, image_urls = _split_image_urls(text)

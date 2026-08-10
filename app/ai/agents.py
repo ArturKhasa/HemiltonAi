@@ -40,13 +40,14 @@ def build_sales_agent(
     funnel_stage: str | None = None,
     exclude_script_ids: set[int] | None = None,
     client_product: str | None = None,
+    dialog_id: int | None = None,
 ) -> Agent:
     tools = [
         make_list_scripts(
             type_id, client_id=client_id, current_stage=funnel_stage,
             exclude_script_ids=exclude_script_ids, client_product=client_product,
         ),
-        make_get_script_phrase(type_id),
+        make_get_script_phrase(type_id, dialog_id),
         make_search_products(type_id),
         make_get_product_photo(type_id),
         make_find_similar_examples(type_id),

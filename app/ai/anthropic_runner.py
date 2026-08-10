@@ -164,6 +164,7 @@ async def _run_tool(
     funnel_stage: str | None = None,
     exclude_script_ids: set[int] | None = None,
     client_product: str | None = None,
+    dialog_id: int | None = None,
 ) -> str:
     if name == "list_scripts":
         from app.sales.scripts import ScriptService
@@ -178,7 +179,7 @@ async def _run_tool(
         )
     if name == "get_script_phrase":
         from app.ai.tools import get_script_phrase_text
-        return await get_script_phrase_text(args["script_id"], type_id)
+        return await get_script_phrase_text(args["script_id"], type_id, dialog_id)
     if name == "search_products":
         from app.ai.tools import run_product_search
         return await run_product_search(args["query"], type_id)
@@ -258,6 +259,7 @@ async def run_with_cache(
     funnel_stage: str | None = None,
     exclude_script_ids: set[int] | None = None,
     client_product: str | None = None,
+    dialog_id: int | None = None,
 ) -> tuple[AgentOutput, int, int, int, dict]:
     """Run sales agent via Anthropic SDK with prompt caching.
 
@@ -354,6 +356,7 @@ async def run_with_cache(
                         block.name, block.input, type_id, client_id, funnel_stage,
                         exclude_script_ids=exclude_script_ids,
                         client_product=client_product,
+                        dialog_id=dialog_id,
                     )
                 except Exception as e:
                     logger.warning("[anthropic_runner] tool %s failed: %s", block.name, e)

@@ -242,6 +242,12 @@ async def set_ai_pause(
     await ensure_type_access(current_user, dialog.type_id, db)
     dialog.ai_paused = body.paused
     dialog.updated_at = msk_now()
+    if body.paused:
+        # Пинги гаснут по ai_paused и сами, но только когда до диалога дойдёт
+        # очередь воркера, — а очередной пинг может уйти раньше. Диалог, который
+        # забрал человек, должен замолкать в тот же момент.
+        from app.ping.worker import stop_pings
+        await stop_pings(db, dialog.id, f"пауза выставлена вручную (user={current_user.id})")
     await db.commit()
     logger.info("[dialog=%s] ai_paused=%s set by user=%s", dialog_id, body.paused, current_user.id)
     return {"ok": True, "ai_paused": dialog.ai_paused}

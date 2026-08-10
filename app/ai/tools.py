@@ -13,7 +13,9 @@ from app.vk.spintax import resolve_spintax
 logger = logging.getLogger(__name__)
 
 
-async def get_script_phrase_text(script_id: int, type_id: int | None = None) -> str:
+async def get_script_phrase_text(
+    script_id: int, type_id: int | None = None, dialog_id: int | None = None,
+) -> str:
     """Текст скрипта из БД с раскрытым spintax и подставленными плейсхолдерами.
 
     Цена и ссылка на оплату подставляются здесь, а не оставляются модели: увидев
@@ -21,20 +23,33 @@ async def get_script_phrase_text(script_id: int, type_id: int | None = None) -> 
     головы — 4 990 ₽ рядом со скриптовыми 5 990 ₽ в том же ходу (диалог 44), а
     «[ссылка-оплаты]» превращалась в «вот счёт-ссылка на 500 рублей:» без самой
     ссылки (диалог 40).
+
+    dialog_id нужен, чтобы модель увидела ту же цену, что уже названа клиенту:
+    иначе она перепишет её в reply_text из своего черновика, и правка матрицы
+    посреди диалога снова доедет до клиента (см. _pin_price).
     """
+    from app.db.models import Dialog
     from app.sales.price_placeholder import render_price_placeholders
 
     async with AsyncSessionLocal() as db:
         script = await ScriptService(db).get_by_id(script_id)
         if not script or not (script.phrase_text or "").strip():
             return f"Скрипт {script_id} не найден или не содержит текста."
-        return await render_price_placeholders(
+        dialog = await db.get(Dialog, dialog_id) if dialog_id else None
+        text = await render_price_placeholders(
             db, resolve_spintax(script.phrase_text),
             type_id=type_id if type_id is not None else script.type_id,
+            dialog=dialog,
         )
+        # У инструмента своя сессия: закреплённую цену нужно сохранить здесь,
+        # иначе первый же черновик потеряет её и следующий вызов посчитает
+        # цену заново.
+        if dialog is not None:
+            await db.commit()
+        return text
 
 
-def make_get_script_phrase(type_id: int | None):
+def make_get_script_phrase(type_id: int | None, dialog_id: int | None = None):
     """Return a get_script_phrase tool scoped to a specific dialog type."""
     @function_tool
     async def get_script_phrase(script_id: int) -> str:
@@ -44,7 +59,7 @@ def make_get_script_phrase(type_id: int | None):
         source_script_id to this script_id in the final output.
         """
         logger.info("[tool] get_script_phrase called | script_id=%d", script_id)
-        text = await get_script_phrase_text(script_id, type_id)
+        text = await get_script_phrase_text(script_id, type_id, dialog_id)
         logger.info("[tool] get_script_phrase done | script_id=%d | text_len=%d", script_id, len(text))
         return text
     return get_script_phrase
