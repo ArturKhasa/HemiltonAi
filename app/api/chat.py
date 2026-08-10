@@ -65,6 +65,9 @@ class DialogListItem(BaseModel):
     id: int
     vk_user_id: int | None
     client_name: str | None
+    # Фамилия отдельно: в диалоге по ней не обращаются, а в списке лидов она
+    # нужна рядом с именем — раньше первой строкой там стоял числовой VK ID.
+    client_last_name: str | None = None
     marketing_tags: list[str] | None = None
     type_id: int | None
     current_status: str | None = None
@@ -270,6 +273,7 @@ async def list_chat_dialogs(
             id=dialog.id,
             vk_user_id=client.vk_user_id,
             client_name=client.name,
+            client_last_name=client.last_name,
             marketing_tags=client.marketing_tags,
             type_id=dialog.type_id,
             current_status=status_name,
@@ -385,7 +389,7 @@ async def export_chat_dialogs_csv(
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "dialog_id", "vk_user_id", "client_name", "type_id", "current_status",
+        "dialog_id", "vk_user_id", "client_name", "client_last_name", "type_id", "current_status",
         "dialog_created_at", "last_message_at", "ai_provider", "is_test",
         "message_id", "message_role", "message_text", "message_created_at",
     ])
@@ -394,6 +398,7 @@ async def export_chat_dialogs_csv(
             dialog.id,
             client.vk_user_id,
             client.name,
+            client.last_name,
             dialog.type_id,
             status_name or "",
             dialog.created_at.isoformat(),

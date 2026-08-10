@@ -94,7 +94,10 @@ class Client(Base):
     id = Column(Integer, primary_key=True)
     vk_user_id = Column(BigInteger, nullable=True)  # None для тестовых клиентов из чата
     vk_group_id = Column(Integer, ForeignKey("vk_groups.id"), nullable=True)
+    # Имя для обращения в диалоге. Фамилия держится отдельно намеренно: по
+    # фамилии обращаться нельзя, а в списке лидов нужно показывать обе.
     name = Column(String(255), nullable=True)
+    last_name = Column(String(255), nullable=True)
     source = Column(String(255), nullable=True)
     # Локальные маркетинговые теги клиента. Variant: в тестах на SQLite JSONB не рендерится.
     marketing_tags = Column(JSONB().with_variant(JSON(), "sqlite"), nullable=True)

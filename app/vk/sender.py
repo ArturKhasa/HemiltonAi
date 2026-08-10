@@ -234,13 +234,16 @@ async def send_message(
     return sent
 
 
-async def fetch_user_name(access_token: str, vk_user_id: int) -> str | None:
-    """Имя клиента из его профиля ВК.
+async def fetch_user_name(access_token: str, vk_user_id: int) -> tuple[str | None, str | None]:
+    """Имя и фамилия клиента из его профиля ВК.
 
     Раньше мы его не запрашивали вовсе: у всех 74 боевых клиентов в базе
     `clients.name` пуст. Обращаться было нечем, и модель звала клиента
     единственным именем, которое видела, — надписью, заказанной на изделие
     («Михаил» из надписи «Хананов Михаил» клиентке Анастасии, диалог 163).
+
+    Фамилия нужна списку лидов — там вместо неё стоял числовой VK ID. В самом
+    диалоге фамилия не используется: обращаться по ней нельзя.
 
     Ошибка ВК здесь не должна ронять ответ клиенту: без имени просто перейдём
     на «Вы».
@@ -248,15 +251,16 @@ async def fetch_user_name(access_token: str, vk_user_id: int) -> str | None:
     try:
         rows = await vk_api_call(
             access_token, "users.get",
-            {"user_ids": str(vk_user_id), "fields": "first_name"},
+            {"user_ids": str(vk_user_id), "fields": "first_name,last_name"},
         )
     except Exception as exc:
         logger.warning("users.get failed | vk_user_id=%s: %s", vk_user_id, exc)
-        return None
+        return None, None
     if not rows:
-        return None
-    name = (rows[0].get("first_name") or "").strip()
-    return name or None
+        return None, None
+    first = (rows[0].get("first_name") or "").strip()
+    last = (rows[0].get("last_name") or "").strip()
+    return first or None, last or None
 
 
 async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> SentMessage:

@@ -184,12 +184,16 @@ async def _fill_client_name(db: AsyncSession, group: VkGroup, client: Client) ->
         return
     from app.vk.sender import fetch_user_name
 
-    name = await fetch_user_name(group.access_token, client.vk_user_id)
-    if not name:
+    name, last_name = await fetch_user_name(group.access_token, client.vk_user_id)
+    if not name and not last_name:
         return
     client.name = name
+    client.last_name = last_name
     await db.flush()
-    logger.info("[vk=%s/%s] имя клиента из ВК: %r", group.group_id, client.vk_user_id, name)
+    logger.info(
+        "[vk=%s/%s] имя клиента из ВК: %r %r",
+        group.group_id, client.vk_user_id, name, last_name,
+    )
 
 
 async def _get_or_create_client(

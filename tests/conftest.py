@@ -28,7 +28,7 @@ def no_vk_profile_lookup(monkeypatch):
     Тест самого запроса подменяет vk_api_call и зовёт fetch_user_name напрямую.
     """
     async def _no_name(access_token, vk_user_id):
-        return None
+        return None, None
 
     monkeypatch.setattr("app.vk.sender.fetch_user_name", _no_name)
 

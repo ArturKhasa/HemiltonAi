@@ -77,8 +77,8 @@
             activeDialogId === d.id ? 'bg-brand-50 border-l-2 border-l-brand-500' : ''
           ]"
         >
-          <p class="text-sm font-medium text-gray-800 truncate pr-6">{{ d.vk_user_id }}</p>
-          <p v-if="d.client_name && String(d.client_name) !== String(d.vk_user_id)" class="text-xs text-gray-500 truncate">{{ d.client_name }}</p>
+          <p class="text-sm font-medium text-gray-800 truncate pr-6">{{ leadTitle(d) }}</p>
+          <p v-if="fullName(d)" class="text-xs text-gray-400 truncate">ID {{ d.vk_user_id }}</p>
           <div class="flex items-center gap-1.5 mt-0.5 flex-wrap">
             <p class="text-xs text-gray-400">{{ formatDate(d.last_message_at || d.created_at) }}</p>
             <span :class="[
@@ -121,8 +121,16 @@
         <!-- Header -->
         <div class="bg-white border-b px-6 py-3 flex items-center gap-3">
           <div>
-            <p class="font-medium text-gray-800">VK ID: {{ activeDialog?.vk_user_id ?? '—' }}</p>
-            <p v-if="activeDialog?.client_name && String(activeDialog?.client_name) !== String(activeDialog?.vk_user_id)" class="text-xs text-gray-500">{{ activeDialog?.client_name }}</p>
+            <p class="font-medium text-gray-800">
+              <a
+                v-if="activeDialog?.vk_user_id"
+                :href="`https://vk.com/id${activeDialog.vk_user_id}`"
+                target="_blank" rel="noopener"
+                class="hover:underline"
+              >{{ leadTitle(activeDialog) }}</a>
+              <template v-else>{{ leadTitle(activeDialog) }}</template>
+            </p>
+            <p v-if="fullName(activeDialog)" class="text-xs text-gray-400">VK ID: {{ activeDialog?.vk_user_id ?? '—' }}</p>
           </div>
           <div class="flex items-center gap-2 ml-4">
             <span class="text-xs text-gray-500">Статус:</span>
@@ -1669,6 +1677,22 @@ async function sendMessage() {
     sending.value = false
     await scrollBottom()
   }
+}
+
+// Имя и фамилия клиента из профиля ВК. В списке лидов первой строкой стоял
+// числовой VK ID, а имя пряталось строкой ниже: «имя фамилия надо вывести в
+// лидах вместо айди» (ОП, 10 августа, 16:16). ID остаётся второй строкой — по
+// нему ищут диалог в фильтрах.
+function fullName(d) {
+  if (!d) return ''
+  const parts = [d.client_name, d.client_last_name].filter(Boolean).map(String)
+  // У тестовых чатов в имя кладут сам VK ID — тогда это не имя.
+  if (parts.length === 1 && parts[0] === String(d.vk_user_id)) return ''
+  return parts.join(' ').trim()
+}
+
+function leadTitle(d) {
+  return fullName(d) || (d?.vk_user_id ? String(d.vk_user_id) : '—')
 }
 
 const paymentConfirmed = ref(false)
