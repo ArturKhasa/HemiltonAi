@@ -2,9 +2,9 @@ name: CI/CD
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main]
   push:
-    branches: [master]
+    branches: [main]
 
 # Prevent two deployments from rebuilding the same working tree concurrently.
 concurrency:
