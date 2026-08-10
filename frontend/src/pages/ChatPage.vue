@@ -344,10 +344,24 @@
                нельзя вовсе («только просмотр»), и диалог с меткой «Нужен куратор»
                оставалось разве что смотреть. Отправка забирает диалог у ИИ. -->
           <template v-if="activeDialog?.is_test === false">
-            <div class="flex items-center gap-2 mb-2 text-xs text-gray-500">
+            <div class="flex items-center gap-2 mb-2 text-xs text-gray-500 flex-wrap">
               <span>✍️ Ответ от лица менеджера уйдёт клиенту в ВК.</span>
               <span v-if="!aiPaused" class="text-amber-600">ИИ встанет на паузу, пинги остановятся.</span>
               <span v-else class="text-gray-400">ИИ уже на паузе.</span>
+              <button
+                type="button"
+                :disabled="confirmingPayment"
+                @click="togglePaymentConfirmed"
+                class="ml-auto px-2 py-1 rounded-lg border text-xs"
+                :class="paymentConfirmed
+                  ? 'border-green-300 text-green-700 bg-green-50'
+                  : 'border-gray-300 text-gray-600 hover:bg-gray-50'"
+                :title="paymentConfirmed
+                  ? 'Оплата подтверждена: ИИ может вести шаги после оплаты'
+                  : 'Отметить, что предоплата получена'"
+              >
+                {{ paymentConfirmed ? '💰 Оплата подтверждена' : 'Подтвердить оплату' }}
+              </button>
             </div>
             <form @submit.prevent="sendAsManager" class="flex gap-3">
               <textarea
@@ -1512,6 +1526,7 @@ async function openDialog(id) {
     pingState.value = dRes.data.ping_state
     aiPaused.value = dRes.data.ai_paused ?? false
     vkBlocked.value = dRes.data.vk_blocked ?? false
+    paymentConfirmed.value = Boolean(dRes.data.payment_confirmed_at)
   } catch {}
 }
 
@@ -1653,6 +1668,26 @@ async function sendMessage() {
   } finally {
     sending.value = false
     await scrollBottom()
+  }
+}
+
+const paymentConfirmed = ref(false)
+const confirmingPayment = ref(false)
+
+async function togglePaymentConfirmed() {
+  // Платёжной интеграции нет — счёт выставляет человек, значит и подтвердить
+  // оплату может только он. До отметки ИИ не видит шагов «после оплаты».
+  const dialogId = activeDialogId.value
+  confirmingPayment.value = true
+  try {
+    const res = await api.post(`/dialogs/${dialogId}/payment-confirmed`, {
+      confirmed: !paymentConfirmed.value,
+    })
+    paymentConfirmed.value = Boolean(res.data.payment_confirmed_at)
+  } catch (e) {
+    managerError.value = e.response?.data?.detail || e.message
+  } finally {
+    confirmingPayment.value = false
   }
 }
 

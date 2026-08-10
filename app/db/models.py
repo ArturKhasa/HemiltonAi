@@ -125,6 +125,10 @@ class Dialog(Base):
     # число, иначе правка прайса поднимает цену человеку, с которым уже
     # договорились (см. миграцию 045).
     quoted_prices = Column(JSONB().with_variant(JSON(), "sqlite"), nullable=True)
+    # Момент, когда оплату подтвердил человек. До него шаги «после оплаты»
+    # (благодарность за заказ, адрес ПВЗ, статус «Заказ оформлен») запрещены:
+    # ИИ проходил их сам, не получив ни рубля (миграция 047).
+    payment_confirmed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=msk_now)
     updated_at = Column(DateTime, default=msk_now, onupdate=msk_now)
     last_message_at = Column(DateTime, nullable=True)
@@ -228,7 +232,12 @@ class Product(Base):
     id = Column(Integer, primary_key=True)
     type_id = Column(Integer, ForeignKey("dialog_types.id"), nullable=True, server_default="1")
     name = Column(String(255), nullable=False)
+    # Лестница уступок сверху вниз: «Цена» → «Цена со скидкой» → «Минимальная».
+    # Клиенту первой называют price; ниже спускаются по одной ступени за раз и
+    # только на повторное возражение (см. app.sales.price_placeholder).
     price = Column(Numeric(10, 2), nullable=True)
+    # Средняя ступень. Необязательна: не заполнена — лестница двухступенчатая.
+    discount_price = Column(Numeric(10, 2), nullable=True)
     min_price = Column(Numeric(10, 2), nullable=True)
     size_chart = Column(String(255), nullable=True)
     photo_url = Column(Text, nullable=True)
@@ -250,6 +259,9 @@ class Script(Base):
     follow_up_script_id = Column(
         Integer, ForeignKey("scripts.id", ondelete="SET NULL"), nullable=True
     )
+    # Скрипт отправляет только человек: ИИ его не видит и предложить не может.
+    # «Ваш макет готов!» уходил от ИИ, хотя макета не существовало (миграция 047).
+    manual_only = Column(Boolean, default=False, nullable=False, server_default="false")
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=msk_now)
     updated_at = Column(DateTime, default=msk_now, onupdate=msk_now)

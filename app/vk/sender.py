@@ -234,6 +234,31 @@ async def send_message(
     return sent
 
 
+async def fetch_user_name(access_token: str, vk_user_id: int) -> str | None:
+    """Имя клиента из его профиля ВК.
+
+    Раньше мы его не запрашивали вовсе: у всех 74 боевых клиентов в базе
+    `clients.name` пуст. Обращаться было нечем, и модель звала клиента
+    единственным именем, которое видела, — надписью, заказанной на изделие
+    («Михаил» из надписи «Хананов Михаил» клиентке Анастасии, диалог 163).
+
+    Ошибка ВК здесь не должна ронять ответ клиенту: без имени просто перейдём
+    на «Вы».
+    """
+    try:
+        rows = await vk_api_call(
+            access_token, "users.get",
+            {"user_ids": str(vk_user_id), "fields": "first_name"},
+        )
+    except Exception as exc:
+        logger.warning("users.get failed | vk_user_id=%s: %s", vk_user_id, exc)
+        return None
+    if not rows:
+        return None
+    name = (rows[0].get("first_name") or "").strip()
+    return name or None
+
+
 async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> SentMessage:
     """Отправка в диалог: находит клиента и его группу, шлёт от её имени.
 

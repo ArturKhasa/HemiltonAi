@@ -16,6 +16,7 @@ from app.logging_context import current_dialog_type
 from app.sales.order_slots import collect_slots
 from app.utils.media import carry_over_attachments
 from app.utils.time import msk_now
+from app.ai.triggers import CURATOR_STATUS_NAME
 from app.utils.text import normalize_dashes, strip_foreign_name
 from app.vk.outgoing import delivered_only, mark_delivered, was_delivered
 from app.vk.sender import VkMessagesForbiddenError, send_to_dialog
@@ -340,6 +341,23 @@ async def _send_ping(
     return True
 
 
+# Стадии, на которых лид уже горячий: назвал контакты, выбрал оплату, ждёт счёт
+# или макет. Автопинг здесь только мешает — дальше ведёт человек.
+HOT_STAGES = frozenset({"checkout", "payment_link", "post_payment"})
+
+
+async def _escalate(db: AsyncSession, dialog: Dialog, reason: str) -> None:
+    """Поставить диалогу «Нужен куратор» и позвать менеджера."""
+    status = await db.scalar(
+        select(DialogStatusConfig).where(DialogStatusConfig.name == CURATOR_STATUS_NAME)
+    )
+    if status:
+        dialog.current_status_id = status.id
+    logger.info("ping: диалог %s передан менеджеру — %s", dialog.id, reason)
+    from app.notify import notify_curator
+    await notify_curator(dialog.id, reason)
+
+
 async def _process_state(db: AsyncSession, state: DialogPingState, now) -> None:
     dialog = await db.get(Dialog, state.dialog_id)
 
@@ -350,6 +368,17 @@ async def _process_state(db: AsyncSession, state: DialogPingState, now) -> None:
             "ping: %s, stopping | dialog=%s",
             "ai paused" if dialog.ai_paused else "vk blocked", state.dialog_id,
         )
+        await db.commit()
+        return
+
+    # Клиент уже выбрал способ оплаты или дал контакты — общий пинг тут вредит.
+    # Диалог 150: в 09:59 у клиента запросили ФИО, в 10:15 пинг спросил «что для
+    # Вас важнее - качество или цена?» и отбросил его назад. ОП, 14:12: «должен
+    # подключаться менеджер и пинговать клиента индивидуально. Не общими, как бот».
+    if dialog and dialog.funnel_stage in HOT_STAGES:
+        state.is_completed = True
+        dialog.ai_paused = True
+        await _escalate(db, dialog, f"горячая стадия «{dialog.funnel_stage}», клиент молчит")
         await db.commit()
         return
 

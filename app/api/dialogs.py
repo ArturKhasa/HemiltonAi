@@ -43,6 +43,7 @@ class DialogOut(BaseModel):
     is_test: bool
     ai_paused: bool = False
     vk_blocked: bool = False
+    payment_confirmed_at: datetime | None = None
     created_at: datetime
     last_message_at: datetime | None
     ping_state: PingStateOut | None = None
@@ -63,6 +64,10 @@ class MessageOut(BaseModel):
 class StatusChangeRequest(BaseModel):
     new_status: str
     reason: str | None = None
+
+
+class PaymentConfirmRequest(BaseModel):
+    confirmed: bool = True
 
 
 class AiPauseRequest(BaseModel):
@@ -142,6 +147,7 @@ async def get_dialog(
         is_test=d.is_test,
         ai_paused=d.ai_paused,
         vk_blocked=d.vk_blocked,
+        payment_confirmed_at=d.payment_confirmed_at,
         created_at=d.created_at,
         last_message_at=d.last_message_at,
         ping_state=PingStateOut.model_validate(ping) if ping else None,
@@ -225,6 +231,35 @@ async def change_status(
     await db.commit()
     return {"ok": True, "new_status": new_status.name}
 
+
+
+@router.post("/{dialog_id}/payment-confirmed")
+async def confirm_payment(
+    dialog_id: int,
+    body: PaymentConfirmRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "curator")),
+):
+    """Отметить, что предоплата от клиента получена.
+
+    Платёжной интеграции нет, счёт выставляет человек — значит и подтвердить
+    оплату может только он. До этой отметки ИИ не видит шагов «после оплаты» и
+    не может поставить статус «Заказ оформлен»: раньше гейта не было вовсе, и он
+    благодарил за заказ и просил адрес ПВЗ у клиента, не заплатившего ни рубля
+    (ОП, 10 августа, 14:15: «Оплаты от клиента не было»).
+    """
+    dialog = await db.get(Dialog, dialog_id)
+    if not dialog:
+        raise HTTPException(status_code=404, detail="Dialog not found")
+    await ensure_type_access(current_user, dialog.type_id, db)
+    dialog.payment_confirmed_at = msk_now() if body.confirmed else None
+    dialog.updated_at = msk_now()
+    await db.commit()
+    logger.info(
+        "[dialog=%s] payment_confirmed=%s set by user=%s",
+        dialog_id, body.confirmed, current_user.id,
+    )
+    return {"ok": True, "payment_confirmed_at": dialog.payment_confirmed_at}
 
 
 @router.post("/{dialog_id}/ai-pause")

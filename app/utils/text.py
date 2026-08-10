@@ -142,7 +142,18 @@ _NOT_A_VOCATIVE = frozenset("""
     простите слушайте смотрите кстати итак значит окей ок верно точно ясно
     здравствуйте привет добрый доброе доброго ага угу ладно прекрасно замечательно
     жаль ну вот итого получается правильно согласна согласен рада благодарю
+    пожалуйста давайте договорились принято слышу разумеется безусловно здорово
 """.split())
+
+# Глагол в повелительном наклонении, а не имя: «Подскажите, пожалуйста, ФИО…»
+# начинается ровно так же, как обращение по имени, и без этой проверки скрипт
+# «5.1 Данные перед оформлением» терял первое слово. Русские имена на «-те» не
+# заканчиваются, так что признак надёжный и списка слов не требует.
+_IMPERATIVE_SUFFIXES = ("те", "ка")
+
+
+def _looks_like_a_verb(word: str) -> bool:
+    return word.lower().endswith(_IMPERATIVE_SUFFIXES)
 
 
 # Слово-обращение не в начале реплики, а в начале абзаца или предложения:
@@ -183,7 +194,7 @@ def strip_foreign_name(
 
 def _strip_leading_vocative(text: str, client_name: str | None) -> str:
     m = _LEADING_VOCATIVE_RE.match(text or "")
-    if not m or m.group(1).lower() in _NOT_A_VOCATIVE:
+    if not m or m.group(1).lower() in _NOT_A_VOCATIVE or _looks_like_a_verb(m.group(1)):
         return text
     known = usable_name(client_name)
     if known and m.group(1).lower() == known.lower():
@@ -194,21 +205,38 @@ def _strip_leading_vocative(text: str, client_name: str | None) -> str:
     return rest[:1].upper() + rest[1:]
 
 
+def _inscription_words(inscription: str | None) -> list[str]:
+    """Слова надписи, каждое из которых модель может принять за имя клиента.
+
+    Проверять надпись целиком мало: клиент заказал «Хананов Михаил», и реплика
+    ушла с обращением «Михаил, а цвет для свитшота какой выберем?» — а зовут
+    клиентку Анастасия (диалог 163, 14:09). Раньше проверка выходила на первом
+    же пробеле в надписи.
+
+    Короче трёх букв не берём: односложное «я» или «да» сняло бы половину
+    нормальных фраз.
+    """
+    raw = (inscription or "").strip()
+    if not raw:
+        return []
+    words = [w.strip(".,!?;:«»\"\'") for w in raw.split()]
+    return [w for w in words if len(w) >= 3]
+
+
 def _strip_inscription_vocative(
     text: str, client_name: str | None, inscription: str | None,
 ) -> str:
-    word = (inscription or "").strip().strip(".,!?;:«»\"'")
-    # Надпись из нескольких слов («Хемильтон 2026») обращением не станет, а
-    # односложное «я» или «да» сняло бы половину нормальных фраз.
-    if not text or len(word) < 3 or " " in word:
+    if not text:
         return text
     known = usable_name(client_name)
-    # Клиент заказал кофту со своим же именем — обращение настоящее.
-    if known and word.lower() == known.lower():
-        return text
-    return _inscription_vocative_re(word).sub(
-        lambda m: m.group(1) + m.group(2).upper(), text,
-    )
+    for word in _inscription_words(inscription):
+        # Клиент заказал кофту со своим же именем — обращение настоящее.
+        if known and word.lower() == known.lower():
+            continue
+        text = _inscription_vocative_re(word).sub(
+            lambda m: m.group(1) + m.group(2).upper(), text,
+        )
+    return text
 
 
 # Отработка возражений в скриптах почти вся открывается словом «Понимаю», и

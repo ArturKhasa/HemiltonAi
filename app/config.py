@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     # сам, ничего больше менять не нужно.
     PAYMENT_LINK_URL: str = ""
 
+    # Уведомления менеджерам об эскалации (см. app.notify). Пусто — не шлём.
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_ALERT_CHAT_ID: str = ""
+    # Адрес панели снаружи: из него собирается ссылка на диалог в уведомлении.
+    PANEL_PUBLIC_URL: str = ""
+
     ALLOWED_ORIGINS: str = "*"
 
     # Версия VK API для messages.send и прочих вызовов. Токены групп живут в БД
