@@ -34,9 +34,22 @@ class TestFormat:
 
 
 class TestRender:
-    async def test_promo_price_used(self, db, products):
+    async def test_first_offer_is_the_matrix_price(self, db, products):
+        """«[цена:]» — колонка «Цена»: её называют клиенту первой. Минимальную
+        ИИ предлагал сразу вместо неё, и заказ уходил на 1 000 ₽ дешевле, чем
+        задумано (замечание ОП от 7 августа)."""
         got = await render_price_placeholders(db, "Стоимость — [цена:свитшот].", type_id=1)
-        assert got == "Стоимость — 4\u00a0990\u00a0₽."
+        assert got == "Стоимость — 5\u00a0990\u00a0₽."
+
+    async def test_minimal_price_is_a_separate_macro(self, db, products):
+        """Предел уступки — только для отработки «дорого»."""
+        got = await render_price_placeholders(db, "могу [минимальная-цена:свитшот]", type_id=1)
+        assert got == "могу 4\u00a0990\u00a0₽"
+
+    async def test_minimal_falls_back_to_the_price(self, db, products):
+        """У футболки минимальной нет — берём обычную, а не молчим."""
+        got = await render_price_placeholders(db, "[минимальная-цена:футболка]", type_id=1)
+        assert got == "2\u00a0990\u00a0₽"
 
     async def test_falls_back_to_base_price(self, db, products):
         """Акционной нет — берём обычную, а не молчим."""
@@ -53,13 +66,13 @@ class TestRender:
 
     async def test_several_placeholders(self, db, products):
         got = await render_price_placeholders(db, "[цена:свитшот] и [цена:футболка]", type_id=1)
-        assert got == "4\u00a0990\u00a0₽ и 2\u00a0990\u00a0₽"
+        assert got == "5\u00a0990\u00a0₽ и 2\u00a0990\u00a0₽"
 
-    async def test_price_before_discount(self, db, products):
-        """«вместо N рублей» — обычная цена из матрицы, не акционная."""
+    async def test_legacy_macro_is_the_same_matrix_price(self, db, products):
+        """«[цена-до-скидки:]» осталась в первых скриптах — это та же «Цена»."""
         got = await render_price_placeholders(
-            db, "[цена:свитшот] вместо [цена-до-скидки:свитшот]", type_id=1)
-        assert got == "4 990 ₽ вместо 5 990 ₽"
+            db, "[цена-до-скидки:свитшот] и [цена:свитшот]", type_id=1)
+        assert got == "5 990 ₽ и 5 990 ₽"
 
 
 class TestPaymentLink:
@@ -139,7 +152,7 @@ class TestPlaceholderTakesTheExactProduct:
         await db.commit()
 
         got = await render_price_placeholders(
-            db, "скидочка - [цена:Доп. принт] вместо [цена-до-скидки:Доп. принт]", type_id=1,
+            db, "скидочка - [минимальная-цена:Доп. принт] вместо [цена:Доп. принт]", type_id=1,
         )
         # format_price ставит неразрывные пробелы, чтобы сумма не рвалась переносом.
         assert got == "скидочка - 890\u00a0₽ вместо 1\u00a0190\u00a0₽"

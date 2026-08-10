@@ -1,4 +1,4 @@
-"""Плейсхолдер цены в текстах скриптов: «[цена:свитшот]» → «4 990 ₽».
+"""Плейсхолдер цены в текстах скриптов: «[цена:свитшот]» → «5 990 ₽».
 
 Скрипты, отправляемые связкой (follow_up_script_id), уходят клиенту дословно —
 модель их не переписывает, и это ровно то, что нужно для расчёта сразу после
@@ -19,10 +19,16 @@ from app.sales.products import ProductService
 
 logger = logging.getLogger(__name__)
 
-# «[цена:свитшот]» — акционная (то, что клиент платит сегодня),
-# «[цена-до-скидки:свитшот]» — обычная, та самая «вместо N рублей».
+# «[цена:свитшот]» — колонка «Цена» матрицы: её называем клиенту ПЕРВОЙ.
+# «[минимальная-цена:свитшот]» — колонка «Минимальная цена»: предел уступки,
+# уместен только в отработке возражения. ОП: «4990 это минимальная цена, ии её
+# предложила сразу, не в качестве скидки. Сразу нужно предлагать 5990, а далее
+# если лид возражает — можно 4990» (7 августа).
+#
+# «[цена-до-скидки:...]» остаётся синонимом «[цена:...]»: так писались первые
+# скрипты, и менять их все разом ради одного слова незачем.
 _PRICE_PLACEHOLDER_RE = re.compile(
-    r"\[цена(-до-скидки)?:([^\]]+)\]", re.IGNORECASE
+    r"\[(минимальная-цена|цена-до-скидки|цена):([^\]]+)\]", re.IGNORECASE
 )
 
 # «[ссылка-оплаты]» — счёт клиенту. Пока платёжной интеграции нет, подставляется
@@ -87,7 +93,7 @@ async def render_price_placeholders(
     svc = ProductService(db)
     result = text
     for m in matches:
-        before_discount = bool(m.group(1))
+        minimal = m.group(1).lower() == "минимальная-цена"
         query = m.group(2).strip()
         # limit=1 нельзя: LIMIT отсекает строки в SQL, до сортировки «точное
         # название вперёд» (см. ProductService.search), и «[цена:Доп. принт]»
@@ -96,7 +102,7 @@ async def render_price_placeholders(
         price = None
         if products:
             p = products[0]
-            price = p.price if before_discount else (p.min_price if p.min_price is not None else p.price)
+            price = (p.min_price if p.min_price is not None else p.price) if minimal else p.price
         if price is None:
             logger.warning("price placeholder %r: товар не найден, убираю плейсхолдер", query)
             result = result.replace(m.group(0), query)
