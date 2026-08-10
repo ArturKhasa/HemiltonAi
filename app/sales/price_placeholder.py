@@ -20,15 +20,20 @@ from app.sales.products import ProductService
 logger = logging.getLogger(__name__)
 
 # «[цена:свитшот]» — колонка «Цена» матрицы: её называем клиенту ПЕРВОЙ.
-# «[минимальная-цена:свитшот]» — колонка «Минимальная цена»: предел уступки,
-# уместен только в отработке возражения. ОП: «4990 это минимальная цена, ии её
-# предложила сразу, не в качестве скидки. Сразу нужно предлагать 5990, а далее
-# если лид возражает — можно 4990» (7 августа).
 #
-# «[цена-до-скидки:...]» остаётся синонимом «[цена:...]»: так писались первые
-# скрипты, и менять их все разом ради одного слова незачем.
+# «[минимальная-цена:свитшот]» — СЛЕДУЮЩАЯ УСТУПКА, а не сразу дно. ОП (10
+# августа, 16:28): «Изначально предлагаем за 5990 (вместо 7990). Если есть
+# возражение дорого: 1. Сначала попытка отработать без скидки, объяснить ценность
+# за 5990. 2. Если реакции нет или она негативная — предлагаем по скидке за 5490.
+# 3. Если реакция снова негативная, можно предложить за 4990». Плейсхолдер
+# спускает ровно на одну ступень от той цены, которую клиент уже слышал, поэтому
+# один и тот же скрипт отработки годится и для второго шага, и для третьего.
+#
+# «[цена-со-скидкой:свитшот]» — явно средняя ступень, если скрипт написан именно
+# под неё. «[цена-до-скидки:...]» остаётся синонимом «[цена:...]»: так писались
+# первые скрипты, и менять их все разом ради одного слова незачем.
 _PRICE_PLACEHOLDER_RE = re.compile(
-    r"\[(минимальная-цена|цена-до-скидки|цена):([^\]]+)\]", re.IGNORECASE
+    r"\[(минимальная-цена|цена-со-скидкой|цена-до-скидки|цена):([^\]]+)\]", re.IGNORECASE
 )
 
 # «[ссылка-оплаты]» — счёт клиенту. Пока платёжной интеграции нет, подставляется
@@ -77,6 +82,43 @@ def _strip_payment_sentence(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
+def price_ladder(product) -> list[int]:
+    """Ступени уступки сверху вниз: «Цена» → «Цена со скидкой» → «Минимальная».
+
+    Незаполненные и не понижающие колонки выбрасываем: у большинства товаров
+    средней ступени нет, и лестница остаётся двухступенчатой, как была.
+    """
+    rungs: list[int] = []
+    for value in (
+        getattr(product, "price", None),
+        getattr(product, "discount_price", None),
+        getattr(product, "min_price", None),
+    ):
+        if value is None:
+            continue
+        step = int(value)
+        if not rungs or step < rungs[-1]:
+            rungs.append(step)
+    return rungs
+
+
+def _next_concession(rungs: list[int], already_quoted: int | None) -> int | None:
+    """Ступень ниже той, что клиент уже слышал.
+
+    Скидочный скрипт прыгал с 5 990 ₽ сразу на 4 990 ₽, потому что подставлял
+    нижнюю границу. Теперь спуск идёт по одной ступени за возражение, а на дне
+    лестницы остаётся дно — ниже уступать нечем.
+    """
+    if not rungs:
+        return None
+    if already_quoted is None:
+        # Цену ещё не называли, а скрипт уже уступает. Такого в регламенте нет,
+        # но если случилось — отдаём вторую ступень, а не дно.
+        return rungs[1] if len(rungs) > 1 else rungs[0]
+    lower = [r for r in rungs if r < already_quoted]
+    return lower[0] if lower else min(rungs[-1], already_quoted)
+
+
 def _pin_price(dialog, product_name: str, price):
     """Цена этого товара для этого диалога: уже названная либо новая.
 
@@ -88,7 +130,7 @@ def _pin_price(dialog, product_name: str, price):
     Понизить можно — это уступка при возражении, ради неё существует
     «[минимальная-цена:]». Поднять нельзя ни при каких условиях.
     """
-    if dialog is None or not product_name:
+    if price is None or dialog is None or not product_name:
         return price
     pinned = (dialog.quoted_prices or {}).get(product_name)
     value = int(price)
@@ -125,7 +167,7 @@ async def render_price_placeholders(
     svc = ProductService(db)
     result = text
     for m in matches:
-        minimal = m.group(1).lower() == "минимальная-цена"
+        macro = m.group(1).lower()
         query = m.group(2).strip()
         # limit=1 нельзя: LIMIT отсекает строки в SQL, до сортировки «точное
         # название вперёд» (см. ProductService.search), и «[цена:Доп. принт]»
@@ -134,7 +176,14 @@ async def render_price_placeholders(
         price = None
         if products:
             p = products[0]
-            price = (p.min_price if p.min_price is not None else p.price) if minimal else p.price
+            rungs = price_ladder(p)
+            if macro == "минимальная-цена":
+                quoted = (getattr(dialog, "quoted_prices", None) or {}).get(p.name)
+                price = _next_concession(rungs, int(quoted) if quoted is not None else None)
+            elif macro == "цена-со-скидкой":
+                price = rungs[1] if len(rungs) > 1 else (rungs[0] if rungs else None)
+            else:
+                price = rungs[0] if rungs else None
             price = _pin_price(dialog, p.name, price)
         if price is None:
             logger.warning("price placeholder %r: товар не найден, убираю плейсхолдер", query)

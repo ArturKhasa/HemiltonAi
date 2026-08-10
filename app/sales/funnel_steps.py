@@ -54,6 +54,12 @@ _DESIGN_FIXED_CONDITION_RE = re.compile(
 # «5. Оформление» — сумма заказа и способы оплаты.
 _CHECKOUT_CONDITION_RE = re.compile(r"5\.\s*Оформление", re.I)
 
+# «2.2 Стоимость» — первый прайс. Второй раз его слать незачем: клиент цену уже
+# видел, а на возражение отвечают отдельные скрипты отработки. В диалоге 156
+# прайс ушёл трижды — в 12:32, 14:29 и 14:32 (замечание ОП от 10 августа, 13:53:
+# «Опять отправили цену»).
+_PRICE_CONDITION_RE = re.compile(r"2\.2\s*Стоимость", re.I)
+
 # «4.1 Согласовываем дизайн» — сверка раскладки нанесений перед фиксацией.
 # В выгрузке ОП условие записано с опечаткой («Предвратильно»), поэтому ловим
 # только по «согласовываем дизайн».
@@ -167,6 +173,36 @@ _CONFIRMS_RE = re.compile(
 _REFUSAL_WITH_CHOICE_RE = re.compile(r"вс[юей]\w*\s+сумм|частями|500|бронь", re.I)
 
 
+# Клиент просит переделать дизайн. Это не согласие и не отказ — это незакрытый
+# шаг: пока правка не внесена и не подтверждена, воронку двигать нельзя.
+#
+# Модель читала такую реплику как подтверждение: на «Изменить дизайн» она выбрала
+# скрипт «Зафиксировали дизайн» и следом отправила сумму заказа (диалог 163,
+# 14:14). ОП, 13:51: «По цене не было возражений, клиенту было важно глянуть
+# именно макет с внесёнными правками».
+_DESIGN_EDIT_RE = re.compile(
+    r"\bизменить\b|\bизмени|\bпоменя|\bпеределать\b|\bпеределай|\bисправ|"
+    r"\bубрать\b|\bубери|\bдобав(?:ить|ь|ьте)\b|\bне так\b|\bне то\b|"
+    r"\bзачем\b.{0,20}\bставить\b|\bправк",
+    re.I,
+)
+
+# «Изменить размер», «поменять цвет» — обычный шаг воронки, а не правка макета.
+_DESIGN_WORDS_RE = re.compile(
+    r"дизайн|макет|надпис|букв|герб|флаг|принт|вышив|"
+    r"спереди|сзади|взади|сверху|снизу|на\s+груди|на\s+спине|на\s+рукав",
+    re.I,
+)
+
+
+def client_wants_design_edit(client_text: str) -> bool:
+    """Клиент просит поменять дизайн — шаг не закрыт, дальше идти нельзя."""
+    text = (client_text or "").replace("ё", "е")
+    if not _DESIGN_EDIT_RE.search(text):
+        return False
+    return bool(_DESIGN_WORDS_RE.search(text))
+
+
 def client_refused(client_text: str) -> bool:
     """Клиент отказывается — воронку двигать нельзя.
 
@@ -262,6 +298,68 @@ async def funnel_advancing_script_ids(db: AsyncSession, type_id: int | None) -> 
 
 async def find_design_fixed_script(db: AsyncSession, type_id: int | None) -> Script | None:
     return await _pick(db, type_id, _DESIGN_FIXED_CONDITION_RE)
+
+
+# Сколько последних наших сообщений считаем «только что спрошенным». Регламент
+# требует дождаться ответа на вопрос, прежде чем задавать следующий, — но не
+# запрещает переспросить, если клиент молчит несколько ходов подряд.
+_RECENT_ASK_LOOKBACK = 2
+
+
+async def scripts_repeating_recent_question(
+    db: AsyncSession, dialog_id: int, type_id: int | None,
+) -> set[int]:
+    """Скрипты, которые спрашивают то же, что мы уже спросили в последних репликах.
+
+    Исключение недавних скриптов работало по id, а модель пишет тот же вопрос и
+    своими словами: в диалоге 163 она сама попросила «ФИО и телефон получателя»
+    (14:15), source_script_id остался пустым, и на следующем ходу штатно выбрался
+    скрипт 381 с тем же вопросом (14:16). Сравниваем не id, а о чём вопрос.
+    """
+    recent = await _recent_outgoing_texts(db, dialog_id, _RECENT_ASK_LOOKBACK)
+    asked = {slot for slot in (asked_slot(t) for t in recent) if slot}
+    if not asked:
+        return set()
+
+    q = select(Script).where(Script.is_active == True)
+    if type_id is not None:
+        q = q.where(Script.type_id == type_id)
+    rows = (await db.execute(q)).scalars().all()
+    return {s.id for s in rows if asked_slot(s.phrase_text or "") in asked}
+
+
+async def _recent_outgoing_texts(db: AsyncSession, dialog_id: int, limit: int) -> list[str]:
+    """Последние доставленные исходящие, свежие первыми."""
+    rows = await db.execute(
+        select(Message)
+        .where(
+            Message.dialog_id == dialog_id,
+            Message.role.in_((MessageRole.ai, MessageRole.curator)),
+        )
+        .order_by(Message.id.desc())
+        .limit(limit + _OUTGOING_LOOKBACK)
+    )
+    return [m.text for m in rows.scalars().all() if was_delivered(m)][:limit]
+
+
+# Скидочные скрипты узнаём по макросу уступки в тексте: любой из них называет
+# клиенту цену ниже текущей.
+_CONCESSION_MACRO_RE = re.compile(r"\[(?:минимальная-цена|цена-со-скидкой):", re.I)
+
+
+async def discount_script_ids(db: AsyncSession, type_id: int | None) -> set[int]:
+    """Скрипты, которые дают скидку. Показывать их модели можно только после
+    повторного ценового возражения (см. app.sales.price_objection)."""
+    q = select(Script).where(Script.is_active == True)
+    if type_id is not None:
+        q = q.where(Script.type_id == type_id)
+    rows = (await db.execute(q)).scalars().all()
+    return {s.id for s in rows if _CONCESSION_MACRO_RE.search(s.phrase_text or "")}
+
+
+async def find_price_script(db: AsyncSession, type_id: int | None) -> Script | None:
+    """«2.2 Стоимость» — первый прайс, повторно не отправляется."""
+    return await _pick(db, type_id, _PRICE_CONDITION_RE)
 
 
 async def find_checkout_script(db: AsyncSession, type_id: int | None) -> Script | None:

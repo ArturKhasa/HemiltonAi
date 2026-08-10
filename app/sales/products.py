@@ -122,11 +122,11 @@ class ProductService(object):
 
     async def create(
         self, name: str, price=None, min_price=None, size_chart: str | None = None,
-        photo_url: str | None = None, type_id: int | None = None,
+        photo_url: str | None = None, type_id: int | None = None, discount_price=None,
     ) -> Product:
         product = Product(
-            name=name, price=price, min_price=min_price, size_chart=size_chart,
-            photo_url=photo_url, type_id=type_id,
+            name=name, price=price, discount_price=discount_price, min_price=min_price,
+            size_chart=size_chart, photo_url=photo_url, type_id=type_id,
         )
         self.db.add(product)
         await self.db.flush()

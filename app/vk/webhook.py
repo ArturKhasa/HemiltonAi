@@ -27,6 +27,10 @@ INITIAL_STATUS_NAME = "Поинтересовался"
 # Пауза между репликами одного хода (связка скриптов, см. ReplyPart).
 FOLLOW_UP_DELAY_SECONDS = 2.0
 
+# Сколько ждём, не допишет ли клиент. Рост и вес, имя и фамилию, город и цвет он
+# нередко шлёт двумя сообщениями подряд с интервалом в секунды.
+CLIENT_TYPING_GRACE_SECONDS = 3.0
+
 
 @dataclass
 class VkIncomingMessage:
@@ -174,6 +178,24 @@ async def _resolve_dialog_type(db: AsyncSession, group: VkGroup) -> tuple[int | 
     return None, "default"
 
 
+async def _fill_client_name(db: AsyncSession, group: VkGroup, client: Client) -> None:
+    """Подтянуть имя клиента из его профиля ВК. Не вышло — работаем на «Вы»."""
+    if client.name or not group.access_token:
+        return
+    from app.vk.sender import fetch_user_name
+
+    name, last_name = await fetch_user_name(group.access_token, client.vk_user_id)
+    if not name and not last_name:
+        return
+    client.name = name
+    client.last_name = last_name
+    await db.flush()
+    logger.info(
+        "[vk=%s/%s] имя клиента из ВК: %r %r",
+        group.group_id, client.vk_user_id, name, last_name,
+    )
+
+
 async def _get_or_create_client(
     db: AsyncSession, group: VkGroup, vk_user_id: int, ref: str | None = None,
 ) -> Client:
@@ -197,6 +219,11 @@ async def _get_or_create_client(
         await db.flush()
         if ref:
             logger.info("[vk=%s/%s] client tagged by ref=%r", group.group_id, vk_user_id, ref)
+        # Имя тянем ровно один раз — при первом появлении клиента. Без него
+        # обращаться не к кому, и модель зовёт клиента надписью с изделия
+        # (см. app.vk.sender.fetch_user_name). Уже заведённым клиентам имена
+        # проставляет разовая команда app.commands.backfill_client_names.
+        await _fill_client_name(db, group, client)
     elif ref and not client.marketing_tags:
         # Клиент уже заведён, но без тега (пришёл до подключения ref-ссылок либо
         # первое сообщение потерялось) — проставляем задним числом.
@@ -317,6 +344,17 @@ async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMe
         if dialog.ai_paused:
             logger.info("[%s] ai paused (operator took over) — message saved, no AI run", ctx)
             return
+
+        # Клиент часто дробит ответ: «1.80», следом «64». Прогон стартовал по
+        # первому сообщению, второе пришло, пока он шёл, — и клиенту прилетело
+        # «Какой у Вас вес?» на вес, который он только что назвал (диалог 150,
+        # 09:57). Ждём короткую паузу и уступаем ход последнему сообщению: оно
+        # запустит свой прогон и увидит обе реплики сразу.
+        await asyncio.sleep(CLIENT_TYPING_GRACE_SECONDS)
+        await db.refresh(dialog)
+        if dialog.ai_paused:
+            logger.info("[%s] ai paused during grace period — no AI run", ctx)
+            return
         if await superseded_by_newer_message(db, dialog.id, client_message.id):
             logger.info("[%s] newer client message arrived — this turn yields", ctx)
             return
@@ -328,8 +366,21 @@ async def _reply_with_ai(
     db: AsyncSession, dialog: Dialog, client_message: Message, ctx: str,
 ) -> None:
     """Прогон модели и отправка всех реплик хода. Вызывается под блокировкой диалога."""
+    from app.ai.dialog_lock import superseded_by_newer_message
     from app.ai.runner import run_ai
     output, ai_run, parts = await run_ai(db, dialog, client_message)
+
+    # Прогон идёт десятки секунд, и за это время клиент успевает дописать. Ответ
+    # на устаревшую реплику отправлять нельзя: он переспросит то, что клиент уже
+    # сказал. Реплики помечаем недоставленными — в историю модели они не пойдут,
+    # а свежее сообщение запустит свой прогон и ответит на всё сразу.
+    if await superseded_by_newer_message(db, dialog.id, client_message.id):
+        logger.info("[%s] клиент дописал, пока шёл прогон — ответ не отправляем", ctx)
+        from app.vk.outgoing import mark_failed
+        for part in parts:
+            mark_failed(part.message)
+        await db.commit()
+        return
 
     if output.need_curator:
         # Пауза диалога проставлена в run_ai — здесь только придерживаем ответ.

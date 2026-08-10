@@ -21,6 +21,29 @@ def _use_unicode_lower(engine) -> None:
         dbapi_connection.create_function("lower", 1, str.lower)
 
 
+@pytest.fixture(autouse=True)
+def no_vk_profile_lookup(monkeypatch):
+    """Имя клиента из ВК в тестах не запрашиваем — сети в наборе быть не должно.
+
+    Тест самого запроса подменяет vk_api_call и зовёт fetch_user_name напрямую.
+    """
+    async def _no_name(access_token, vk_user_id):
+        return None, None
+
+    monkeypatch.setattr("app.vk.sender.fetch_user_name", _no_name)
+
+
+@pytest.fixture(autouse=True)
+def no_typing_grace(monkeypatch):
+    """Пауза «не допишет ли клиент» в тестах нулевая.
+
+    В проде она три секунды (см. webhook.CLIENT_TYPING_GRACE_SECONDS) и на живом
+    трафике незаметна, а в наборе тестов складывалась в лишнюю минуту ожидания.
+    Тест, который проверяет саму паузу, снимает эту подмену.
+    """
+    monkeypatch.setattr("app.vk.webhook.CLIENT_TYPING_GRACE_SECONDS", 0)
+
+
 @pytest.fixture
 async def db():
     engine = create_async_engine(TEST_DB_URL)

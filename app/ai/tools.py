@@ -139,12 +139,20 @@ def _norm_condition(s) -> str:
     return " ".join(str(getattr(s, "condition", "") or "").split())
 
 
+# Стадии, которые начинаются ПОСЛЕ подтверждённой оплаты. Пока оплаты нет, эти
+# шаги для модели не существуют: она отправила «Благодарю Вас за заказ и за
+# доверие! Теперь пришлите адрес пункта выдачи СДЭК» клиенту, не заплатившему ни
+# рубля (диалог 142, 14:13). ОП, 14:15: «Оплаты от клиента не было».
+PAID_ONLY_STAGES = frozenset({"post_payment", "paid"})
+
+
 def format_scripts_list(
     scripts,
     client_tags: set[str] | None,
     current_stage: str | None = None,
     exclude_script_ids: set[int] | None = None,
     client_product: str | None = None,
+    payment_confirmed: bool = True,
 ) -> str:
     """Filter scripts by the client's marketing tags + current funnel stage, render the output.
 
@@ -168,6 +176,17 @@ def format_scripts_list(
     reply's source_script_id) are hidden entirely, so the model physically can't
     send the same phrase twice in a row.
     """
+    # Отправляет только человек: макет с правками кидают дизайнеры своими руками
+    # (ОП, 10 августа, 14:15). Модели такие скрипты не показываем вовсе.
+    scripts = [s for s in scripts if not getattr(s, "manual_only", False)]
+
+    # Шаги «после оплаты» — только после подтверждённой оплаты.
+    if not payment_confirmed:
+        scripts = [
+            s for s in scripts
+            if getattr(s, "funnel_stage", None) not in PAID_ONLY_STAGES
+        ]
+
     if client_tags is not None:
         known_tags: set[str] = set()
         for s in scripts:
@@ -233,6 +252,7 @@ def make_list_scripts(
     current_stage: str | None = None,
     exclude_script_ids: set[int] | None = None,
     client_product: str | None = None,
+    payment_confirmed: bool = True,
 ):
     """Return a list_scripts tool scoped to a specific dialog type.
 
@@ -268,6 +288,7 @@ def make_list_scripts(
         return format_scripts_list(
             scripts, client_tags, current_stage=current_stage,
             exclude_script_ids=exclude_script_ids, client_product=client_product,
+            payment_confirmed=payment_confirmed,
         )
     return list_scripts
 
@@ -306,12 +327,17 @@ async def run_product_search(query: str, type_id: int | None) -> str:
 def format_products_list(products) -> str:
     if not products:
         return _NO_PRODUCTS_FOUND
+    # Нижние ступени лестницы модели не показываем вовсе. Раньше рядом с ценой
+    # стояла «(акционная: 4 990₽)», и модель называла её сама, своими словами:
+    # в диалоге 162 клиент за три минуты услышал «Свитшот - 4 990 ₽ по акции» и
+    # «Стоимость толстовки - 5 990 ₽» про одну и ту же вещь. Уступку выдаёт
+    # только скрипт отработки возражения, через «[минимальная-цена:]», и ровно
+    # на одну ступень (см. app.sales.price_placeholder).
     lines = []
     for p in products:
         price = f"{p.price:g}₽" if p.price is not None else "?"
-        min_price = f" (акционная: {p.min_price:g}₽)" if p.min_price is not None else ""
         size = f" | размерная сетка: {p.size_chart}" if p.size_chart else ""
-        lines.append(f"- {p.name}: {price}{min_price}{size}")
+        lines.append(f"- {p.name}: {price}{size}")
     return "\n".join(lines)
 
 

@@ -39,6 +39,7 @@ from app.vk.spintax import resolve_spintax
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
 from app.ai.greeting import greeting_text, resolve_greeting
+from app.sales.price_objection import concession_allowed
 from app.sales.price_placeholder import payment_link_configured, render_price_placeholders
 from app.sales.status_names import (
     AWAITING_PREPAY,
@@ -53,6 +54,8 @@ from app.sales.funnel_steps import (
     answered_inscription_question,
     checkout_presented,
     client_refused,
+    client_wants_design_edit,
+    discount_script_ids,
     design_just_confirmed,
     dialog_has_payment_link,
     find_contacts_script,
@@ -61,6 +64,8 @@ from app.sales.funnel_steps import (
     find_design_review_script,
     find_payment_link_script,
     find_praise_script,
+    find_price_script,
+    scripts_repeating_recent_question,
     funnel_advancing_script_ids,
     HONEST_CURATOR_OPTIONS,
     HONEST_OPTIONS,
@@ -260,6 +265,16 @@ _REFUSAL_RETRY_INSTRUCTION = (
 
 # Абзац из скрипта, который клиент уже читал в другом сообщении: «Ткани таааак
 # подорожали…» стоит и в 477, и в 478, и ушёл дважды за девять минут.
+# Клиент просит переделать дизайн, а модель читает это как согласие: на «Изменить
+# дизайн» она выбрала скрипт «Зафиксировали дизайн» и тем же ходом отправила
+# сумму заказа (диалог 163, 14:14).
+_DESIGN_EDIT_RETRY_INSTRUCTION = (
+    "[Служебное] Клиент просит ПОМЕНЯТЬ дизайн, а не подтверждает его. Шаг не "
+    "закрыт: не фиксируй дизайн, не называй сумму заказа, не проси ФИО и телефон, "
+    "не выставляй счёт. Уточни одним вопросом, что именно поменять, и дождись "
+    "ответа."
+)
+
 _REPEATED_CHUNK_RETRY_INSTRUCTION = (
     "[Служебное] Один из абзацев твоего ответа клиент уже читал — этот текст есть "
     "в двух скриптах, и второй раз он звучит как заевшая пластинка. Скажи то же "
@@ -278,6 +293,146 @@ _REQUOTE_RETRY_INSTRUCTION = (
 def _prices_in(text: str) -> set[str]:
     """Суммы в тексте, нормализованные: «4 990 ₽» и «4990руб» — одно и то же."""
     return {re.sub(r"\D", "", m) for m in _MONEY_RE.findall(text or "")}
+
+
+# Вопрос-сверка: на него клиент ОБЯЗАН ответить, и до ответа воронку двигать
+# нельзя. Замечание ОП от 10 августа, 13:51: «Два вопроса подряд нельзя задавать.
+# Сначала очень важно увидеть ответ на первый вопрос, затем задавать второй».
+#
+# Так уходили: «Приняла: … герб на спине. Всё верно?» + сразу сумма заказа
+# (диалог 156, 14:35); «Что именно изменяем в дизайне?» + сразу сумма заказа
+# (диалог 163, 14:14); «…Всё верно?» + полный скрипт оформления (диалог 142,
+# 10:01). Во всех трёх второе сообщение отвечало на согласие, которого не было.
+_AWAITS_ANSWER_RE = re.compile(
+    r"вс[её]\s+верно|что\s+именно|правильно\s+понима|подтвержда[еи]те|"
+    r"всё\s+так\?|все\s+так\?",
+    re.I,
+)
+
+
+def awaits_client_answer(text: str) -> bool:
+    """Реплика заканчивается сверкой — связку за ней разворачивать нельзя."""
+    return bool(text and "?" in text and _AWAITS_ANSWER_RE.search(text))
+
+
+# Последний вопрос реплики: им заменяем дубль скрипта. ОП, 13:45: «Дубль полного
+# скрипта. Вместо него можно было задублировать только вопрос про удобный способ
+# оплаты».
+_LAST_QUESTION_RE = re.compile(r"[^.!?\n]*\?")
+
+
+def _last_question(text: str) -> str | None:
+    found = _LAST_QUESTION_RE.findall(text or "")
+    return found[-1].strip() if found else None
+
+
+# Предложения, которые звучат один раз за диалог. ОП, 10 августа, 13:53:
+# «Примерно четвёртое предложение о бесплатном макете в этом диалоге. Или не
+# запомнила, или хз». Формулировки каждый раз разные, поэтому проверка дублей по
+# тексту их не ловит — ловим по смыслу.
+_ONE_TIME_OFFERS: dict[str, re.Pattern] = {
+    "бесплатный макет": re.compile(r"бесплатн\w*\s+макет|макет\s+бесплатн", re.I),
+    "подарок за полную оплату": re.compile(r"подарок\s+на\s+выбор", re.I),
+    "дополнительная скидка": re.compile(r"доп\.?\s*скидочк|дополнительн\w*\s+скидк", re.I),
+    "второе изделие": re.compile(r"второе\s+издели|второй\s+макет", re.I),
+}
+# Предложение целиком, вместе с завершающей пунктуацией.
+_SENTENCE_RE = re.compile(r"[^.!?\n]*(?:[.!?]+|\n|$)")
+
+
+def _drop_repeated_offers(parts, manager_texts: list[str], ctx: str):
+    """Убрать предложение, которое клиент в этом диалоге уже слышал."""
+    spent = {
+        name for name, rx in _ONE_TIME_OFFERS.items()
+        if any(rx.search(t or "") for t in manager_texts)
+    }
+    if not spent:
+        return parts
+    kept = []
+    for part in parts:
+        text = part.text or ""
+        for name in spent:
+            rx = _ONE_TIME_OFFERS[name]
+            if not rx.search(text):
+                continue
+            trimmed = "".join(
+                sent for sent in _SENTENCE_RE.findall(text) if not rx.search(sent)
+            )
+            trimmed = re.sub(r"\n{3,}", "\n\n", trimmed).strip()
+            logger.info("[%s] повтор предложения «%s» снят", ctx, name)
+            text = trimmed
+        if not text and not part.image_urls:
+            continue
+        part.text = text
+        kept.append(part)
+    return kept
+
+
+def _drop_duplicate_parts(parts, manager_texts: list[str], ctx: str):
+    """Убрать из хода то, что клиент уже читал.
+
+    Проверка дублей до сих пор смотрела только на реплику модели: части, которые
+    породила связка скриптов, не сравнивались ни с историей, ни между собой — и в
+    диалоге 142 в 10:01 ушли два побайтово одинаковых скрипта оформления подряд.
+
+    От дубля оставляем один его вопрос: он и есть то, ради чего повтор был нужен.
+    """
+    seen = list(manager_texts)
+    kept = []
+    for part in parts:
+        text = part.text or ""
+        dup = _find_duplicate_reply(text, seen) or _find_repeated_chunk(text, seen)
+        if dup:
+            # Повтор нужен ради вопроса — его и оставляем. ОП, 13:45: «Вместо
+            # него можно было задублировать только вопрос про удобный способ
+            # оплаты». Повтор вопроса ВНУТРИ одного хода снимет следующий шаг
+            # (_drop_repeated_questions).
+            question = _last_question(text)
+            if question:
+                logger.info(
+                    "[%s] дубль скрипта свёрнут до вопроса | %r", ctx, question[:60],
+                )
+                part.text = question
+                seen.append(part.text)
+                kept.append(part)
+                continue
+            logger.info("[%s] дубль без вопроса не отправлен | %r", ctx, text[:60])
+            if part.image_urls:
+                part.text = ""
+                kept.append(part)
+            continue
+        seen.append(text)
+        kept.append(part)
+    return kept
+
+
+# Ход без вопроса обрывает диалог: клиенту нечего ответить, и следующего хода не
+# будет. Замечание ОП, 13:42: «Нет вопроса. Они обязательно должны быть после
+# каждого сообщения, чтобы диалог продолжался»; 13:53: «нет вопроса в конце
+# скрипта». Так вышло в диалоге 142 в 13:19 — прайс ушёл, а звено «2.3 Доставка»
+# пропустилось, потому что город уже был известен, и вопрос ушёл вместе с ним.
+#
+# Спрашиваем то, чего ещё не знаем о заказе; порядок — как в воронке ОП.
+_SLOT_QUESTIONS: list[tuple[str, str]] = [
+    ("city", "В какой город нужна будет доставка?"),
+    ("color", "Какой цвет выберем?"),
+    ("size", "Подскажите рост и вес, чтобы точно подобрать размер?"),
+]
+# Про заказ известно всё — остаётся вернуть слово клиенту.
+_FALLBACK_QUESTION = "Что скажете?"
+
+
+def _ensure_question(parts, slots: dict[str, str], ctx: str):
+    """Дописать вопрос к последней реплике хода, если его нет ни в одной."""
+    if not parts or any("?" in (p.text or "") for p in parts):
+        return parts
+    question = next(
+        (q for slot, q in _SLOT_QUESTIONS if not slots.get(slot)), _FALLBACK_QUESTION,
+    )
+    last = parts[-1]
+    last.text = f"{(last.text or '').rstrip()}\n\n{question}".strip()
+    logger.info("[%s] ход заканчивался без вопроса — дописан %r", ctx, question)
+    return parts
 
 
 # Один вопрос за ход. «В какой город нужна доставка?» задали трижды подряд:
@@ -509,6 +664,40 @@ async def run_ai(
         if _link_script is not None:
             used_script_ids.add(_link_script.id)
 
+    # Прайс во второй раз не отправляем: клиент цену уже видел, а на возражение
+    # отвечают отдельные скрипты отработки. В диалоге 156 прайс ушёл трижды за
+    # два часа (замечание ОП от 10 августа, 13:53: «Опять отправили цену»).
+    # Признак «цену называли» — закреплённая за диалогом сумма (см. _pin_price).
+    skip_script_ids: set[int] = set()
+    if dialog.quoted_prices:
+        _price_script = await find_price_script(db, type_id)
+        if _price_script is not None:
+            skip_script_ids.add(_price_script.id)
+            used_script_ids.add(_price_script.id)
+            logger.info("[%s] прайс уже отправлен — скрипт %s исключён", ctx, _price_script.id)
+
+    # Скидка — только после ПОВТОРНОГО ценового возражения, уже отработанного
+    # ценностью. Регламент ОП: 5990 → отработка → повторное «дорого» → 5490 →
+    # повторное «дорого» → 4990. «Подумаю», «понятно» и вопросы о товаре скидку
+    # не открывают, иначе ИИ раздаёт её на первое же сомнение.
+    if not await concession_allowed(db, dialog.id, text):
+        _discounts = await discount_script_ids(db, type_id)
+        if _discounts:
+            skip_script_ids |= _discounts
+            used_script_ids |= _discounts
+            logger.info(
+                "[%s] скидка не открыта — скидочные скрипты %s скрыты",
+                ctx, sorted(_discounts),
+            )
+
+    # Вопрос, заданный только что, повторять нельзя — ни тем же скриптом, ни
+    # другим с тем же смыслом.
+    repeating = await scripts_repeating_recent_question(db, dialog.id, type_id)
+    if repeating:
+        skip_script_ids |= repeating
+        used_script_ids |= repeating
+        logger.info("[%s] вопрос уже задан — скрипты %s исключены", ctx, sorted(repeating))
+
     exclude_script_ids: set[int] | None = used_script_ids or None
     if exclude_script_ids:
         logger.info("[%s] excluding recently used scripts | script_ids=%s", ctx, sorted(exclude_script_ids))
@@ -591,6 +780,12 @@ async def run_ai(
         dynamic_context.append(slots_block)
         logger.info("[%s] order slots injected | %s", ctx, sorted(slots))
 
+    # Оплату подтверждает человек. Пока подтверждения нет, шаги «после оплаты»
+    # модели недоступны: она поблагодарила за заказ и попросила адрес ПВЗ у
+    # клиента, не заплатившего ни рубля (диалог 142, 14:13; замечание ОП от
+    # 10 августа, 14:15: «Оплаты от клиента не было»).
+    payment_confirmed = dialog.payment_confirmed_at is not None
+
     # Агент собирается ПОСЛЕ разбора слотов: списку скриптов нужно знать, какую
     # вещь выбрал клиент, иначе на «покажите, как выглядит» модели предлагается
     # и скрипт про костюм (диалог 111, 07:54).
@@ -603,6 +798,7 @@ async def run_ai(
         exclude_script_ids=exclude_script_ids,
         client_product=slots.get("product"),
         dialog_id=dialog.id,
+        payment_confirmed=payment_confirmed,
     )
     logger.info(
         "[%s] agent built | model=%s | provider=%s | товар=%s",
@@ -634,17 +830,24 @@ async def run_ai(
     refused = client_refused(text)
     if refused:
         logger.info("[%s] клиент отказывается — воронку не двигаем | text=%r", ctx, text[:60])
-    praise_point = not refused and await answered_inscription_question(db, dialog.id)
-    payment_choice_point = not refused and await payment_option_chosen(db, dialog.id, text)
+    # Просьба переделать дизайн — шаг не закрыт: ни фиксировать дизайн, ни
+    # называть сумму заказа нельзя, пока правка не внесена и не подтверждена.
+    design_edit = client_wants_design_edit(text)
+    if design_edit:
+        logger.info("[%s] клиент просит правку дизайна — воронку не двигаем | text=%r", ctx, text[:60])
+    held = refused or design_edit
+    praise_point = not held and await answered_inscription_question(db, dialog.id)
+    payment_choice_point = not held and await payment_option_chosen(db, dialog.id, text)
     # Клиент назвал рост и вес — следующим ходом идёт сверка дизайна, и она
     # уходит скриптом: свой пересказ модель пишет без раскладки нанесений.
-    design_review_point = not refused and await size_just_given(db, dialog.id, text)
+    design_review_point = not held and await size_just_given(db, dialog.id, text)
     # Сверки «всё верно?» встречаются и после оплаты — при подведении итогов заказа
     # и при согласовании макета. Без этой проверки «да» на итоговую сверку тянуло
     # диалог обратно в оформление: клиент, уже приславший чек, получил условия
     # оплаты второй раз (диалог 68, сообщение 979).
     design_point = (
-        not await dialog_has_payment_link(db, dialog.id)
+        not held
+        and not await dialog_has_payment_link(db, dialog.id)
         and await design_just_confirmed(db, dialog.id, text)
     )
 
@@ -679,6 +882,7 @@ async def run_ai(
                         exclude_script_ids=exclude_script_ids,
                         client_product=slots.get("product"),
                         dialog_id=dialog.id,
+                        payment_confirmed=payment_confirmed,
                     ),
                     timeout=settings.AI_RUNNER_TIMEOUT,
                 )
@@ -701,6 +905,7 @@ async def run_ai(
                             funnel_stage=dialog.funnel_stage,
                             exclude_script_ids=exclude_script_ids,
                             dialog_id=dialog.id,
+                            payment_confirmed=payment_confirmed,
                         ),
                         timeout=settings.AI_RUNNER_TIMEOUT,
                     )
@@ -812,7 +1017,7 @@ async def run_ai(
         # Клиент отказался, а ответ всё равно фиксирует дизайн, называет сумму
         # или просит контакты. Скрипты воронки ищем только на отказе — лишний
         # проход по таблице скриптов на каждом ходу тут ни к чему.
-        ignores_refusal = refused and reply_advances_funnel(
+        ignores_refusal = held and reply_advances_funnel(
             output.reply_text, output.source_script_id,
             await funnel_advancing_script_ids(db, type_id),
         )
@@ -830,7 +1035,12 @@ async def run_ai(
             and not repeated_chunk
         ) or dup_attempt == 2:
             break
-        if repeated_chunk:
+        if ignores_refusal and design_edit and not refused:
+            logger.warning(
+                "[%s] клиент просит правку, а ответ двигает воронку — retrying", ctx,
+            )
+            correction = _DESIGN_EDIT_RETRY_INSTRUCTION
+        elif repeated_chunk:
             logger.warning(
                 "[%s] абзац уже был отправлен — retrying | chunk=%r", ctx, repeated_chunk[:80],
             )
@@ -873,7 +1083,11 @@ async def run_ai(
         output = output.model_copy(update={
             "source_script_id": None,
             "need_curator": True,
-            "curator_reason": "Клиент отказывается, а ответ двигает заказ к оплате",
+            "curator_reason": (
+                "Клиент просит правку дизайна, а ответ двигает заказ к оплате"
+                if design_edit and not refused
+                else "Клиент отказывается, а ответ двигает заказ к оплате"
+            ),
         })
     # Billed totals across all attempts, not just the last one.
     input_tokens, output_tokens = acc_input, acc_output
@@ -1007,6 +1221,12 @@ async def run_ai(
         })
         dialog.ai_paused = True
 
+    # «Заказ оформлен» = «Клиент внёс первую предоплату». Гейта не было вовсе, и
+    # статус ставился по решению модели — в диалоге 142 в 14:13 при нулевой оплате.
+    if output.next_status == ORDER_CREATED and not payment_confirmed:
+        logger.info("[%s] blocked next_status 'Заказ оформлен' — оплата не подтверждена", ctx)
+        output = output.model_copy(update={"next_status": None})
+
     if output.next_status:
         matching = next((s for s in active_statuses if s.name == output.next_status), None)
         if matching:
@@ -1052,6 +1272,18 @@ async def run_ai(
     if output.need_curator and not dialog.ai_paused:
         dialog.ai_paused = True
         logger.info("[%s] need_curator=True — dialog paused for curator", ctx)
+
+    # Эскалация без уведомления не работала: менеджер узнавал о диалоге, только
+    # если сам открывал панель (ОП, 14:12: «Тут надо бросать диалог, должен
+    # подключаться менеджер»).
+    if dialog.ai_paused:
+        from app.notify import notify_curator
+        await notify_curator(
+            dialog.id,
+            output.curator_reason or "ИИ снят с диалога",
+            last_message=text,
+            vk_user_id=vk_user_id,
+        )
 
     ai_run = AIRun(
         dialog_id=dialog.id,
@@ -1210,9 +1442,19 @@ async def run_ai(
     # клиент уже сказал: «2.3 Доставка» переспросила город через две минуты после
     # «Казань» (диалог 52), «5.1 Данные» — ФИО и телефон в том же ходу, где
     # клиент их прислал. Такие звенья пропускаем.
-    parts.extend(await _build_follow_up_parts(
-        db, dialog, output.source_script_id, client, ctx, known_slots=slots,
-    ))
+    # Реплика заканчивается сверкой — ход на ней и заканчивается: следующий шаг
+    # воронки отвечает на согласие, которого клиент ещё не давал.
+    holds_turn = awaits_client_answer(reply_text)
+    if holds_turn:
+        logger.info(
+            "[%s] реплика ждёт ответа клиента — связку не разворачиваем | %r",
+            ctx, reply_text[-60:],
+        )
+    else:
+        parts.extend(await _build_follow_up_parts(
+            db, dialog, output.source_script_id, client, ctx, known_slots=slots,
+            skip_script_ids=skip_script_ids,
+        ))
 
     # Две точки, где регламент требует отправить следующие шаги не дожидаясь
     # клиента: после похвалы (стоимость + доставка) и после подтверждения дизайна
@@ -1223,7 +1465,7 @@ async def run_ai(
     # Шаг, который модель сделала сама, повторять скриптом нельзя: в прогоне она
     # на «да всё верно» написала свой пересказ оформления, и следом ушёл скрипт
     # #380 с тем же содержанием — клиент прочитал условия оплаты дважды.
-    if len(parts) == 1:
+    if len(parts) == 1 and not holds_turn:
         entry = None
         if praise_point and not _prices_in(reply_text):
             entry = await find_praise_script(db, type_id)
@@ -1232,6 +1474,7 @@ async def run_ai(
         if entry is not None:
             forced = await _build_follow_up_parts(
                 db, dialog, entry.id, client, ctx, known_slots=slots,
+                skip_script_ids=skip_script_ids,
             )
             if forced:
                 logger.info(
@@ -1247,6 +1490,7 @@ async def run_ai(
     if (
         payment_choice_point
         and len(parts) == 1
+        and not holds_turn
         and asked_slot(reply_text) != "recipient"
     ):
         contacts = await find_contacts_script(db, type_id)
@@ -1296,7 +1540,13 @@ async def run_ai(
     # девять активных скриптов с одним условием и разными числами, и связка со
     # скриптом модели разошлись. Пока прайс не почищен, второй ценой молчим.
     parts = _drop_conflicting_prices(parts, manager_history_texts, ctx)
+    parts = _drop_duplicate_parts(parts, manager_history_texts, ctx)
+    parts = _drop_repeated_offers(parts, manager_history_texts, ctx)
     parts = _drop_repeated_questions(parts, ctx)
+    # Последним: предыдущие проверки умеют снимать вопрос, и ход может остаться
+    # без единого — тогда клиенту нечего ответить и диалог обрывается.
+    if dialog.funnel_stage != _TERMINAL_STAGE:
+        parts = _ensure_question(parts, slots, ctx)
 
     await db.commit()
     await db.refresh(ai_run)
@@ -1326,14 +1576,9 @@ async def _run_scripted_greeting(
     # Текст берём через greeting_text: у приветствия под рекламную метку в
     # админке заполняют только картинки, и без подстановки общего текста клиент
     # получает три фото и сразу вопрос про имя.
-    text = render_name_placeholder(
-        resolve_spintax(await greeting_text(db, script, dialog.type_id)),
-        client.name if client else None,
+    text = await _finalize_outgoing(
+        db, dialog, await greeting_text(db, script, dialog.type_id), client,
     )
-    text = await render_price_placeholders(
-        db, text, type_id=dialog.type_id, dialog=dialog,
-    )
-    text = normalize_dashes(text)
     text, image_urls = _split_image_urls(text)
 
     file_hashes: list[str] = []
@@ -1409,11 +1654,16 @@ async def _build_follow_up_parts(
     client: Client | None,
     ctx: str,
     known_slots: dict[str, str] | None = None,
+    skip_script_ids: set[int] | None = None,
 ) -> list[ReplyPart]:
     """Все реплики связки: разворачиваем цепочку, пока у скрипта есть follow_up.
 
     known_slots — факты, которые клиент уже назвал. Звено, спрашивающее такой
     факт, пропускаем, но цепочку не обрываем: за ним идут следующие шаги.
+
+    skip_script_ids — звенья, которые в этом диалоге уже отработали (например
+    прайс). Их тоже пропускаем, не обрывая цепочку: за прайсом идёт доставка, и
+    её вопрос клиенту всё ещё нужен.
     """
     parts: list[ReplyPart] = []
     seen: set[int] = set()
@@ -1425,6 +1675,7 @@ async def _build_follow_up_parts(
         seen.add(current_id)
         part, current_id = await _build_follow_up_part(
             db, dialog, current_id, client, ctx, known_slots=known_slots,
+            skip_script_ids=skip_script_ids,
         )
         if part is not None:
             parts.append(part)
@@ -1440,6 +1691,7 @@ async def _build_follow_up_part(
     client: Client | None,
     ctx: str,
     known_slots: dict[str, str] | None = None,
+    skip_script_ids: set[int] | None = None,
 ) -> tuple[ReplyPart | None, int | None]:
     """Одно звено связки: реплика и id скрипта, за которым идти дальше.
 
@@ -1459,6 +1711,10 @@ async def _build_follow_up_part(
         )
         return None, None
 
+    if skip_script_ids and follow_up.id in skip_script_ids:
+        logger.info("[%s] follow-up %s пропущен — уже отработал в диалоге", ctx, follow_up.id)
+        return None, follow_up.id
+
     slot = asked_slot(follow_up.phrase_text or "")
     if slot and slot_is_filled(slot, known_slots or {}):
         logger.info(
@@ -1475,6 +1731,31 @@ async def _build_follow_up_part(
     return part, follow_up.id
 
 
+async def _finalize_outgoing(
+    db: AsyncSession,
+    dialog: Dialog,
+    text: str,
+    client: Client | None,
+    slots: dict[str, str] | None = None,
+) -> str:
+    """Общая обработка ЛЮБОГО исходящего текста перед отправкой.
+
+    Раньше её проходила только реплика модели: звенья связки и приветствие
+    подставляли имя и цены, но не снимали чужое обращение — и «Михаил, а цвет для
+    свитшота какой выберем?» ушло клиентке Анастасии именно скриптом (диалог 163,
+    14:09), а не репликой модели.
+    """
+    slots = slots or {}
+    name = client.name if client else None
+    text = render_name_placeholder(resolve_spintax(text or ""), name)
+    text = strip_foreign_name(text, name, slots.get("inscription"))
+    text = await render_price_placeholders(
+        db, text, type_id=dialog.type_id, dialog=dialog,
+    )
+    text = render_order_placeholders(text, slots)
+    return normalize_dashes(text)
+
+
 async def _render_script_part(
     db: AsyncSession,
     dialog: Dialog,
@@ -1484,14 +1765,7 @@ async def _render_script_part(
 ) -> ReplyPart | None:
     """Дословная реплика по скрипту: имя, цены, ссылка на оплату и данные заказа
     подставлены, фото вынесены во вложения. Модель этот текст не переписывает."""
-    text = render_name_placeholder(
-        resolve_spintax(script.phrase_text), client.name if client else None
-    )
-    text = await render_price_placeholders(
-        db, text, type_id=dialog.type_id, dialog=dialog,
-    )
-    text = render_order_placeholders(text, slots or {})
-    text = normalize_dashes(text)
+    text = await _finalize_outgoing(db, dialog, script.phrase_text, client, slots)
     text, image_urls = _split_image_urls(text)
     if not text.strip() and not image_urls:
         return None
