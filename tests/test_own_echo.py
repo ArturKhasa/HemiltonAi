@@ -82,28 +82,43 @@ class TestInProcessMemory:
         assert sender.is_own_random_id(10_000_000 + limit + 49)
 
 
+@pytest.fixture
+def offline_ai(monkeypatch):
+    """Прогон модели подменяем целиком.
+
+    Настоящий run_ai открывает СВОЮ сессию к базе из DATABASE_URL (инструменты
+    агента ходят мимо тестовой сессии), и на чистой машине без постгреса тест
+    падает с OSError вместо проверки того, ради чего написан.
+    """
+    async def _fake_run_ai(db_, dialog, client_message):
+        m = Message(dialog_id=dialog.id, role=MessageRole.ai, text="Здравствуйте!")
+        db_.add(m)
+        await db_.flush()
+        await db_.commit()
+        return (
+            AgentOutput(reply_text="Здравствуйте!", confidence_score=1.0),
+            None,
+            [ReplyPart(text="Здравствуйте!", image_urls=[], message=m)],
+        )
+
+    monkeypatch.setattr("app.ai.runner.run_ai", _fake_run_ai)
+
+
+@pytest.fixture
+def offline_vk(monkeypatch):
+    """ВК тоже наружу не ходит: возвращаем фиксированный id сообщения."""
+    async def _fake_api(token, method, params):
+        return 162188
+
+    monkeypatch.setattr(sender, "vk_api_call", _fake_api)
+
+
 class TestEndToEnd:
-    async def test_greeting_echo_does_not_pause_the_dialog(self, db, vk_group, monkeypatch):
+    async def test_greeting_echo_does_not_pause_the_dialog(
+        self, db, vk_group, offline_ai, offline_vk,
+    ):
         """Диалог 221, 11 августа: клиенту ушло приветствие, ВК вернул его эхом,
         и бот замолчал сам от себя, а в панели появился фантомный «менеджер»."""
-        async def _fake_run_ai(db_, dialog, client_message):
-            m = Message(dialog_id=dialog.id, role=MessageRole.ai, text="Здравствуйте!")
-            db_.add(m)
-            await db_.flush()
-            await db_.commit()
-            return (
-                AgentOutput(reply_text="Здравствуйте!", confidence_score=1.0),
-                None,
-                [ReplyPart(text="Здравствуйте!", image_urls=[], message=m)],
-            )
-
-        monkeypatch.setattr("app.ai.runner.run_ai", _fake_run_ai)
-
-        async def _fake_api(token, method, params):
-            return 162188
-
-        monkeypatch.setattr(sender, "vk_api_call", _fake_api)
-
         await handle_message_new(db, vk_group, parse_message_event(_event()))
 
         # ВК возвращает наше же сообщение как исходящее сообщества.
@@ -121,12 +136,10 @@ class TestEndToEnd:
         )
         assert n_curator == 0
 
-    async def test_a_real_operator_still_pauses_the_dialog(self, db, vk_group, monkeypatch):
+    async def test_a_real_operator_still_pauses_the_dialog(
+        self, db, vk_group, offline_ai, offline_vk,
+    ):
         """Проверка, что лекарство не убило само лечение."""
-        async def _fake_api(token, method, params):
-            return 800
-
-        monkeypatch.setattr(sender, "vk_api_call", _fake_api)
         await handle_message_new(db, vk_group, parse_message_event(_event()))
 
         foreign = parse_message_event(_event(
