@@ -429,6 +429,16 @@ async def _reply_with_ai(
         # нашей же отправке придёт в вебхук, и отличить его от сообщения живого
         # оператора можно только по ним (см. app.vk.outgoing.is_our_echo).
         mark_delivered(part.message, result)
+        # Коммитим сразу, а не в конце хода: между репликами связки есть пауза,
+        # и всё это время отметки жили только в памяти. Эхо успевало записаться
+        # раньше и забрать себе VK id, после чего наш коммит падал на уникальном
+        # индексе (dialog_id, external_message_id) и откатывал отметки вместе с
+        # собой.
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            logger.warning("[%s] VK id уже занят — отметка доставки пропущена", ctx)
         sent += 1
         logger.info(
             "[%s] vk reply sent | part=%d/%d | vk_message_id=%s",

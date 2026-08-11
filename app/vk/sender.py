@@ -8,6 +8,7 @@ import asyncio
 import logging
 import re
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 
 import httpx
@@ -188,6 +189,34 @@ def make_random_id() -> int:
     return uuid.uuid4().int & 0x7FFF_FFFF
 
 
+# random_id всех наших отправок за последнее время, В ПАМЯТИ процесса.
+#
+# Одной записи в БД мало: ВК присылает эхо нашей же отправки через одну-две
+# секунды, а метаданные к этому моменту ещё не закоммичены — ход коммитится
+# целиком, уже после паузы между репликами связки. Эхо не опознавалось, летело
+# в базу как сообщение живого оператора, забирало себе VK id — и наш коммит
+# падал на уникальном индексе (dialog_id, external_message_id) и откатывался
+# вместе с отметками о доставке. Диалог при этом вставал на паузу сам от себя:
+# 11 августа так замолчали 92 диалога.
+#
+# Здесь запись появляется ДО обращения к ВК, поэтому гонки нет вовсе.
+_OUR_RANDOM_IDS: deque[int] = deque(maxlen=5000)
+_OUR_RANDOM_IDS_SET: set[int] = set()
+
+
+def remember_random_id(random_id: int) -> None:
+    """Запомнить, что этим random_id отправляли мы."""
+    if len(_OUR_RANDOM_IDS) == _OUR_RANDOM_IDS.maxlen:
+        _OUR_RANDOM_IDS_SET.discard(_OUR_RANDOM_IDS[0])
+    _OUR_RANDOM_IDS.append(random_id)
+    _OUR_RANDOM_IDS_SET.add(random_id)
+
+
+def is_own_random_id(random_id: int) -> bool:
+    """Отправляли ли мы сами сообщение с таким random_id."""
+    return bool(random_id) and random_id in _OUR_RANDOM_IDS_SET
+
+
 @dataclass
 class SentMessage:
     """Результат отправки: VK id последней части и все random_id, которыми мы
@@ -229,6 +258,7 @@ async def send_message(
                 params["attachment"] = attachment
             # random_id запоминаем ДО вызова: ВК успевает прислать нам эхо
             # раньше, чем вернёт ответ, и к этому моменту id уже должен быть наш.
+            remember_random_id(random_id)
             sent.random_ids.append(random_id)
             sent.message_id = await vk_api_call(access_token, "messages.send", params)
     return sent
