@@ -94,6 +94,14 @@ async def is_our_echo(
     пингов VK id раньше не сохранялся вовсе, и на старых записях остаётся только
     этот путь.
     """
+    # Сначала — память процесса: там random_id оказывается ДО обращения к ВК,
+    # тогда как в базе он появится только после коммита всего хода. Именно на
+    # этом промежутке мы и принимали собственное эхо за живого оператора.
+    from app.vk.sender import is_own_random_id
+
+    if is_own_random_id(random_id):
+        return True
+
     if external_message_id:
         seen = await db.scalar(
             select(Message.id).where(
