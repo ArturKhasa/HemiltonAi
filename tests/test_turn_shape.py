@@ -17,6 +17,7 @@ from app.ai.runner import (
     _drop_duplicate_parts,
     _drop_repeated_offers,
     _ensure_question,
+    _keep_one_question,
     awaits_client_answer,
 )
 from app.sales.funnel_steps import client_wants_design_edit
@@ -125,3 +126,51 @@ class TestRepeatedOffers:
     def test_offer_not_yet_made_survives(self):
         parts = [FakePart("Давайте сделаем бесплатный макет?")]
         assert len(_drop_repeated_offers(parts, ["Стоимость - 5 990 ₽"], "ctx")) == 1
+
+
+class TestOneQuestionPerTurn:
+    """ОП, документ от 11 августа, п. 2: «ии всегда дожидается ответ на вопрос,
+    потом задает следующий/отправляет следующий скрипт. На скрине задала 2
+    вопроса подряд»."""
+
+    def test_second_question_is_stripped(self):
+        parts = [
+            FakePart("Чёрный зафиксировала. Какой у Вас рост и вес?"),
+            FakePart("Кстати, а в какой город доставка?"),
+        ]
+
+        got = _texts(_keep_one_question(parts, "ctx"))
+
+        assert got[0].endswith("Какой у Вас рост и вес?")
+        assert "?" not in "".join(got[1:])
+
+    def test_two_questions_inside_one_message_leave_the_first(self):
+        parts = [FakePart("Какой цвет выберем? И какой у Вас рост?")]
+        got = _texts(_keep_one_question(parts, "ctx"))
+        assert got == ["Какой цвет выберем? И какой у Вас рост?"]
+
+    def test_the_regulation_chain_survives(self):
+        """Похвала, стоимость и доставка уходят подряд по регламенту — вопрос в
+        них ровно один, в последнем звене, и он обязан остаться."""
+        parts = [
+            FakePart("Супер, зафиксировала! Сделаем всё как Вы хотите!"),
+            FakePart("Стоимость толстовки со скидкой СЕГОДНЯ - 5 990 ₽"),
+            FakePart("Шьём по Вашим меркам.\n\nВ какой город нужна будет доставка?"),
+        ]
+
+        got = _texts(_keep_one_question(parts, "ctx"))
+
+        assert len(got) == 3
+        assert got[-1].endswith("В какой город нужна будет доставка?")
+
+    def test_part_left_without_text_but_with_a_photo_survives(self):
+        parts = [
+            FakePart("Какой цвет выберем?"),
+            FakePart("А рост и вес?", image_urls=["https://example.ru/a.jpg"]),
+        ]
+
+        got = _keep_one_question(parts, "ctx")
+
+        assert len(got) == 2
+        assert got[1].text == ""
+        assert got[1].image_urls

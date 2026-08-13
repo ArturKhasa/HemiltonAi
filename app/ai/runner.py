@@ -442,6 +442,37 @@ def _ensure_question(parts, slots: dict[str, str], ctx: str):
 _QUESTION_RE = re.compile(r"[^.!?\n]*\?")
 
 
+def _keep_one_question(parts, ctx: str):
+    """Оставить в ходе ровно один вопрос — первый.
+
+    ОП (документ от 11 августа, п. 2): «Добавить условие, что ии всегда
+    дожидается ответ на вопрос, потом задает следующий/отправляет следующий
+    скрипт. На скрине задала 2 вопроса подряд».
+
+    Речь именно о двух ВОПРОСАХ, а не о двух сообщениях: регламент сам требует
+    отправлять похвалу, стоимость и доставку подряд, не дожидаясь клиента, — но
+    вопрос там ровно один, в последнем звене. Поэтому режем не сообщения, а
+    лишние вопросы: первый остаётся, всё остальное вопросительное снимается.
+    """
+    seen_question = False
+    kept = []
+    for part in parts:
+        text = part.text or ""
+        questions = _QUESTION_RE.findall(text)
+        if seen_question and questions:
+            for q in questions:
+                text = text.replace(q, "")
+                logger.info("[%s] второй вопрос за ход снят | %r", ctx, q.strip()[:60])
+            text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        elif questions:
+            seen_question = True
+        if not text and not part.image_urls:
+            continue
+        part.text = text
+        kept.append(part)
+    return kept
+
+
 def _drop_repeated_questions(parts, ctx: str):
     """Убрать из поздних реплик вопрос, который уже задан в этом же ходу."""
     asked: set[str] = set()
@@ -1543,6 +1574,7 @@ async def run_ai(
     parts = _drop_duplicate_parts(parts, manager_history_texts, ctx)
     parts = _drop_repeated_offers(parts, manager_history_texts, ctx)
     parts = _drop_repeated_questions(parts, ctx)
+    parts = _keep_one_question(parts, ctx)
     # Последним: предыдущие проверки умеют снимать вопрос, и ход может остаться
     # без единого — тогда клиенту нечего ответить и диалог обрывается.
     if dialog.funnel_stage != _TERMINAL_STAGE:
