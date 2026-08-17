@@ -309,8 +309,8 @@ async def verify_attachments_delivered(
     (см. photo_upload.forget_attachments).
 
     Поэтому спрашиваем у ВК, что он реально отправил. Недостача — выкидываем эти
-    объекты из кэша: следующая отправка перезальёт их с исходных ссылок и
-    картинки вернутся сами.
+    объекты из кэша, чтобы следующая отправка залила их заново; этому клиенту
+    картинки досылает `resend_lost_photos` — иначе он остался бы без них совсем.
     """
     from app.vk.photo_upload import forget_attachments
 
@@ -338,6 +338,38 @@ async def verify_attachments_delivered(
     return False
 
 
+async def resend_lost_photos(
+    db: AsyncSession, group: VkGroup, peer_id: int, urls: list[str],
+) -> bool:
+    """Дослать картинки, которые ВК выбросил из только что отправленного сообщения.
+
+    Сам текст клиент уже прочитал — восстанавливать нужно только вложения, и
+    отдельным сообщением: отредактировать отправленное ВК не даёт. К этому
+    моменту мёртвые объекты из кэша убраны, поэтому `resolve_attachment`
+    перезаливает картинку с исходной ссылки заново.
+    """
+    from app.vk.photo_upload import resolve_attachment
+
+    fresh: list[str] = []
+    for url in urls:
+        att = await resolve_attachment(db, group, url)
+        if att:
+            fresh.append(att)
+    if not fresh:
+        logger.error("картинки перезалить не удалось — клиент останется без них")
+        return False
+    try:
+        await send_message(
+            group.access_token, peer_id, "", vk_group_id=group.id,
+            attachment=",".join(fresh[:_MAX_ATTACHMENTS]),
+        )
+    except Exception as exc:
+        logger.error("не удалось дослать картинки | peer=%s: %s", peer_id, exc)
+        return False
+    logger.info("картинки досланы отдельным сообщением | peer=%s | %d шт.", peer_id, len(fresh))
+    return True
+
+
 async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> SentMessage:
     """Отправка в диалог: находит клиента и его группу, шлёт от её имени.
 
@@ -357,6 +389,7 @@ async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> SentMes
     group = await db.get(VkGroup, client.vk_group_id)
     if not group or not group.access_token:
         raise ValueError(f"vk group {client.vk_group_id} not found or has no token")
+    photo_urls = _PHOTO_URL_TOKEN_RE.findall(text or "")
     text, attachment = await extract_and_resolve_attachments(db, group, text)
     try:
         sent = await send_message(
@@ -364,7 +397,11 @@ async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> SentMes
             vk_group_id=group.id, attachment=attachment,
         )
         if attachment:
-            await verify_attachments_delivered(db, group, sent.message_id, attachment)
+            delivered = await verify_attachments_delivered(
+                db, group, sent.message_id, attachment,
+            )
+            if not delivered and photo_urls:
+                await resend_lost_photos(db, group, int(client.vk_user_id), photo_urls)
         return sent
     except VkMessagesForbiddenError as e:
         dialog.vk_blocked = True

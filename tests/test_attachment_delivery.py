@@ -74,6 +74,54 @@ async def test_vk_error_does_not_drop_anything(db, group, monkeypatch):
     assert len(left) == len(ATT)
 
 
+class TestResend:
+    """Проверка срабатывает уже после отправки — этому клиенту картинки нужно
+    дослать, иначе он останется без них совсем."""
+
+    async def test_photos_are_reuploaded_and_sent_again(self, db, group, monkeypatch):
+        from app.vk.sender import resend_lost_photos
+
+        uploaded: list[str] = []
+        sent: list[dict] = []
+
+        async def _resolve(db_, group_, url):
+            uploaded.append(url)
+            return f"photo-238878717_99{len(uploaded)}"
+
+        async def _send(token, peer_id, text, vk_group_id=None, attachment=None):
+            sent.append({"peer_id": peer_id, "text": text, "attachment": attachment})
+            return None
+
+        monkeypatch.setattr("app.vk.photo_upload.resolve_attachment", _resolve)
+        monkeypatch.setattr("app.vk.sender.send_message", _send)
+
+        ok = await resend_lost_photos(
+            db, group, 555, ["https://sun9.vk/0.jpg", "https://sun9.vk/1.jpg"],
+        )
+
+        assert ok is True
+        assert uploaded == ["https://sun9.vk/0.jpg", "https://sun9.vk/1.jpg"]
+        # Текст клиент уже прочитал — досылаем только вложения.
+        assert sent == [{
+            "peer_id": 555, "text": "",
+            "attachment": "photo-238878717_991,photo-238878717_992",
+        }]
+
+    async def test_failed_reupload_is_reported_not_raised(self, db, group, monkeypatch):
+        from app.vk.sender import resend_lost_photos
+
+        async def _resolve(db_, group_, url):
+            return None
+
+        async def _send(*_args, **_kwargs):
+            raise AssertionError("отправлять нечего")
+
+        monkeypatch.setattr("app.vk.photo_upload.resolve_attachment", _resolve)
+        monkeypatch.setattr("app.vk.sender.send_message", _send)
+
+        assert await resend_lost_photos(db, group, 555, ["https://sun9.vk/0.jpg"]) is False
+
+
 async def test_no_message_id_skips_the_check(db, group, monkeypatch):
     async def _boom(*_args, **_kwargs):
         raise AssertionError("проверять нечего — вызова быть не должно")
