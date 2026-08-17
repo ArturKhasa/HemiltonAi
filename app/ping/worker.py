@@ -13,6 +13,7 @@ from app.db.models import (
 from app.config import settings
 from app.db.session import AsyncSessionLocal
 from app.logging_context import current_dialog_type
+from app.sales.color_palette import with_palette
 from app.sales.order_slots import collect_slots
 from app.utils.media import carry_over_attachments
 from app.utils.time import msk_now
@@ -280,6 +281,11 @@ async def _send_ping(
     # Агент переписывает фразу своими словами и теряет вложения: 33 пинга из 70
     # ушли без картинки, хотя в правиле она была. Возвращаем их на место.
     sent_text = carry_over_attachments(sent_text, phrase_template)
+    # Пинг тоже переспрашивает про цвет («Стоимость я уже отправила… подскажите,
+    # какой цвет?»), а палитра к такому вопросу обязательна — требование ОП.
+    sent_text = await with_palette(
+        db, sent_text, getattr(dialog, "type_id", None), None, f"ping:{state.dialog_id}",
+    )
 
     # Content-level duplicate guard: the model can rewrite an already-sent message
     # almost verbatim (same pattern as sales client 8474931). Same normalization/
