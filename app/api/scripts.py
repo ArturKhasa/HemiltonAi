@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import require_role
 from app.db.models import User
 from app.db.session import get_db
+from app.storage.rehost import rehost_external_photos
 from app.sales.scripts import ScriptService
 
 router = APIRouter(prefix="/scripts", tags=["scripts"])
@@ -65,8 +66,10 @@ async def create_script(
     _: User = Depends(require_role("admin")),
 ):
     svc = ScriptService(db)
+    # Картинку по чужой ссылке забираем к себе сразу: ссылки на CDN ВК умирают
+    # молча, и сообщение уходит без вложения (см. app.storage.rehost).
     script = await svc.create(
-        body.condition, body.phrase_text, type_id=body.type_id,
+        body.condition, await rehost_external_photos(body.phrase_text), type_id=body.type_id,
         marketing_tag=body.marketing_tag or None,
         funnel_stage=body.funnel_stage or None,
         follow_up_script_id=body.follow_up_script_id or None,
@@ -85,6 +88,8 @@ async def update_script(
 ):
     svc = ScriptService(db)
     updates = body.model_dump(exclude_none=True)
+    if updates.get("phrase_text"):
+        updates["phrase_text"] = await rehost_external_photos(updates["phrase_text"])
     if "marketing_tag" in updates and not updates["marketing_tag"]:
         updates["marketing_tag"] = None  # empty string clears the tag
     if "funnel_stage" in updates and not updates["funnel_stage"]:

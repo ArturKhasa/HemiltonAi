@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import require_role
 from app.db.models import PingRule, User
 from app.db.session import get_db
+from app.storage.rehost import rehost_external_photos
 
 router = APIRouter(prefix="/ping-rules", tags=["ping-rules"])
 
@@ -130,13 +131,15 @@ async def create_ping_rule(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_role("admin")),
 ):
+    # Картинку по чужой ссылке забираем к себе сразу: ссылки на CDN ВК умирают
+    # молча, и сообщение уходит без вложения (см. app.storage.rehost).
     rule = PingRule(
         type_id=body.type_id,
         funnel_type=body.funnel_type,
         step=_TEMP_STEP,
         delay_seconds=body.delay_seconds,
-        phrase_text=body.phrase_text,
-        manual_text=body.manual_text,
+        phrase_text=await rehost_external_photos(body.phrase_text),
+        manual_text=await rehost_external_photos(body.manual_text or "") or body.manual_text,
         after_status=body.after_status,
         marketing_tag=body.marketing_tag,
     )
@@ -176,6 +179,9 @@ async def update_ping_rule(
         raise HTTPException(status_code=404, detail="Ping rule not found")
 
     updates = body.model_dump(exclude_unset=True)
+    for _field in ("phrase_text", "manual_text"):
+        if updates.get(_field):
+            updates[_field] = await rehost_external_photos(updates[_field])
 
     new_phrase_text = updates.get("phrase_text", rule.phrase_text)
     new_manual_text = updates.get("manual_text", rule.manual_text)
