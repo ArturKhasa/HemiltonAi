@@ -3,7 +3,19 @@ import { ref, computed } from 'vue'
 import api from '../api'
 
 export const useAuthStore = defineStore('auth', () => {
-  const token = ref(localStorage.getItem('token') || '')
+  // Safari в приватном окне бросает и на чтении, и на записи localStorage —
+  // без обёртки панель там не открывается вовсе.
+  function readToken() {
+    try { return localStorage.getItem('token') || '' } catch { return '' }
+  }
+  function writeToken(value) {
+    try {
+      if (value) localStorage.setItem('token', value)
+      else localStorage.removeItem('token')
+    } catch {}
+  }
+
+  const token = ref(readToken())
   const user = ref(null)
   // Профиль запрошен и ответ получен (или окончательно не получен).
   const ready = ref(false)
@@ -13,7 +25,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function login(email, password) {
     const res = await api.post('/auth/login', { email, password })
     token.value = res.data.access_token
-    localStorage.setItem('token', token.value)
+    writeToken(token.value)
     await fetchMe()
   }
 
@@ -43,7 +55,7 @@ export const useAuthStore = defineStore('auth', () => {
     token.value = ''
     user.value = null
     ready.value = true
-    localStorage.removeItem('token')
+    writeToken('')
   }
 
   if (token.value) fetchMe()

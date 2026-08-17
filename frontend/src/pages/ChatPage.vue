@@ -1148,7 +1148,10 @@ function loadFiltersFromStorage() {
 }
 
 function saveFiltersToStorage() {
-  localStorage.setItem(FILTERS_KEY, JSON.stringify({
+  // Safari в приватном окне бросает на setItem. Фильтры — не та вещь, ради
+  // которой стоит ронять открытие диалога: не сохранились и не сохранились.
+  try {
+    localStorage.setItem(FILTERS_KEY, JSON.stringify({
     v: FILTERS_VERSION,
     filterShowTest: filterShowTest.value,
     filterShowReal: filterShowReal.value,
@@ -1164,8 +1167,9 @@ function saveFiltersToStorage() {
     filterDialogTypeId: filterDialogTypeId.value,
     filterPingFunnelType: filterPingFunnelType.value,
     filterFunnelStage: filterFunnelStage.value,
-    filterLastMessageFrom: filterLastMessageFrom.value,
-  }))
+      filterLastMessageFrom: filterLastMessageFrom.value,
+    }))
+  } catch {}
 }
 
 const _saved = loadFiltersFromStorage()
