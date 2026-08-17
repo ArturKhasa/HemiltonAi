@@ -71,6 +71,11 @@ async def extract_and_resolve_attachments(
         att = await resolve_attachment(db, group, m.group(1))
         if att:
             attachments.append(att)
+        else:
+            # Раньше несработавший перезалив был виден только в логе самого
+            # resolve_attachment: токен молча вырезался, и сообщение уходило без
+            # картинки, о которой мы даже не знали, что её нет.
+            logger.warning("вложение не перезалилось, уходит без картинки | url=%s", m.group(1))
     cleaned = _PHOTO_URL_TOKEN_RE.sub("", text or "")
 
     # Видео идёт вложением по id — и из голого токена, и из ссылки на vkvideo.
@@ -293,6 +298,46 @@ async def fetch_user_name(access_token: str, vk_user_id: int) -> tuple[str | Non
     return first or None, last or None
 
 
+async def verify_attachments_delivered(
+    db: AsyncSession, group: VkGroup, message_id: int | None, attachment: str,
+) -> bool:
+    """Дошли ли вложения до клиента на самом деле.
+
+    ВК принимает `attachment` с мёртвым объектом БЕЗ ошибки и просто не кладёт
+    его в сообщение: отправка успешна, в базе `delivered: true`, картинок у
+    клиента нет. Так десять дней уходили цена без фото и оформление без отзывов
+    (см. photo_upload.forget_attachments).
+
+    Поэтому спрашиваем у ВК, что он реально отправил. Недостача — выкидываем эти
+    объекты из кэша: следующая отправка перезальёт их с исходных ссылок и
+    картинки вернутся сами.
+    """
+    from app.vk.photo_upload import forget_attachments
+
+    expected = [a for a in attachment.split(",") if a]
+    if not message_id or not expected:
+        return True
+    try:
+        data = await vk_api_call(
+            group.access_token, "messages.getById", {"message_ids": message_id},
+        )
+        items = (data or {}).get("items") or []
+        delivered = len((items[0].get("attachments") or [])) if items else 0
+    except Exception as exc:
+        # Проверка — не повод ронять отправку: сообщение клиент уже получил.
+        logger.warning("не удалось проверить вложения | message_id=%s: %s", message_id, exc)
+        return True
+    if delivered >= len(expected):
+        return True
+    dropped = await forget_attachments(db, group.id, expected)
+    logger.error(
+        "ВК выбросил вложения: ожидали %d, доехало %d | message_id=%s | из кэша убрано %d "
+        "— следующая отправка перезальёт",
+        len(expected), delivered, message_id, dropped,
+    )
+    return False
+
+
 async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> SentMessage:
     """Отправка в диалог: находит клиента и его группу, шлёт от её имени.
 
@@ -314,10 +359,13 @@ async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> SentMes
         raise ValueError(f"vk group {client.vk_group_id} not found or has no token")
     text, attachment = await extract_and_resolve_attachments(db, group, text)
     try:
-        return await send_message(
+        sent = await send_message(
             group.access_token, int(client.vk_user_id), text,
             vk_group_id=group.id, attachment=attachment,
         )
+        if attachment:
+            await verify_attachments_delivered(db, group, sent.message_id, attachment)
+        return sent
     except VkMessagesForbiddenError as e:
         dialog.vk_blocked = True
         logger.warning(
