@@ -52,6 +52,17 @@ def slot_is_filled(slot: str, slots: dict[str, str]) -> bool:
 # Короткий ответ на вопрос: реплика из одного-трёх слов без вопросительного знака.
 # Длинную фразу как ответ не засчитываем — там может быть встречный вопрос.
 _MAX_ANSWER_WORDS = 4
+# Надпись собирается из нескольких сообщений подряд, но не бесконечно: дальше
+# это уже не надпись, а разговор.
+_MAX_INSCRIPTION_WORDS = 6
+
+# «Фамилию», «Имя», «имя и фамилия» — это выбор из нашего же вопроса «какое имя
+# ИЛИ фамилию напишем», а не текст на изделии. Сам текст приходит следующим
+# сообщением.
+_INSCRIPTION_META_RE = re.compile(
+    r"^\W*(?:им[яеё]|фамили\w+|фио|ник|имя\s+и\s+фамили\w+|фамили\w+\s+и\s+им[яеё])\W*$",
+    re.I,
+)
 
 _PHONE_RE = re.compile(r"(?:\+7|8|7)[\s\-(]*\d{3}[\s\-)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}")
 # «рост 180 вес 60», «180 и 60», «100 179» — два числа человеческого диапазона.
@@ -196,13 +207,26 @@ def collect_slots(history: list[tuple[str, str]]) -> dict[str, str]:
         # фамилию напишем». Город и цвет так брать нельзя — в диалоге 52 клиент
         # ответил «чёрный» на вопрос про дизайн, и любой слот-по-очереди
         # записал бы это в дизайн.
-        if (
-            asked == "inscription"
-            and "inscription" not in slots
-            and "?" not in text
-            and 0 < len(_words(text)) <= _MAX_ANSWER_WORDS
-        ):
-            slots["inscription"] = text.strip()
+        #
+        # Ответ приходит и несколькими сообщениями подряд: в диалоге 351 клиент
+        # написал «Фамилию», а следом «Шаманский» — и на согласование дизайна
+        # ушло «Надпись „Фамилию“ на чёрном свитшоте». Поэтому «имя», «фамилию»,
+        # «ФИО» надписью не считаем (это выбор из нашего же вопроса), а всё
+        # остальное, что клиент дописал до нашего следующего сообщения,
+        # собираем в одну надпись.
+        if asked == "inscription" and "?" not in text:
+            words = _words(text)
+            if words and not _INSCRIPTION_META_RE.match(text.strip()):
+                if len(words) <= _MAX_ANSWER_WORDS:
+                    known = slots.get("inscription", "")
+                    joined = f"{known} {text.strip()}".strip() if known else text.strip()
+                    if len(_words(joined)) <= _MAX_INSCRIPTION_WORDS:
+                        slots["inscription"] = joined
+                # Длинную фразу надписью не считаем, но и ждать дальше нечего:
+                # клиент перешёл к другой теме.
+                else:
+                    asked = None
+            continue
         asked = None
 
     return slots
