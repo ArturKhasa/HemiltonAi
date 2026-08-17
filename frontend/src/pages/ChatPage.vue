@@ -539,6 +539,7 @@
             >
               <option value="test">Тестовые диалоги</option>
               <option v-if="canSeeRealDialogs" value="real">Реальные диалоги</option>
+              <option v-if="canSeeRealDialogs" value="all">Все диалоги</option>
             </select>
           </div>
           <div class="flex gap-4">
@@ -1121,16 +1122,27 @@ function getDateRange(preset, customFrom, customTo) {
   }
 }
 
+// Версия сохранённых фильтров. Выбор «тестовые/реальные» из старых версий
+// игнорируем: он записывался туда прежним умолчанием, а не решением менеджера,
+// и на новом устройстве панель открывалась пустой.
+const FILTERS_VERSION = 2
+
 function loadFiltersFromStorage() {
   try {
     const raw = localStorage.getItem(FILTERS_KEY)
     if (!raw) return null
-    return JSON.parse(raw)
+    const saved = JSON.parse(raw)
+    if (saved?.v !== FILTERS_VERSION) {
+      delete saved.filterShowTest
+      delete saved.filterShowReal
+    }
+    return saved
   } catch { return null }
 }
 
 function saveFiltersToStorage() {
   localStorage.setItem(FILTERS_KEY, JSON.stringify({
+    v: FILTERS_VERSION,
     filterShowTest: filterShowTest.value,
     filterShowReal: filterShowReal.value,
     filterStatuses: filterStatuses.value,
@@ -1151,11 +1163,13 @@ function saveFiltersToStorage() {
 
 const _saved = loadFiltersFromStorage()
 const showFilters = ref(false)
-// По умолчанию — тестовые диалоги: страница открывается ради «+ Новый чат», а с
-// дефолтом на реальных тестировщик видел пустой список и решал, что чат не
-// создаётся (Женя, Георгий, 30.07). Реальные диалоги доступны в том же селекте.
-const filterShowTest = ref(_saved?.filterShowTest ?? true)
-const filterShowReal = ref(_saved?.filterShowReal ?? false)
+// По умолчанию — реальные диалоги: панелью теперь работают менеджеры, и на новом
+// устройстве они видели пустой список с фильтром «Тестовые диалоги» («нет
+// реальных диалогов», Георгий, 17.08 — и то же самое у второго менеджера).
+// Тестовые с кнопкой «+ Новый чат» рядом, в том же селекте: он открывался ради
+// них (Женя, Георгий, 30.07), поэтому там же есть «Все диалоги».
+const filterShowTest = ref(_saved?.filterShowTest ?? false)
+const filterShowReal = ref(_saved?.filterShowReal ?? true)
 const filterStatuses = ref(_saved?.filterStatuses ?? [])
 const filterDatePreset = ref(_saved?.filterDatePreset ?? 'all')
 const filterDateFrom = ref(_saved?.filterDateFrom ?? '')
