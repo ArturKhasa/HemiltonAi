@@ -8,7 +8,7 @@ VK принимает attachment в messages.send только на объект
 import logging
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import VkAttachmentCache, VkGroup
@@ -65,3 +65,23 @@ async def resolve_attachment(db: AsyncSession, group: VkGroup, source_url: str) 
     await db.commit()
     logger.info("resolve_attachment: uploaded+cached | group=%s | url=%s | attachment=%s", group.id, source_url, attachment)
     return attachment
+
+
+async def forget_attachments(db: AsyncSession, group_id: int, attachments: list[str]) -> int:
+    """Забыть перезалитые объекты — следующая отправка зальёт их заново.
+
+    Кэш живёт вечно, а объект в ВК — нет: залитые 5 августа картинки к скриптам
+    «2.2 Стоимость» и «5. Оформление» умерли 8 августа, и с тех пор `messages.send`
+    молча выбрасывал их из каждого сообщения. Клиенты десять дней получали цену
+    без фото товара и оформление без отзывов, а в базе стояло `delivered: true`.
+    """
+    if not attachments:
+        return 0
+    result = await db.execute(
+        delete(VkAttachmentCache).where(
+            VkAttachmentCache.vk_group_id == group_id,
+            VkAttachmentCache.attachment.in_(attachments),
+        )
+    )
+    await db.commit()
+    return result.rowcount or 0
