@@ -68,7 +68,11 @@
       </div>
 
       <div ref="dialogListEl" class="flex-1 overflow-y-auto" @scroll="onDialogListScroll">
-        <div v-if="dialogs.length === 0" class="p-4 text-sm text-gray-400 text-center mt-4">Нет чатов</div>
+        <div v-if="dialogsError" class="p-4 text-sm text-center mt-4">
+          <p class="text-red-600 mb-2">{{ dialogsError }}</p>
+          <button @click="loadDialogs()" class="px-3 py-1.5 border rounded-lg text-xs hover:bg-gray-50 text-gray-600">Повторить</button>
+        </div>
+        <div v-else-if="dialogs.length === 0" class="p-4 text-sm text-gray-400 text-center mt-4">Нет чатов</div>
         <div
           v-for="d in dialogs" :key="d.id"
           @click="openDialog(d.id)"
@@ -928,6 +932,9 @@ const dialogs = ref([])
 const dialogsOffset = ref(0)
 const dialogsHasMore = ref(true)
 const dialogsLoading = ref(false)
+// Список не загрузился — это не «нет чатов». Молчаливый пустой экран менеджеры
+// читали как «диалогов нет» и шли выяснять к нам (Георгий, 17.08).
+const dialogsError = ref('')
 const dialogsCount = ref(0)
 const dialogListEl = ref(null)
 const activeDialogId = ref(null)
@@ -1218,7 +1225,11 @@ function funnelStageLabel(stage) {
 }
 const isAdmin = computed(() => auth.user?.role === 'admin')
 const isCurator = computed(() => auth.user?.role === 'curator')
-const canSeeRealDialogs = computed(() => isAdmin.value || isCurator.value)
+// Пока профиль не пришёл, роль неизвестна — и прятать от пользователя реальные
+// диалоги на этом основании нельзя: именно так панель открывалась пустой, с
+// единственным пунктом «Тестовые диалоги» (Георгий, 17.08). Доступ всё равно
+// решает сервер: /chat/dialogs пускает только админа и куратора.
+const canSeeRealDialogs = computed(() => !auth.ready || !auth.user || isAdmin.value || isCurator.value)
 const hasActiveFilters = computed(() => filterShowTest.value || !filterShowReal.value || filterStatuses.value.length > 0 || filterDatePreset.value !== 'all' || filterClientId.value.trim() !== '' || filterClientDatePreset.value !== 'all' || filterAiProviders.value.length > 0 || filterDialogTypeId.value !== null || filterPingFunnelType.value !== null || filterFunnelStage.value !== null || filterLastMessageFrom.value !== '')
 const dialogTypeFilterValue = computed(() => {
   if (filterShowTest.value && filterShowReal.value) return 'all'
@@ -1281,6 +1292,7 @@ async function loadDialogs() {
   dialogsOffset.value = 0
   dialogsHasMore.value = true
   dialogsLoading.value = true
+  dialogsError.value = ''
   try {
     const res = await api.get('/chat/dialogs', { params: buildDialogParams(0) })
     dialogs.value = res.data
@@ -1289,6 +1301,13 @@ async function loadDialogs() {
     api.get('/chat/dialogs/count', { params: buildDialogParams(0) })
       .then(r => { dialogsCount.value = r.data.count })
       .catch(() => {})
+  } catch (e) {
+    dialogs.value = []
+    dialogsCount.value = 0
+    dialogsHasMore.value = false
+    dialogsError.value = e.response?.status === 403
+      ? 'Нет доступа к направлению диалогов — попросите админа выдать его в разделе «Пользователи».'
+      : 'Не удалось загрузить диалоги.'
   } finally {
     dialogsLoading.value = false
   }
