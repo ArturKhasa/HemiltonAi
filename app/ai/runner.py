@@ -1815,6 +1815,38 @@ async def _build_follow_up_parts(
     return parts
 
 
+async def build_script_parts(
+    db: AsyncSession,
+    dialog: Dialog,
+    script: Script,
+    client: Client | None,
+    ctx: str = "",
+) -> list[ReplyPart]:
+    """Скрипт и его связка, отрендеренные как в обычном ходе.
+
+    Нужен там, где ход модели не запускается вовсе: молчащему после приветствия
+    клиенту цену отправляет фоновая задача (app.ping.silent_greeting), а текст,
+    картинки и подстановки у неё должны быть ровно те же.
+    """
+    history = (await db.execute(
+        select(Message)
+        .where(Message.dialog_id == dialog.id)
+        .order_by(Message.created_at)
+    )).scalars().all()
+    slots = collect_slots([
+        ("client" if m.role == MessageRole.client else "manager", m.text) for m in history
+    ])
+
+    parts: list[ReplyPart] = []
+    first = await _render_script_part(db, dialog, script, client, slots)
+    if first is not None:
+        parts.append(first)
+    parts.extend(
+        await _build_follow_up_parts(db, dialog, script.id, client, ctx, known_slots=slots)
+    )
+    return parts
+
+
 async def _build_follow_up_part(
     db: AsyncSession,
     dialog: Dialog,

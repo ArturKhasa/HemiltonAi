@@ -7,6 +7,7 @@ import asyncio
 import logging
 
 from app.config import settings
+from app.ping.silent_greeting import send_price_to_silent
 from app.ping.worker import discover, process_due
 
 logger = logging.getLogger(__name__)
@@ -29,5 +30,13 @@ def start() -> list[asyncio.Task]:
         ),
         asyncio.create_task(
             _run_loop("discovery", discover, settings.PING_DISCOVERY_INTERVAL_SECONDS)
+        ),
+        # Молчание после вопроса про надпись закрывается ценой — это не пинг по
+        # правилу, а шаг воронки, поэтому отдельным циклом.
+        asyncio.create_task(
+            _run_loop(
+                "silent-greeting", send_price_to_silent,
+                settings.PING_DISCOVERY_INTERVAL_SECONDS,
+            )
         ),
     ]
