@@ -39,6 +39,12 @@ from app.vk.spintax import resolve_spintax
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
 from app.ai.greeting import greeting_text, resolve_greeting
+from app.sales.color_palette import with_palette
+from app.sales.offer_terms import (
+    data_requested_after_payment,
+    promises_both_gifts,
+    promises_offer_another_day,
+)
 from app.sales.price_objection import concession_allowed
 from app.sales.price_placeholder import payment_link_configured, render_price_placeholders
 from app.sales.status_names import (
@@ -288,6 +294,63 @@ _REQUOTE_RETRY_INSTRUCTION = (
     "товар снова. Отработай возражение: присоединись, назови ценность, предложи "
     "оплату частями. Напиши другой ответ."
 )
+
+# Условия акции модель достраивает сама и всегда в пользу клиента — разбор и
+# примеры из живого диалога в app.sales.offer_terms.
+_PAYMENT_ORDER_RETRY_INSTRUCTION = (
+    "[Служебное] Ты просишь ФИО и телефон ПОСЛЕ оплаты — порядок обратный. Счёт "
+    "выставляется как раз по этим данным, поэтому собрать их нужно ДО оплаты. "
+    "Перепиши ответ: попроси ФИО и телефон получателя сейчас, чтобы выставить "
+    "счёт, и не привязывай эту просьбу к оплате."
+)
+
+_GIFT_RETRY_INSTRUCTION = (
+    "[Служебное] Подарок ровно один — кепка ИЛИ белая футболка, оба сразу мы не "
+    "кладём. Перепиши ответ: мягко скажи, что подарок кладём один на выбор, и "
+    "спроси, какой из двух оставляем."
+)
+
+# Один и тот же запрос данных подряд. Диалог 343, 90 секунд: «пришлите ФИО и
+# телефон получателя» в 08:56:45, «Напишете ФИО и телефон получателя?» в 08:57:02
+# и «Пришлите ФИО и телефон получателя для оформления заказа?» в 08:57:39 —
+# клиент за это время спрашивал про макет и выбирал подарок. Защита от повторов
+# сравнивает тексты, а формулировка каждый раз новая; правило «спрашивается один
+# раз» в промпте относится к уже НАЗВАННЫМ фактам, а незакрытый слот под него не
+# попадает.
+_SLOT_REPEAT_LIMIT = 2
+
+_SLOT_REPEAT_RETRY_INSTRUCTION = (
+    "[Служебное] Ты уже дважды просила эти данные в последних сообщениях, клиент "
+    "их пока не прислал и пишет о другом. Третий раз просить нельзя — это читается "
+    "как то, что его не слушают. Ответь по существу на последнее сообщение клиента "
+    "и закончи ход ДРУГИМ вопросом по текущему шагу воронки."
+)
+
+_DEFERRED_OFFER_RETRY_INSTRUCTION = (
+    "[Служебное] Подарок и сегодняшняя скидка действуют только при оплате в день "
+    "обращения — на другой день обещать их нельзя. Клиент переносит оплату: не "
+    "подтверждай подарок и цену на завтра, а предложи бронь — она фиксирует и "
+    "цену, и подарок к нужной дате."
+)
+
+
+def repeats_slot_request(
+    reply: str, manager_texts: list[str], slots: dict[str, str],
+) -> str | None:
+    """Слот, который реплика просит уже третий раз подряд, либо None.
+
+    Смотрим только на последние наши сообщения: спросить второй раз — нормально,
+    клиент мог не заметить; третий — уже перебивание.
+    """
+    slot = asked_slot(reply or "")
+    if not slot or slot_is_filled(slot, slots or {}):
+        return None
+    recent = [t for t in manager_texts[-_SLOT_REPEAT_LIMIT:] if t]
+    if len(recent) < _SLOT_REPEAT_LIMIT:
+        return None
+    if all(asked_slot(t) == slot for t in recent):
+        return slot
+    return None
 
 
 def _prices_in(text: str) -> set[str]:
@@ -1061,12 +1124,43 @@ async def run_ai(
             and output.source_script_id is None
             and dialog.funnel_stage != _TERMINAL_STAGE
         )
+        # Условия акции: подарок один, только за оплату сегодня, данные
+        # получателя — до счёта. Обещание, данное здесь, потом отыгрывает назад
+        # живой менеджер, поэтому ловим кодом, а не только правилом в промпте.
+        bad_payment_order = data_requested_after_payment(output.reply_text)
+        both_gifts = promises_both_gifts(output.reply_text)
+        deferred_offer = promises_offer_another_day(output.reply_text)
+        repeated_slot = repeats_slot_request(output.reply_text, manager_history_texts, slots)
         if (
             not dup_match and not requote and not no_question and not ignores_refusal
-            and not repeated_chunk
+            and not repeated_chunk and not bad_payment_order and not both_gifts
+            and not deferred_offer and not repeated_slot
         ) or dup_attempt == 2:
             break
-        if ignores_refusal and design_edit and not refused:
+        if both_gifts:
+            logger.warning(
+                "[%s] ответ обещает оба подарка — retrying | reply_head=%r",
+                ctx, (output.reply_text or "")[:80],
+            )
+            correction = _GIFT_RETRY_INSTRUCTION
+        elif deferred_offer:
+            logger.warning(
+                "[%s] подарок или скидка обещаны не на сегодня — retrying | reply_head=%r",
+                ctx, (output.reply_text or "")[:80],
+            )
+            correction = _DEFERRED_OFFER_RETRY_INSTRUCTION
+        elif bad_payment_order:
+            logger.warning(
+                "[%s] данные получателя запрошены после оплаты — retrying", ctx,
+            )
+            correction = _PAYMENT_ORDER_RETRY_INSTRUCTION
+        elif repeated_slot:
+            logger.warning(
+                "[%s] третий подряд запрос одного и того же — retrying | slot=%s",
+                ctx, repeated_slot,
+            )
+            correction = _SLOT_REPEAT_RETRY_INSTRUCTION
+        elif ignores_refusal and design_edit and not refused:
             logger.warning(
                 "[%s] клиент просит правку, а ответ двигает воронку — retrying", ctx,
             )
@@ -1417,6 +1511,11 @@ async def run_ai(
                 logger.info(
                     "[%s] script photos carried over | script=%s", ctx, output.source_script_id,
                 )
+    # Вопрос про цвет без картинки с палитрой клиент читает вслепую — требование
+    # ОП от 17.08. Скрипт цвета модель пересказывает своими словами и токен фото
+    # теряет, поэтому палитру подставляем здесь.
+    reply_text = await with_palette(db, reply_text, type_id, slots.get("product"), ctx)
+
     reply_text, image_urls = _split_image_urls(reply_text)
     reply_text = _normalize_dashes(reply_text)
 
