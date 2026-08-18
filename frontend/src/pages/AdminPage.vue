@@ -385,6 +385,10 @@
             <p class="text-xs text-gray-400 mt-1">Поддерживается spintax: {вариант1|вариант2} — выбирается случайный вариант.</p>
           </div>
           <div>
+            <label class="block text-xs text-gray-500 mb-1.5">Картинки</label>
+            <GreetingImages v-model="form.tokens" />
+          </div>
+          <div>
             <label class="block text-xs text-gray-500 mb-1.5">Маркетинговый тег</label>
             <input
               v-model="form.marketing_tag"
@@ -419,7 +423,7 @@
           <button @click="showModal = false" class="px-4 py-2 text-sm text-gray-600 border rounded-lg hover:bg-gray-50">Отмена</button>
           <button
             @click="saveScript"
-            :disabled="saving || !form.condition.trim() || !form.phrase_text.trim()"
+            :disabled="saving || !form.condition.trim() || (!form.phrase_text.trim() && !form.tokens.length)"
             class="px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 font-medium"
           >
             {{ saving ? 'Сохранение...' : (editScript ? 'Сохранить' : 'Создать') }}
@@ -664,7 +668,7 @@ const showModal = ref(false)
 const editScript = ref(null)
 const deleteTarget = ref(null)
 
-const form = ref({ type_id: null, condition: '', phrase_text: '', marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, is_active: true })
+const form = ref({ type_id: null, condition: '', phrase_text: '', tokens: [], marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, is_active: true })
 
 // Funnel steps (must mirror STAGES in app/ai/funnel_agent.py). Empty = любая стадия (always shown).
 const FUNNEL_STAGES = [
@@ -720,13 +724,16 @@ async function load() {
 
 function openCreate() {
   editScript.value = null
-  form.value = { type_id: activeTypeId.value, condition: '', phrase_text: '', marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, is_active: true }
+  form.value = { type_id: activeTypeId.value, condition: '', phrase_text: '', tokens: [], marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, is_active: true }
   showModal.value = true
 }
 
 function openEdit(s) {
   editScript.value = s
-  form.value = { type_id: s.type_id, condition: s.condition, phrase_text: s.phrase_text, marketing_tag: s.marketing_tag || '', funnel_stage: s.funnel_stage || '', follow_up_script_id: s.follow_up_script_id || 0, is_active: s.is_active }
+  // Картинки правятся блоком ниже, а не ссылками посреди текста: в расчёте их
+  // три штуки по триста символов, и добраться до самого текста было нельзя.
+  const { body, tokens } = splitGreeting(s.phrase_text)
+  form.value = { type_id: s.type_id, condition: s.condition, phrase_text: body, tokens, marketing_tag: s.marketing_tag || '', funnel_stage: s.funnel_stage || '', follow_up_script_id: s.follow_up_script_id || 0, is_active: s.is_active }
   showModal.value = true
 }
 
@@ -738,14 +745,16 @@ async function saveScript() {
     // 0, а не null: PATCH на бэке режет null-поля (exclude_none), поэтому «связки
     // нет» приходит нулём и там же превращается обратно в NULL.
     const follow_up_script_id = form.value.follow_up_script_id || 0
+    const phrase_text = joinGreeting({ body: form.value.phrase_text, tokens: form.value.tokens })
     if (editScript.value) {
-      const res = await api.patch(`/scripts/${editScript.value.id}`, { ...form.value, marketing_tag, funnel_stage, follow_up_script_id })
+      const { tokens: _tokens, ...rest } = form.value
+      const res = await api.patch(`/scripts/${editScript.value.id}`, { ...rest, phrase_text, marketing_tag, funnel_stage, follow_up_script_id })
       const idx = scripts.value.findIndex(s => s.id === editScript.value.id)
       if (idx !== -1) scripts.value[idx] = res.data
     } else {
       const res = await api.post('/scripts/', {
         condition: form.value.condition,
-        phrase_text: form.value.phrase_text,
+        phrase_text,
         type_id: form.value.type_id,
         marketing_tag,
         funnel_stage,
