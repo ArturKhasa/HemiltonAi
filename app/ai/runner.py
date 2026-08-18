@@ -46,6 +46,7 @@ from app.sales.offer_terms import (
     promises_offer_another_day,
 )
 from app.sales.price_objection import concession_allowed
+from app.sales.product_photo import asks_to_see_product, reply_shows_photo
 from app.sales.price_placeholder import payment_link_configured, render_price_placeholders
 from app.sales.status_names import (
     AWAITING_PREPAY,
@@ -286,6 +287,15 @@ _REPEATED_CHUNK_RETRY_INSTRUCTION = (
     "в двух скриптах, и второй раз он звучит как заевшая пластинка. Скажи то же "
     "самое своими словами и короче или вовсе опусти этот абзац: остальную часть "
     "ответа сохрани."
+)
+
+_SHOW_PRODUCT_RETRY_INSTRUCTION = (
+    "[Служебное] Клиент просит ПОКАЗАТЬ изделие, а не спорит с ценой и не "
+    "сомневается в качестве. Отработка возражения тут не к месту. Вызови "
+    "get_product_photo с названием изделия, которое обсуждает клиент, и вставь "
+    "полученный токен [photo-...] в ответ — ответ без картинки на просьбу "
+    "показать бесполезен. Одной короткой фразой подпиши, что на фото, и закончи "
+    "вопросом текущего шага воронки."
 )
 
 _REQUOTE_RETRY_INSTRUCTION = (
@@ -1127,6 +1137,11 @@ async def run_ai(
         # Условия акции: подарок один, только за оплату сегодня, данные
         # получателя — до счёта. Обещание, данное здесь, потом отыгрывает назад
         # живой менеджер, поэтому ловим кодом, а не только правилом в промпте.
+        # Просьба показать изделие: ответ без картинки её не закрывает. Модель на
+        # «как она будет выглядеть» прислала отработку возражения (диалог 362).
+        no_photo_shown = (
+            asks_to_see_product(text) and not reply_shows_photo(output.reply_text)
+        )
         bad_payment_order = data_requested_after_payment(output.reply_text)
         both_gifts = promises_both_gifts(output.reply_text)
         deferred_offer = promises_offer_another_day(output.reply_text)
@@ -1137,7 +1152,12 @@ async def run_ai(
             and not deferred_offer and not repeated_slot
         ) or dup_attempt == 2:
             break
-        if both_gifts:
+        if no_photo_shown:
+            logger.warning(
+                "[%s] клиент просит показать изделие, а в ответе нет фото — retrying", ctx,
+            )
+            correction = _SHOW_PRODUCT_RETRY_INSTRUCTION
+        elif both_gifts:
             logger.warning(
                 "[%s] ответ обещает оба подарка — retrying | reply_head=%r",
                 ctx, (output.reply_text or "")[:80],
