@@ -70,7 +70,8 @@
         @click="picker?.click()"
         :disabled="uploading"
         class="text-xs px-3 py-1.5 rounded-lg bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-40"
-      >{{ uploading ? 'Загружаю…' : 'Загрузить с компьютера' }}</button>
+      >{{ uploading ? `Загружаю… ${progress}%` : 'Загрузить с компьютера' }}</button>
+      <span v-if="uploading && uploadingName" class="text-xs text-gray-400 block mt-1">{{ uploadingName }}</span>
       <span class="text-xs text-gray-400 block mt-1">или перетащите файлы сюда</span>
       <input
         ref="picker"
@@ -116,6 +117,8 @@ const draft = ref('')
 const error = ref('')
 const picker = ref(null)
 const uploading = ref(false)
+const uploadingName = ref('')
+const progress = ref(0)
 const dragging = ref(false)
 // Ссылка может уже не открываться (ВК протухает старые), тогда вместо битой
 // картинки показываем плашку — но токен не выбрасываем, это решение админа.
@@ -169,14 +172,28 @@ function remove(i) {
 // Файлы грузим по одному и добавляем по мере готовности: на десяти картинках
 // разом ждать «всё или ничего» неприятно, а упавшая одна не должна уносить
 // остальные.
+// Ждать ответа бесконечно нельзя: у axios таймаута нет, и зависший запрос
+// оставлял кнопку в «Загружаю…» навсегда — админ не знал, идёт загрузка или
+// всё уже упало (17.08, «прошло более 5 минут»).
+const UPLOAD_TIMEOUT_MS = 90_000
+// Тот же предел, что и на сервере (MEDIA_MAX_UPLOAD_MB): отказать сразу лучше,
+// чем гнать десятки мегабайт и получить отказ в конце.
+const MAX_UPLOAD_MB = 20
+
 async function upload(files) {
   const images = [...files].filter(f => f.type.startsWith('image/'))
   if (!images.length) {
     error.value = 'Это не картинка'
     return
   }
+  const tooBig = images.find(f => f.size > MAX_UPLOAD_MB * 1024 * 1024)
+  if (tooBig) {
+    error.value = `${tooBig.name}: больше ${MAX_UPLOAD_MB} МБ — уменьшите картинку`
+    return
+  }
   error.value = ''
   uploading.value = true
+  uploadingName.value = ''
   // Копим список у себя: prop приедет обратно только со следующей отрисовкой
   // родителя, и вторая картинка из пачки затёрла бы первую.
   let next = [...props.modelValue]
@@ -184,18 +201,29 @@ async function upload(files) {
     for (const file of images) {
       const form = new FormData()
       form.append('file', file)
+      uploadingName.value = file.name
+      progress.value = 0
       try {
         const res = await api.post('/media/upload', form, {
           headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: UPLOAD_TIMEOUT_MS,
+          onUploadProgress: (e) => {
+            if (e.total) progress.value = Math.round((e.loaded / e.total) * 100)
+          },
         })
         next = [...next, `[photo-${res.data.url}]`]
         emit('update:modelValue', next)
       } catch (e) {
-        error.value = `${file.name}: ${e.response?.data?.detail || 'не загрузилось'}`
+        const reason = e.code === 'ECONNABORTED'
+          ? 'сервер не ответил за полторы минуты — попробуйте ещё раз'
+          : (e.response?.data?.detail || 'не загрузилось')
+        error.value = `${file.name}: ${reason}`
       }
     }
   } finally {
     uploading.value = false
+    uploadingName.value = ''
+    progress.value = 0
     if (picker.value) picker.value.value = ''
   }
 }
