@@ -211,6 +211,10 @@
             <p class="text-xs text-gray-400 mt-1">Поддерживается spintax: {вариант1|вариант2} — выбирается случайный вариант.</p>
           </div>
           <div>
+            <label class="block text-xs text-gray-500 mb-1.5">Картинки</label>
+            <GreetingImages v-model="form.tokens" />
+          </div>
+          <div>
             <label class="block text-xs text-gray-500 mb-1.5">
               Текст вручную
               <span v-if="!form.phrase_text?.trim()" class="text-red-500 ml-1">* обязательно</span>
@@ -267,6 +271,8 @@
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
 import api from '../api'
+import GreetingImages from '../components/GreetingImages.vue'
+import { splitAttachments, joinAttachments } from '../utils/attachments'
 import { useAuthStore } from '../stores/auth'
 
 const auth = useAuthStore()
@@ -290,6 +296,7 @@ const form = ref({
   step: 0,
   delay_seconds: 1200,
   phrase_text: '',
+  tokens: [],
   manual_text: '',
   marketing_tag: null,
   is_active: true,
@@ -414,6 +421,7 @@ function openCreate() {
     step: nextStepFor(activeTypeId.value, funnel, tag),
     delay_seconds: 1200,
     phrase_text: '',
+    tokens: [],
     manual_text: '',
     marketing_tag: tag,
     is_active: true,
@@ -429,7 +437,8 @@ function openEdit(r) {
     funnel_type: r.funnel_type,
     step: r.step,
     delay_seconds: r.delay_seconds,
-    phrase_text: r.phrase_text ?? '',
+    phrase_text: splitAttachments(r.phrase_text).body,
+    tokens: splitAttachments(r.phrase_text).tokens,
     manual_text: r.manual_text ?? '',
     marketing_tag: r.marketing_tag ?? null,
     is_active: r.is_active,
@@ -445,7 +454,7 @@ async function saveRule() {
       funnel_type: form.value.funnel_type,
       step: form.value.step,
       delay_seconds: form.value.delay_seconds,
-      phrase_text: form.value.phrase_text,
+      phrase_text: joinAttachments({ body: form.value.phrase_text, tokens: form.value.tokens }),
       manual_text: form.value.manual_text || null,
       marketing_tag: form.value.marketing_tag || null,
       ...(editRule.value ? { is_active: form.value.is_active } : {}),

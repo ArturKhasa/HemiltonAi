@@ -647,6 +647,7 @@ import { ref, computed, onMounted } from 'vue'
 import api from '../api'
 import { useAuthStore } from '../stores/auth'
 import GreetingImages from '../components/GreetingImages.vue'
+import { splitAttachments, joinAttachments } from '../utils/attachments'
 
 const auth = useAuthStore()
 
@@ -812,20 +813,8 @@ const refForm = ref({ tag: '', type_id: null, is_active: true, note: '', greetin
 const greetingDrafts = ref({})
 const greetingSaved = ref(null)
 
-const ATTACHMENT_TOKEN_RE = /\[(?:photo|video|clip|audio_message)-?[^\]\s]+\]/g
-
-function splitGreeting(text) {
-  const tokens = (text || '').match(ATTACHMENT_TOKEN_RE) || []
-  const body = (text || '').replace(ATTACHMENT_TOKEN_RE, '').replace(/\n{3,}/g, '\n\n').trim()
-  return { body, tokens }
-}
-
-function joinGreeting(draft) {
-  const body = (draft?.body || '').trim()
-  const tokens = draft?.tokens || []
-  if (!tokens.length) return body
-  return body ? `${body}\n\n${tokens.join('\n')}` : tokens.join('\n')
-}
+const splitGreeting = splitAttachments
+const joinGreeting = joinAttachments
 
 const greetingScripts = computed(() =>
   scripts.value.filter(s => (s.condition || '').toLowerCase().includes('первое приветственное'))
