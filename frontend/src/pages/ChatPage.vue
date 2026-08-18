@@ -375,7 +375,27 @@
                 {{ paymentConfirmed ? '💰 Оплата подтверждена' : 'Подтвердить оплату' }}
               </button>
             </div>
+            <div v-if="managerFiles.length" class="flex flex-wrap gap-2 mb-2">
+              <div v-for="(f, i) in managerFiles" :key="i" class="relative">
+                <img v-if="f.preview" :src="f.preview" class="h-16 w-16 object-cover rounded-lg border" />
+                <div v-else class="h-16 w-24 rounded-lg border bg-gray-50 flex items-center justify-center px-1">
+                  <span class="text-[10px] text-gray-500 text-center break-all leading-tight">{{ f.name }}</span>
+                </div>
+                <button @click="removeManagerFile(i)" class="absolute -top-1 -right-1 bg-red-500 text-white rounded-full w-4 h-4 flex items-center justify-center text-xs leading-none">×</button>
+                <div v-if="f.uploading" class="absolute inset-0 bg-black/30 rounded-lg flex items-center justify-center">
+                  <span class="text-white text-xs">…</span>
+                </div>
+              </div>
+            </div>
+            <input ref="managerFileInput" type="file" accept="image/*,video/*" multiple class="hidden" @change="onManagerFilesSelected" />
             <form @submit.prevent="sendAsManager" class="flex gap-3">
+              <button
+                type="button"
+                :disabled="sendingManager"
+                @click="managerFileInput.click()"
+                class="px-3 py-2.5 border rounded-xl text-gray-500 hover:text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                title="Прикрепить фото или видео"
+              >📎</button>
               <textarea
                 v-model="managerInput"
                 :disabled="sendingManager"
@@ -386,7 +406,7 @@
               />
               <button
                 type="submit"
-                :disabled="sendingManager || !managerInput.trim()"
+                :disabled="sendingManager || (!managerInput.trim() && !managerFiles.length) || managerFiles.some(f => f.uploading)"
                 class="bg-brand-600 text-white px-5 py-2.5 rounded-xl hover:bg-brand-700 disabled:opacity-50 text-sm font-medium"
               >
                 {{ sendingManager ? 'Отправка...' : 'Ответить' }}
@@ -1756,19 +1776,61 @@ const managerInput = ref('')
 const sendingManager = ref(false)
 const managerError = ref('')
 
+// Вложения менеджера: грузим на наш сервер, отправляем ссылками — бэкенд
+// превратит их в токены, а отправка перезальёт во ВК (просьба ОП от 18.08:
+// «отправку фото и видео из панельки тоже добавить»).
+const managerFiles = ref([])
+const managerFileInput = ref(null)
+
+function removeManagerFile(index) {
+  const f = managerFiles.value[index]
+  if (f?.preview) URL.revokeObjectURL(f.preview)
+  managerFiles.value.splice(index, 1)
+}
+
+async function onManagerFilesSelected(e) {
+  const files = Array.from(e.target.files)
+  e.target.value = ''
+  const dialogId = activeDialogId.value
+  for (const file of files) {
+    const preview = file.type.startsWith('image/') ? URL.createObjectURL(file) : null
+    const idx = managerFiles.value.length
+    managerFiles.value.push({ name: file.name, preview, url: null, uploading: true })
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      const res = await api.post(`/chat/${dialogId}/upload`, form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 120_000,
+      })
+      if (managerFiles.value[idx]) managerFiles.value[idx].url = res.data.url
+    } catch (err) {
+      managerError.value = `${file.name}: ${err.response?.data?.detail || 'не загрузилось'}`
+      if (preview) URL.revokeObjectURL(preview)
+      managerFiles.value.splice(idx, 1)
+      continue
+    } finally {
+      if (managerFiles.value[idx]) managerFiles.value[idx].uploading = false
+    }
+  }
+}
+
 async function sendAsManager() {
   const text = managerInput.value.trim()
-  if (!text || sendingManager.value) return
+  const files = managerFiles.value.filter(f => f.url).map(f => f.url)
+  if ((!text && !files.length) || sendingManager.value) return
 
   sendingManager.value = true
   managerError.value = ''
   const seq = _openSeq
   const dialogId = activeDialogId.value
   try {
-    const res = await api.post(`/chat/${dialogId}/reply`, { text, files: [] })
+    const res = await api.post(`/chat/${dialogId}/reply`, { text, files })
     if (seq !== _openSeq) return
     messages.value.push(res.data)
     managerInput.value = ''
+    for (const f of managerFiles.value) if (f.preview) URL.revokeObjectURL(f.preview)
+    managerFiles.value = []
     // Отправка сама ставит ИИ на паузу — отражаем это в тумблере, не перезагружая чат.
     aiPaused.value = true
     const d = dialogs.value.find(x => x.id === dialogId)

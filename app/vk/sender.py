@@ -44,6 +44,9 @@ _DEAD_ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|audio_message)-?\d+_\d+\]")
 # разрешён: именно так и выглядит выдумка («[photo-фиолетовый свитшот]»).
 _JUNK_ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|video|clip|audio_message)-?[^\]\n]*\]")
 _PHOTO_URL_TOKEN_RE = re.compile(r"\[photo-(https?://[^\]]+)\]")
+# «[doc-<url>]» — файл, который картинкой не является: видео, pdf, аудио. Такие
+# ВК принимает во вложение только документом (см. photo_upload.resolve_doc).
+_DOC_URL_TOKEN_RE = re.compile(r"\[doc-(https?://[^\]]+)\]")
 _VIDEO_URL_TOKEN_RE = re.compile(r"\[video-(https?://[^\]]+)\]")
 # "[video-1_2]" и "[clip-1_2]" — минус владельца-сообщества внутри числа.
 _VIDEO_ID_TOKEN_RE = re.compile(r"\[(?:video|clip)(-?\d+_\d+)\]")
@@ -52,7 +55,7 @@ _VIDEO_URL_IDS_RE = re.compile(r"(?:video|clip)(-?\d+_\d+)")
 
 
 async def extract_and_resolve_attachments(
-    db: AsyncSession, group: VkGroup, text: str,
+    db: AsyncSession, group: VkGroup, text: str, peer_id: int | None = None,
 ) -> tuple[str, str | None]:
     """Разбирает вложения в тексте фразы перед отправкой в VK:
     - "[photo-<url>]" — скачивает и перезаливает на СВОЁ сообщество (с кэшем),
@@ -64,7 +67,7 @@ async def extract_and_resolve_attachments(
     Возвращает (текст без токенов, attachment-строка для messages.send через
     запятую, или None если вложений нет).
     """
-    from app.vk.photo_upload import resolve_attachment  # local: avoids import cycle (photo_upload imports vk_api_call from here)
+    from app.vk.photo_upload import resolve_attachment, resolve_doc  # local: avoids import cycle (photo_upload imports vk_api_call from here)
 
     attachments: list[str] = []
     for m in _PHOTO_URL_TOKEN_RE.finditer(text or ""):
@@ -77,6 +80,15 @@ async def extract_and_resolve_attachments(
             # картинки, о которой мы даже не знали, что её нет.
             logger.warning("вложение не перезалилось, уходит без картинки | url=%s", m.group(1))
     cleaned = _PHOTO_URL_TOKEN_RE.sub("", text or "")
+
+    # Видео и прочие файлы из панели: менеджер прикладывает их к ответу клиенту.
+    for m in _DOC_URL_TOKEN_RE.finditer(cleaned):
+        att = await resolve_doc(db, group, m.group(1), peer_id)
+        if att:
+            attachments.append(att)
+        else:
+            logger.warning("файл не перезалился, уходит без вложения | url=%s", m.group(1))
+    cleaned = _DOC_URL_TOKEN_RE.sub("", cleaned)
 
     # Видео идёт вложением по id — и из голого токена, и из ссылки на vkvideo.
     for m in _VIDEO_ID_TOKEN_RE.finditer(cleaned):
@@ -390,7 +402,9 @@ async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> SentMes
     if not group or not group.access_token:
         raise ValueError(f"vk group {client.vk_group_id} not found or has no token")
     photo_urls = _PHOTO_URL_TOKEN_RE.findall(text or "")
-    text, attachment = await extract_and_resolve_attachments(db, group, text)
+    text, attachment = await extract_and_resolve_attachments(
+        db, group, text, peer_id=int(client.vk_user_id),
+    )
     try:
         sent = await send_message(
             group.access_token, int(client.vk_user_id), text,

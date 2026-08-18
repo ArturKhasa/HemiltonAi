@@ -172,3 +172,15 @@ def carry_over_attachments(text: str, source_text: str) -> str:
     if not missing:
         return text
     return (text or "").rstrip() + "\n\n" + "\n".join(missing)
+
+# Картинку ВК принимает фотографией, всё остальное — только документом
+# (см. app.vk.photo_upload.resolve_doc). Расширение берём из имени файла в
+# ссылке: своё хранилище кладёт файлы как «<uuid>.<ext>».
+_IMAGE_EXTENSIONS = frozenset(("jpg", "jpeg", "png", "gif", "webp", "heic"))
+
+
+def attachment_token(url: str) -> str:
+    """Токен вложения для ссылки: [photo-…] для картинки, [doc-…] для файла."""
+    name = (url or "").split("?", 1)[0].rsplit("/", 1)[-1]
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    return f"[{'photo' if ext in _IMAGE_EXTENSIONS else 'doc'}-{url}]"

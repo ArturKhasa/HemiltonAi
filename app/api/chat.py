@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import ensure_type_access, get_allowed_type_ids, require_role
 from app.storage.local import safe_extension, save_file
 from app.config import settings
+from app.utils.media import attachment_token
 from app.db.models import AIRun, Client, Dialog, DialogPingState, DialogStatusConfig, DialogType, Message, MessageFeedback, MessageRole, User
 from app.db.session import get_db
 
@@ -547,12 +548,17 @@ async def upload_file(
     if not dialog:
         raise HTTPException(status_code=404, detail="Dialog not found")
     await ensure_type_access(current_user, dialog.type_id, db)
-    if not dialog.is_test:
-        raise HTTPException(status_code=403, detail="Not a test dialog")
-
+    # Раньше сюда пускали только тестовые диалоги. Менеджеру, который отвечает
+    # клиенту в ВК, тоже есть что приложить — фото готового изделия, макет,
+    # видео со склада (просьба ОП от 18.08).
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="File cannot be empty")
+    limit = settings.MEDIA_MAX_UPLOAD_MB * 1024 * 1024
+    if len(data) > limit:
+        raise HTTPException(
+            status_code=413, detail=f"Файл больше {settings.MEDIA_MAX_UPLOAD_MB} МБ",
+        )
     key = f"chat/{dialog_id}/{uuid.uuid4().hex}.{safe_extension(file.filename)}"
     url = await save_file(data, key, content_type=file.content_type or "image/jpeg")
     return {"url": url}
@@ -665,7 +671,9 @@ async def reply_as_manager(
     from app.vk.sender import VkMessagesForbiddenError, send_to_dialog
 
     text = (body.text or "").strip()
-    if not text:
+    # Одно вложение без подписи — нормальный ответ менеджера: «вот как выглядит»
+    # и фотография. Пустым такое сообщение не считаем.
+    if not text and not body.files:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
     dialog = await db.get(Dialog, dialog_id)
@@ -673,9 +681,12 @@ async def reply_as_manager(
         raise HTTPException(status_code=404, detail="Dialog not found")
     await ensure_type_access(current_user, dialog.type_id, db)
 
+    # Файлы уходят вложением, а не ссылкой в тексте: ссылку клиент видит как
+    # набор символов, а вложение ВК показывает картинкой или файлом.
     outgoing = text
     if body.files:
-        outgoing = (outgoing + "\n" + "\n".join(body.files)).strip()
+        tokens = "\n".join(attachment_token(u) for u in body.files)
+        outgoing = (outgoing + "\n\n" + tokens).strip()
 
     message = Message(
         dialog_id=dialog_id,

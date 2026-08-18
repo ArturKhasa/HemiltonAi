@@ -43,6 +43,60 @@ async def upload_photo_for_messages(access_token: str, image_bytes: bytes, filen
     return f"photo{photo['owner_id']}_{photo['id']}"
 
 
+async def upload_doc_for_messages(
+    access_token: str, data: bytes, filename: str, peer_id: int | None = None,
+) -> str:
+    """Залить файл документом сообщества и вернуть «doc<owner>_<id>».
+
+    Видео и всё, что не картинка, ВК принимает во вложение только так: у
+    photos-загрузчика для сообщений другой формат.
+    """
+    params = {"type": "doc"}
+    if peer_id:
+        params["peer_id"] = peer_id
+    info = await vk_api_call(access_token, "docs.getMessagesUploadServer", params)
+    async with httpx.AsyncClient(timeout=_UPLOAD_TIMEOUT) as client:
+        resp = await client.post(
+            info["upload_url"], files={"file": (filename, data)},
+        )
+    resp.raise_for_status()
+    uploaded = resp.json()
+    if not uploaded.get("file"):
+        raise RuntimeError(f"upload server returned no file: {uploaded}")
+    saved = await vk_api_call(
+        access_token, "docs.save", {"file": uploaded["file"], "title": filename},
+    )
+    doc = saved.get("doc") if isinstance(saved, dict) else saved[0]
+    return f"doc{doc['owner_id']}_{doc['id']}"
+
+
+async def resolve_doc(
+    db: AsyncSession, group: VkGroup, source_url: str, peer_id: int | None = None,
+) -> str | None:
+    """Кэш + перезалив документом. None, если не удалось."""
+    cached = await db.scalar(
+        select(VkAttachmentCache).where(
+            VkAttachmentCache.vk_group_id == group.id,
+            VkAttachmentCache.source_url == source_url,
+        )
+    )
+    if cached:
+        return cached.attachment
+    filename = source_url.split("?", 1)[0].rsplit("/", 1)[-1] or "file"
+    try:
+        data = await download_image(source_url)
+        attachment = await upload_doc_for_messages(
+            group.access_token, data, filename, peer_id,
+        )
+    except Exception as e:
+        logger.warning("resolve_doc failed | url=%s | error=%s", source_url, e)
+        return None
+    db.add(VkAttachmentCache(vk_group_id=group.id, source_url=source_url, attachment=attachment))
+    await db.commit()
+    logger.info("resolve_doc: uploaded+cached | group=%s | attachment=%s", group.id, attachment)
+    return attachment
+
+
 async def resolve_attachment(db: AsyncSession, group: VkGroup, source_url: str) -> str | None:
     """Кэш + перезалив: attachment-строка для source_url на КОНКРЕТНОЕ сообщество.
     None, если скачать/перезалить не удалось (клиенту тогда уходит текст без фото —
