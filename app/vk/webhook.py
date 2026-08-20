@@ -6,6 +6,7 @@
 """
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
@@ -235,6 +236,7 @@ async def _get_or_create_client(
 
 async def _get_or_create_dialog(
     db: AsyncSession, client: Client, type_id: int | None, ai_allowed: bool = True,
+    prior_history: bool = False,
 ) -> Dialog:
     dialog = await db.scalar(
         select(Dialog).where(Dialog.client_id == client.id, Dialog.type_id == type_id)
@@ -252,8 +254,10 @@ async def _get_or_create_dialog(
         type_id=type_id,
         current_status_id=initial_status.id if initial_status else None,
         is_test=False,
-        # Метка не в белом списке — диалог сразу к живому менеджеру, ИИ молчит.
+        # Метка не в белом списке или переписка велась до нас — диалог сразу к
+        # живому менеджеру, ИИ молчит.
         ai_paused=not ai_allowed,
+        prior_history=prior_history,
         ai_provider=pick_ai_provider(client.id),
     )
     db.add(dialog)
@@ -267,22 +271,34 @@ async def _get_or_create_dialog(
 # клиент не написал ни разу, переписка для нас всё равно новая.
 _HISTORY_LOOKBACK = 50
 
+# Насколько свежим должно быть исходящее сообщение, чтобы считать его частью
+# текущего захода клиента, а не прошлой переписки. Приветствие по кнопке
+# «Начать» уходит за секунды до первого сообщения; рассылка, на которую лид
+# отвечает через день, под это окно не попадает.
+_WELCOME_WINDOW_SECONDS = 15 * 60
+
 
 async def conversation_is_new(
     group: VkGroup, vk_user_id: int, external_message_id: str | None,
 ) -> bool:
-    """Первое ли это сообщение клиента в переписке.
+    """Началась ли эта переписка с нас.
 
-    Сообщество подключают к ИИ, когда у него уже есть годы переписок. Лид,
-    которого вели раньше руками, отвечает на рассылку или пишет сам — и ИИ
-    начинал вести его с приветствия «меня зовут София», поверх живой истории.
-    Требование заказчика от 20.08: ИИ берёт только новые диалоги.
+    Сообщество подключают к ИИ, когда у него уже годы переписок. Постоянный
+    клиент пишет «Давайте», продолжая вчерашний разговор, а ИИ здоровается и
+    представляется — и клиент понимает, что перед ним бот (диалог 756, 20.08:
+    в переписке 266 сообщений, из них наших ноль). Требование заказчика: старым
+    клиентам не отвечаем, если отвечали не мы.
 
-    Считаем по сообщениям КЛИЕНТА: исходящие сюда не годятся — сообщество и
-    новому лиду пишет первым (кнопка «Начать» и приветствие рассылки).
+    Старой переписку делает любое из двух:
+    - клиент писал в неё раньше;
+    - ему отвечали раньше — рассылка, менеджер, другая система.
 
-    ВК недоступен — отвечаем «новая»: молчание в диалоге нового лида дороже,
-    чем лишний ответ в старом.
+    Приветствие самого сообщества под это не подпадает: кнопка «Начать»
+    показывает его за секунды до первого сообщения клиента, поэтому свежие
+    исходящие в расчёт не берём.
+
+    ВК недоступен — считаем переписку новой: молчание в диалоге нового лида
+    дороже, чем лишний ответ в старом.
     """
     from app.vk.sender import vk_api_call
 
@@ -304,11 +320,18 @@ async def conversation_is_new(
         # Ответ не той формы — разбирать нечего, считаем переписку новой.
         return True
 
+    # ВК отдаёт date в Unix-времени, а msk_now() — «наивное» московское:
+    # у него .timestamp() врёт на часовой пояс машины.
+    now_ts = time.time()
     for item in response.get("items") or []:
         if external_message_id and str(item.get("id")) == str(external_message_id):
             continue
         # from_id > 0 — пользователь; у сообщества он отрицательный.
         if int(item.get("from_id") or 0) == int(vk_user_id):
+            return False
+        sent_at = int(item.get("date") or 0)
+        # Без даты судить не о чем — такое сообщение старой переписки не делает.
+        if sent_at and now_ts - sent_at > _WELCOME_WINDOW_SECONDS:
             return False
     return True
 
@@ -327,15 +350,21 @@ async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMe
     )
     # Переписку, которая шла до подключения ИИ, он не подхватывает: проверяем
     # только в момент, когда диалог заводится у нас впервые.
-    if known_dialog is None and ai_allowed:
-        ai_allowed = await conversation_is_new(group, msg.vk_user_id, msg.external_message_id)
-        if not ai_allowed:
+    prior_history = False
+    if known_dialog is None:
+        prior_history = not await conversation_is_new(
+            group, msg.vk_user_id, msg.external_message_id,
+        )
+        if prior_history:
+            ai_allowed = False
             logger.info(
-                "[vk=%s/%s] переписка велась раньше — ИИ не подключаем, диалог человеку",
+                "[vk=%s/%s] переписка велась до нас — ИИ не подключаем, диалог человеку",
                 group.group_id, msg.vk_user_id,
             )
 
-    dialog = await _get_or_create_dialog(db, client, type_id, ai_allowed=ai_allowed)
+    dialog = await _get_or_create_dialog(
+        db, client, type_id, ai_allowed=ai_allowed, prior_history=prior_history,
+    )
     ctx = f"vk={group.group_id}/{msg.vk_user_id}"
 
     # Дедуп: ВК ретраит события. Сообщение с завершённым AIRun — пропускаем;

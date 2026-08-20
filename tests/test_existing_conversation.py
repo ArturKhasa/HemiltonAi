@@ -5,6 +5,8 @@
 подключают к ИИ, когда у него уже годы переписок: лид, которого вели руками,
 отвечает на рассылку, и ИИ начинал с «меня зовут София» поверх живой истории.
 """
+import time
+
 import pytest
 
 from app.db.models import VkGroup
@@ -41,11 +43,27 @@ async def test_community_greeting_before_it_still_counts_as_new(group, monkeypat
     monkeypatch.setattr(
         "app.vk.sender.vk_api_call",
         _vk_returning([
-            {"id": 1000, "from_id": CLIENT, "text": "Начать"},
-            {"id": 999, "from_id": GROUP, "text": "Добро пожаловать!"},
+            {"id": 1000, "from_id": CLIENT, "text": "Начать", "date": int(time.time())},
+            # Приветствие по кнопке «Начать» — за секунды до сообщения клиента.
+            {"id": 999, "from_id": GROUP, "text": "Добро пожаловать!",
+             "date": int(time.time()) - 5},
         ]),
     )
     assert await conversation_is_new(group, CLIENT, NEW_MSG) is True
+
+
+async def test_broadcast_from_yesterday_is_an_old_conversation(group, monkeypatch):
+    """«Не важно, рассылка была, лид сам написал по теме» — диалог всё равно
+    вели до нас, ИИ в него не вступает."""
+    monkeypatch.setattr(
+        "app.vk.sender.vk_api_call",
+        _vk_returning([
+            {"id": 1000, "from_id": CLIENT, "text": "Давайте", "date": int(time.time())},
+            {"id": 950, "from_id": GROUP, "text": "Ваш заказ ещё актуален?",
+             "date": int(time.time()) - 86400},
+        ]),
+    )
+    assert await conversation_is_new(group, CLIENT, NEW_MSG) is False
 
 
 async def test_client_wrote_before_is_an_old_conversation(group, monkeypatch):

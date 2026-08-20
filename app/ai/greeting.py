@@ -145,6 +145,13 @@ async def resolve_greeting(
     None — работаем как обычно, через модель."""
     if await dialog_has_outgoing(db, dialog.id):
         return None
+    if getattr(dialog, "prior_history", False):
+        # Переписка велась до нас: «Здравствуйте! Меня зовут София» человеку, с
+        # которым говорили вчера, — это прямое доказательство, что перед ним
+        # бот (диалог 756, 20.08). Такому диалогу ИИ вообще не полагается, но
+        # если его вернули вручную — начинаем с сути, без знакомства.
+        logger.info("dialog=%s: переписка велась раньше — приветствие не отправляем", dialog.id)
+        return None
     script = await pick_greeting_script(db, type_id, client)
     if script is None:
         logger.warning(

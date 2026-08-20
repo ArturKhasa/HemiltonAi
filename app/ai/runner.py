@@ -40,6 +40,7 @@ from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
 from app.ai.greeting import greeting_text, resolve_greeting
 from app.sales.color_palette import with_palette
+from app.sales.non_answer import is_non_answer
 from app.sales.offer_terms import (
     data_requested_after_payment,
     promises_both_gifts,
@@ -263,6 +264,13 @@ _TERMINAL_STAGE = "paid"
 # «Спасибо не надо», «Не надо мне» — клиент отказывается, а модель читает это как
 # согласие: на третье подряд она написала «фиксирую под Вас этот вариант» и следом
 # ушёл счёт на 4 990 ₽ (диалог 89). Шаг не закрыт, пока не понятно, от чего отказ.
+_NON_ANSWER_RETRY_INSTRUCTION = (
+    "[Служебное] Клиент не ответил на твой вопрос, а переспросил — он не понял, "
+    "о чём речь. Ничего не фиксируй, следующий шаг воронки не начинай, цену и "
+    "условия не повторяй простынёй. Ответь как человек: коротко поясни, что ты "
+    "имела в виду, и повтори тот же вопрос своими словами."
+)
+
 _REFUSAL_RETRY_INSTRUCTION = (
     "[Служебное] Клиент отказывается, а не подтверждает. Воронку двигать нельзя: "
     "не фиксируй дизайн, не называй сумму заказа, не проси ФИО и телефон, не "
@@ -695,6 +703,17 @@ async def run_ai(
     # честного «не успеем» (замечание ОП от 6 августа). Строка меняется каждую
     # минуту, поэтому идёт в динамический хвост, а не в кэшируемый системный
     # промпт.
+    if getattr(dialog, "prior_history", False):
+        dynamic_context.append(
+            "[Переписка велась до нас]\n"
+            "С этим клиентом уже общались раньше — в переписке есть сообщения, "
+            "которых у тебя в истории нет. Не знакомься и не начинай с начала: "
+            "«здравствуйте», «меня зовут София», «я Ваш персональный менеджер» "
+            "тут читаются как подмена собеседника. О прошлых заказах, договорённостях "
+            "и обещаниях ничего не подтверждай — ты их не видишь; такие вопросы "
+            "передавай человеку (need_curator=true)."
+        )
+
     dynamic_context.append(
         f"[Сегодня]\n{human_msk_now()}\n"
         "Изготовление занимает 10-14 дней плюс доставка 2-3 дня. Считай сроки от "
@@ -939,7 +958,13 @@ async def run_ai(
     design_edit = client_wants_design_edit(text)
     if design_edit:
         logger.info("[%s] клиент просит правку дизайна — воронку не двигаем | text=%r", ctx, text[:60])
-    held = refused or design_edit
+    # «М?», «Чего?», «?» — это не ответ, а переспрос: шаг воронки на нём не
+    # закрыт (диалог 756, 20.08 — на «М?» ушло «Супер, зафиксировала» и следом
+    # прайс). Держим ход теми же тормозами, что и на отказе.
+    non_answer = is_non_answer(text)
+    if non_answer:
+        logger.info("[%s] клиент переспрашивает, а не отвечает — воронку не двигаем | text=%r", ctx, text[:40])
+    held = refused or design_edit or non_answer
     praise_point = not held and await answered_inscription_question(db, dialog.id)
     payment_choice_point = not held and await payment_option_chosen(db, dialog.id, text)
     # Клиент назвал рост и вес — следующим ходом идёт сверка дизайна, и она
@@ -1190,6 +1215,12 @@ async def run_ai(
                 "[%s] абзац уже был отправлен — retrying | chunk=%r", ctx, repeated_chunk[:80],
             )
             correction = _REPEATED_CHUNK_RETRY_INSTRUCTION
+        elif ignores_refusal and non_answer:
+            logger.warning(
+                "[%s] клиент переспросил, а ответ двигает воронку — retrying | reply_head=%r",
+                ctx, (output.reply_text or "")[:80],
+            )
+            correction = _NON_ANSWER_RETRY_INSTRUCTION
         elif ignores_refusal:
             logger.warning(
                 "[%s] клиент отказался, а ответ двигает воронку — retrying | reply_head=%r",

@@ -118,6 +118,10 @@ class Dialog(Base):
     ai_paused = Column(Boolean, default=False, nullable=False, server_default="false")
     # Клиент запретил сообщения от сообщества (ошибки ВК 901/902) — не ретраить отправку.
     vk_blocked = Column(Boolean, default=False, nullable=False, server_default="false")
+    # Переписка с этим клиентом велась до нас: он писал в неё раньше или ему
+    # отвечал кто-то другой. Такой диалог ИИ не берёт, а если человек вернёт его
+    # вручную — знакомиться заново нельзя (миграция 049).
+    prior_history = Column(Boolean, default=False, nullable=False, server_default="false")
     ai_provider = Column(String(32), nullable=False, default="openai", server_default="openai")
     # Стадия скрипта продаж (greeting/pricing/options/sizing/design/checkout/payment_link/post_payment/paid).
     # Детектится FunnelAgent на каждое сообщение клиента ПЕРЕД SalesAgent. Ортогональна
