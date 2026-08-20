@@ -184,6 +184,45 @@
           <span v-if="untaggedSaved" class="text-xs text-green-600 ml-auto mt-0.5">сохранено</span>
         </div>
 
+        <!-- Это именно правило для клиентов без ref-метки. Раньше его можно
+             было найти и поменять лишь среди всех скриптов. -->
+        <div class="px-4 py-4 border-b bg-brand-50/40">
+          <div class="flex items-start justify-between gap-4 mb-2">
+            <div>
+              <h2 class="text-sm font-medium text-gray-800">Общее приветствие</h2>
+              <p class="text-xs text-gray-500 mt-0.5">
+                Первое сообщение для клиентов без рекламной метки
+                <span v-if="defaultGreetingTypeName">· {{ defaultGreetingTypeName }}</span>.
+              </p>
+            </div>
+            <span v-if="defaultGreetingSaved" class="text-xs text-green-600 whitespace-nowrap">сохранено</span>
+          </div>
+          <div v-if="defaultGreetingLoading" class="text-xs text-gray-400 py-2">Загрузка...</div>
+          <p v-else-if="!defaultGreeting" class="text-xs text-amber-700">
+            Для этого направления не найдено активное общее приветствие.
+          </p>
+          <template v-else>
+            <textarea
+              v-model="defaultGreetingDraft.body"
+              rows="4"
+              class="w-full border rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-brand-500 resize-y bg-white"
+              placeholder="Текст приветствия..."
+            ></textarea>
+            <div class="mt-2">
+              <label class="block text-xs text-gray-500 mb-1">Картинки</label>
+              <GreetingImages v-model="defaultGreetingDraft.tokens" />
+            </div>
+            <div class="flex items-center gap-2 mt-2">
+              <button
+                @click="saveDefaultGreeting"
+                :disabled="defaultGreetingSaving || !defaultGreetingChanged"
+                class="text-xs px-2.5 py-1 rounded-lg bg-brand-600 text-white disabled:opacity-40 hover:bg-brand-700"
+              >{{ defaultGreetingSaving ? 'Сохранение...' : 'Сохранить' }}</button>
+              <span v-if="defaultGreetingError" class="text-xs text-red-600">{{ defaultGreetingError }}</span>
+            </div>
+          </template>
+        </div>
+
         <p v-if="refTags.length === 0" class="px-4 py-3 text-xs text-amber-700 bg-amber-50 border-b">
           Список пуст — ИИ отвечает всем, как и раньше. Как только добавите первую метку,
           он начнёт отвечать только на метки из этого списка, а остальной трафик пойдёт к менеджеру.
@@ -653,7 +692,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import api from '../api'
 import { useAuthStore } from '../stores/auth'
 import GreetingImages from '../components/GreetingImages.vue'
@@ -837,12 +876,74 @@ const refForm = ref({ tag: '', type_id: null, is_active: true, note: '', greetin
 const greetingDrafts = ref({})
 const greetingSaved = ref(null)
 
+const defaultGreeting = ref(null)
+const defaultGreetingDraft = ref({ body: '', tokens: [] })
+const defaultGreetingLoading = ref(false)
+const defaultGreetingSaving = ref(false)
+const defaultGreetingSaved = ref(false)
+const defaultGreetingError = ref('')
+
 const splitGreeting = splitAttachments
 const joinGreeting = joinAttachments
 
 const greetingScripts = computed(() =>
   scripts.value.filter(s => (s.condition || '').toLowerCase().includes('первое приветственное'))
 )
+
+// На вкладке «Все» показываем настройку первого направления — это тот же выбор,
+// который используется при создании новой реф-метки.
+const defaultGreetingTypeId = computed(() => activeTypeId.value ?? dialogTypes.value[0]?.id ?? null)
+const defaultGreetingTypeName = computed(() =>
+  dialogTypes.value.find(t => t.id === defaultGreetingTypeId.value)?.display_name || ''
+)
+const defaultGreetingChanged = computed(() =>
+  defaultGreeting.value !== null
+  && joinGreeting(defaultGreetingDraft.value) !== joinGreeting(splitGreeting(defaultGreeting.value.phrase_text))
+)
+
+async function loadDefaultGreeting() {
+  defaultGreetingLoading.value = true
+  defaultGreetingError.value = ''
+  try {
+    const res = await api.get('/scripts/default-greeting', {
+      params: defaultGreetingTypeId.value === null ? {} : { type_id: defaultGreetingTypeId.value },
+    })
+    defaultGreeting.value = res.data
+    defaultGreetingDraft.value = splitGreeting(res.data?.phrase_text || '')
+  } catch (e) {
+    defaultGreeting.value = null
+    defaultGreetingError.value = e.response?.data?.detail || 'Не удалось загрузить приветствие'
+  } finally {
+    defaultGreetingLoading.value = false
+  }
+}
+
+async function saveDefaultGreeting() {
+  if (!defaultGreeting.value) return
+  defaultGreetingSaving.value = true
+  defaultGreetingError.value = ''
+  try {
+    const res = await api.patch(`/scripts/${defaultGreeting.value.id}`, {
+      phrase_text: joinGreeting(defaultGreetingDraft.value),
+    })
+    defaultGreeting.value = res.data
+    defaultGreetingDraft.value = splitGreeting(res.data.phrase_text)
+    const index = scripts.value.findIndex(s => s.id === res.data.id)
+    if (index !== -1) scripts.value[index] = res.data
+    defaultGreetingSaved.value = true
+    setTimeout(() => { defaultGreetingSaved.value = false }, 2000)
+  } catch (e) {
+    defaultGreetingError.value = e.response?.data?.detail || 'Не удалось сохранить приветствие'
+  } finally {
+    defaultGreetingSaving.value = false
+  }
+}
+
+watch(defaultGreetingTypeId, () => {
+  // Переключение направления в «Скриптах» сразу переключает и общее
+  // приветствие: не приходится искать его в таблице вручную.
+  if (dialogTypes.value.length) loadDefaultGreeting()
+})
 
 // Черновик привязан к МЕТКЕ, а не к скрипту: один и тот же скрипт может стоять у
 // нескольких меток, и правка «под одну» не должна их путать между собой.

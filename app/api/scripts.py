@@ -59,6 +59,25 @@ async def list_scripts(
     return await svc.get_all_active(type_id=type_id, include_inactive=include_inactive)
 
 
+@router.get("/default-greeting", response_model=ScriptOut | None)
+async def default_greeting(
+    type_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("admin")),
+):
+    """Приветствие, которое уходит клиенту без рекламной метки.
+
+    Правило выбора живёт в app.ai.greeting и не сводится к «скрипт с таким-то
+    id». Панель не должна повторять эту логику у себя — иначе правят один
+    скрипт, а клиентам уходит другой.
+    """
+    from app.ai.greeting import pick_greeting_script
+
+    # Клиент без меток проходит ровно тот же путь, что и реальный входящий
+    # диалог. В частности, не теряем валидное приветствие только с картинками.
+    return await pick_greeting_script(db, type_id, client=None)
+
+
 @router.post("/", response_model=ScriptOut, status_code=201)
 async def create_script(
     body: ScriptCreateRequest,
