@@ -51,6 +51,14 @@
           <div class="flex items-center gap-4">
             <span class="text-sm text-gray-500">{{ filteredScripts.length }} скриптов</span>
             <div class="flex items-center gap-2">
+              <input
+                v-model="scriptSearch"
+                type="search"
+                placeholder="Поиск по тексту или условию…"
+                class="w-64 border rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+              />
+            </div>
+            <div class="flex items-center gap-2">
               <label class="text-xs text-gray-400">Тег</label>
               <select
                 v-model="activeTag"
@@ -86,7 +94,9 @@
                 <td colspan="7" class="px-4 py-10 text-center text-gray-400">Загрузка...</td>
               </tr>
               <tr v-else-if="filteredScripts.length === 0">
-                <td colspan="7" class="px-4 py-10 text-center text-gray-400">Нет скриптов</td>
+                <td colspan="7" class="px-4 py-10 text-center text-gray-400">
+                  {{ scriptSearch.trim() ? `Ничего не нашлось по «${scriptSearch.trim()}»` : 'Нет скриптов' }}
+                </td>
               </tr>
               <tr v-else v-for="s in filteredScripts" :key="s.id" class="hover:bg-gray-50 transition-colors">
                 <td class="px-4 py-3 text-gray-400 font-mono text-xs">{{ s.id }}</td>
@@ -689,6 +699,8 @@ const tabs = computed(() => [
   ...dialogTypes.value.map(t => ({ id: t.id, label: t.display_name })),
 ])
 
+const scriptSearch = ref('')
+
 const existingTags = computed(() =>
   [...new Set(scripts.value.map(s => s.marketing_tag).filter(Boolean))].sort()
 )
@@ -706,6 +718,18 @@ const filteredScripts = computed(() => {
   if (activeTypeId.value !== null) base = base.filter(s => s.type_id === activeTypeId.value)
   if (activeTag.value === '__none__') base = base.filter(s => !s.marketing_tag)
   else if (activeTag.value !== null) base = base.filter(s => s.marketing_tag === activeTag.value)
+  // Пятьсот с лишним скриптов, и почти все с одинаковым началом условия — найти
+  // нужный, листая таблицу, нельзя. Ищем и по тексту фразы: расчёт узнают по
+  // «5 990», а не по названию условия.
+  const q = scriptSearch.value.trim().toLowerCase()
+  if (q) {
+    base = base.filter(s =>
+      (s.phrase_text || '').toLowerCase().includes(q)
+      || (s.condition || '').toLowerCase().includes(q)
+      || (s.marketing_tag || '').toLowerCase().includes(q)
+      || String(s.id) === q
+    )
+  }
   return base
 })
 

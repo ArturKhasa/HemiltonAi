@@ -21,7 +21,7 @@ from app.ai.cost import (
 )
 from app.ai.prompts import get_system_prompt, format_statuses_block
 from app.ai.run_log import log_failed_run, usage_from_result
-from app.ai.tools import fetch_client_tags
+from app.ai.tools import fetch_client_tags, tagged_variant
 from app.ai.providers import get_model_name
 from app.ai.schemas import AgentOutput
 from app.ai.triggers import CURATOR_STATUS_NAME, curator_trigger
@@ -1914,6 +1914,16 @@ async def _build_follow_up_part(
             ctx, source.follow_up_script_id,
         )
         return None, None
+
+    # Под рекламную метку клиента бывает своя версия шага — например свой
+    # расчёт. Связка ведёт на общий вариант, поэтому подменяем здесь.
+    tagged = await tagged_variant(db, follow_up, set(getattr(client, "marketing_tags", None) or []))
+    if tagged.id != follow_up.id:
+        logger.info(
+            "[%s] звено %s заменено на версию под метку — %s (%s)",
+            ctx, follow_up.id, tagged.id, tagged.marketing_tag,
+        )
+        follow_up = tagged
 
     if skip_script_ids and follow_up.id in skip_script_ids:
         logger.info("[%s] follow-up %s пропущен — уже отработал в диалоге", ctx, follow_up.id)

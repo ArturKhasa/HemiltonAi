@@ -420,3 +420,35 @@ def make_find_similar_examples(type_id: int | None):
             rows = await find_similar(db, type_id, query)
         return format_similar_examples(rows)
     return find_similar_examples
+
+async def tagged_variant(db, script, client_tags: set[str] | None):
+    """Тот же шаг воронки, но в версии под метку клиента.
+
+    Скрипты воронки связаны фиксированным `follow_up_script_id`, а расчёт под
+    разные рекламные метки бывает разный: на «sweetgold» одна цена, на
+    «sweetrussia» другая. Модель такую замену делает сама (см. фильтр по тегам
+    в list_scripts), а связка шла по id и всегда отправляла общий вариант.
+
+    Берём среди активных скриптов того же типа те, у кого совпадает условие, и
+    выбираем самый специфичный из подходящих клиенту. Не нашли — исходный.
+    """
+    if not client_tags:
+        return script
+    from sqlalchemy import select as _select
+
+    from app.db.models import Script as _Script
+
+    rows = await db.execute(
+        _select(_Script).where(
+            _Script.is_active == True,
+            _Script.type_id == script.type_id,
+        )
+    )
+    cond = _norm_condition(script)
+    candidates = [
+        s for s in rows.scalars().all()
+        if _norm_condition(s) == cond and _parse_tags(s.marketing_tag) <= client_tags
+    ]
+    if not candidates:
+        return script
+    return max(candidates, key=lambda s: (len(_parse_tags(s.marketing_tag)), -s.id))
