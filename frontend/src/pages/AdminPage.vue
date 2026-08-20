@@ -441,9 +441,17 @@
             <label class="block text-xs text-gray-500 mb-1.5">Маркетинговый тег</label>
             <input
               v-model="form.marketing_tag"
+              list="known-ref-tags"
               class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
               placeholder="Без # — пусто = для всех клиентов"
             />
+            <datalist id="known-ref-tags">
+              <option v-for="r in refTags" :key="r.id" :value="r.tag" />
+            </datalist>
+            <p v-if="unknownTags.length" class="text-xs text-amber-700 mt-1">
+              Таких реф-меток нет: {{ unknownTags.join(', ') }}. Скрипт не увидит ни один
+              клиент — метка должна совпадать с той, что в рекламной ссылке.
+            </p>
           </div>
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Стадия воронки</label>
@@ -452,6 +460,19 @@
               <option v-for="st in FUNNEL_STAGES" :key="st.value" :value="st.value">{{ st.label }}</option>
             </select>
             <p class="text-xs text-gray-400 mt-1">Скрипт виден, пока диалог не прошёл эту стадию. «Любая» — без ограничения.</p>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 mb-1.5">Заменяет шаг под меткой</label>
+            <select v-model="form.variant_of_script_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white">
+              <option :value="0">— ничего не заменяет —</option>
+              <option v-for="s in followUpOptions" :key="s.id" :value="s.id">
+                #{{ s.id }} — {{ s.condition.slice(0, 70) }}
+              </option>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">
+              Уйдёт вместо выбранного шага клиентам с меткой этого скрипта. Так делают
+              свой расчёт под метку: обычный остаётся для всех остальных.
+            </p>
           </div>
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Отправить следом</label>
@@ -718,7 +739,19 @@ const showModal = ref(false)
 const editScript = ref(null)
 const deleteTarget = ref(null)
 
-const form = ref({ type_id: null, condition: '', phrase_text: '', tokens: [], marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, is_active: true })
+const form = ref({ type_id: null, condition: '', phrase_text: '', tokens: [], marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, variant_of_script_id: 0, is_active: true })
+
+// Метка скрипта должна совпадать с реф-меткой из рекламной ссылки. В поле
+// писали человеческое название — «свитшот + жилет, 8980р», — и такой скрипт не
+// доставался никому: запятая делит его на две метки, которых нет ни у кого.
+const unknownTags = computed(() => {
+  const known = new Set(refTags.value.map(r => (r.tag || '').trim().toUpperCase()))
+  return (form.value.marketing_tag || '')
+    .split(',')
+    .map(t => t.trim())
+    .filter(Boolean)
+    .filter(t => !known.has(t.replace(/^#/, '').toUpperCase()))
+})
 
 // Funnel steps (must mirror STAGES in app/ai/funnel_agent.py). Empty = любая стадия (always shown).
 const FUNNEL_STAGES = [
@@ -788,7 +821,7 @@ async function load() {
 
 function openCreate() {
   editScript.value = null
-  form.value = { type_id: activeTypeId.value, condition: '', phrase_text: '', tokens: [], marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, is_active: true }
+  form.value = { type_id: activeTypeId.value, condition: '', phrase_text: '', tokens: [], marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, variant_of_script_id: 0, is_active: true }
   showModal.value = true
 }
 
@@ -797,7 +830,7 @@ function openEdit(s) {
   // Картинки правятся блоком ниже, а не ссылками посреди текста: в расчёте их
   // три штуки по триста символов, и добраться до самого текста было нельзя.
   const { body, tokens } = splitGreeting(s.phrase_text)
-  form.value = { type_id: s.type_id, condition: s.condition, phrase_text: body, tokens, marketing_tag: s.marketing_tag || '', funnel_stage: s.funnel_stage || '', follow_up_script_id: s.follow_up_script_id || 0, is_active: s.is_active }
+  form.value = { type_id: s.type_id, condition: s.condition, phrase_text: body, tokens, marketing_tag: s.marketing_tag || '', funnel_stage: s.funnel_stage || '', follow_up_script_id: s.follow_up_script_id || 0, variant_of_script_id: s.variant_of_script_id || 0, is_active: s.is_active }
   showModal.value = true
 }
 
@@ -809,10 +842,11 @@ async function saveScript() {
     // 0, а не null: PATCH на бэке режет null-поля (exclude_none), поэтому «связки
     // нет» приходит нулём и там же превращается обратно в NULL.
     const follow_up_script_id = form.value.follow_up_script_id || 0
+    const variant_of_script_id = form.value.variant_of_script_id || 0
     const phrase_text = joinGreeting({ body: form.value.phrase_text, tokens: form.value.tokens })
     if (editScript.value) {
       const { tokens: _tokens, ...rest } = form.value
-      const res = await api.patch(`/scripts/${editScript.value.id}`, { ...rest, phrase_text, marketing_tag, funnel_stage, follow_up_script_id })
+      const res = await api.patch(`/scripts/${editScript.value.id}`, { ...rest, phrase_text, marketing_tag, funnel_stage, follow_up_script_id, variant_of_script_id })
       const idx = scripts.value.findIndex(s => s.id === editScript.value.id)
       if (idx !== -1) scripts.value[idx] = res.data
     } else {
@@ -823,6 +857,7 @@ async function saveScript() {
         marketing_tag,
         funnel_stage,
         follow_up_script_id,
+        variant_of_script_id,
       })
       scripts.value.push(res.data)
     }

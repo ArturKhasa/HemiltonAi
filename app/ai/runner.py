@@ -1947,7 +1947,10 @@ async def _build_follow_up_part(
         return None, None
 
     # Под рекламную метку клиента бывает своя версия шага — например свой
-    # расчёт. Связка ведёт на общий вариант, поэтому подменяем здесь.
+    # расчёт со свитшотом и жилеткой. Связка ведёт на общий вариант, поэтому
+    # подменяем здесь. Цепочку продолжаем по ОБЩЕМУ скрипту, если у варианта
+    # своего продолжения нет: иначе за подменённым расчётом не ушла бы доставка.
+    chain_id = follow_up.id
     tagged = await tagged_variant(db, follow_up, set(getattr(client, "marketing_tags", None) or []))
     if tagged.id != follow_up.id:
         logger.info(
@@ -1955,25 +1958,27 @@ async def _build_follow_up_part(
             ctx, follow_up.id, tagged.id, tagged.marketing_tag,
         )
         follow_up = tagged
+        if tagged.follow_up_script_id:
+            chain_id = tagged.id
 
     if skip_script_ids and follow_up.id in skip_script_ids:
         logger.info("[%s] follow-up %s пропущен — уже отработал в диалоге", ctx, follow_up.id)
-        return None, follow_up.id
+        return None, chain_id
 
     slot = asked_slot(follow_up.phrase_text or "")
     if slot and slot_is_filled(slot, known_slots or {}):
         logger.info(
             "[%s] follow-up %s skipped — %s already known", ctx, follow_up.id, slot,
         )
-        return None, follow_up.id
+        return None, chain_id
 
     part = await _render_script_part(db, dialog, follow_up, client, known_slots)
     if part is None:
-        return None, follow_up.id
+        return None, chain_id
     logger.info(
         "[%s] follow-up queued | script=%s -> %s", ctx, source.id, follow_up.id,
     )
-    return part, follow_up.id
+    return part, chain_id
 
 
 async def _finalize_outgoing(

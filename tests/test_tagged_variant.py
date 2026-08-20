@@ -54,6 +54,38 @@ async def test_disabled_variant_is_not_used(scripts):
     assert picked.id == 367
 
 
+async def test_explicit_binding_replaces_the_step(db):
+    """Условие у варианта своё — связывает их поле «заменяет шаг».
+
+    Скрипт «свитшот + жилетка, 8980 ₽» завели с другим условием, и клиент с
+    меткой получал общий расчёт «Стоимость толстовки — 5 990 ₽» (диалог 731).
+    """
+    db.add_all([
+        Script(id=367, is_active=True, type_id=1, funnel_stage="pricing",
+               condition=COND, phrase_text="Стоимость толстовки - 5 990 ₽"),
+        Script(id=519, is_active=True, type_id=1,
+               condition="Отправляем сразу после похвалы, рассказываем про стоимость",
+               marketing_tag="hood141", variant_of_script_id=367,
+               phrase_text="Толстовка + жилетка - 8 980 ₽"),
+    ])
+    await db.flush()
+    picked = await tagged_variant(db, await db.get(Script, 367), {"hood141"})
+    assert picked.id == 519
+
+
+async def test_binding_does_not_leak_to_other_tags(db):
+    db.add_all([
+        Script(id=367, is_active=True, type_id=1, condition=COND,
+               phrase_text="Стоимость толстовки - 5 990 ₽"),
+        Script(id=519, is_active=True, type_id=1, condition="своё условие",
+               marketing_tag="hood141", variant_of_script_id=367,
+               phrase_text="Толстовка + жилетка - 8 980 ₽"),
+    ])
+    await db.flush()
+    picked = await tagged_variant(db, await db.get(Script, 367), {"aigerb1"})
+    assert picked.id == 367
+
+
 async def test_tag_matches_regardless_of_case_and_hash(db):
     """В скрипте метку пишет человек, к клиенту она приезжает из ссылки."""
     db.add_all([

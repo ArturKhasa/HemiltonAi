@@ -22,6 +22,7 @@ class ScriptOut(BaseModel):
     marketing_tag: str | None
     funnel_stage: str | None
     follow_up_script_id: int | None
+    variant_of_script_id: int | None
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -36,6 +37,8 @@ class ScriptCreateRequest(BaseModel):
     marketing_tag: str | None = None
     funnel_stage: str | None = None
     follow_up_script_id: int | None = None
+    variant_of_script_id: int | None = None
+
 
 
 class ScriptUpdateRequest(BaseModel):
@@ -46,6 +49,8 @@ class ScriptUpdateRequest(BaseModel):
     funnel_stage: str | None = None
     follow_up_script_id: int | None = None
     is_active: bool | None = None
+    variant_of_script_id: int | None = None
+
 
 
 @router.get("/", response_model=list[ScriptOut])
@@ -92,6 +97,7 @@ async def create_script(
         marketing_tag=body.marketing_tag or None,
         funnel_stage=body.funnel_stage or None,
         follow_up_script_id=body.follow_up_script_id or None,
+        variant_of_script_id=body.variant_of_script_id or None,
     )
     await db.commit()
     await db.refresh(script)
@@ -113,6 +119,11 @@ async def update_script(
         updates["marketing_tag"] = None  # empty string clears the tag
     if "funnel_stage" in updates and not updates["funnel_stage"]:
         updates["funnel_stage"] = None  # empty string clears the stage (= any stage)
+    if "variant_of_script_id" in updates:
+        if not updates["variant_of_script_id"]:
+            updates["variant_of_script_id"] = None
+        elif updates["variant_of_script_id"] == script_id:
+            raise HTTPException(status_code=400, detail="Скрипт не может заменять сам себя")
     if "follow_up_script_id" in updates:
         # exclude_none выше съедает явный null, поэтому «связки нет» приходит нулём.
         if not updates["follow_up_script_id"]:

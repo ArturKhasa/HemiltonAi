@@ -442,13 +442,20 @@ def make_find_similar_examples(type_id: int | None):
 async def tagged_variant(db, script, client_tags: set[str] | None):
     """Тот же шаг воронки, но в версии под метку клиента.
 
-    Скрипты воронки связаны фиксированным `follow_up_script_id`, а расчёт под
-    разные рекламные метки бывает разный: на «sweetgold» одна цена, на
-    «sweetrussia» другая. Модель такую замену делает сама (см. фильтр по тегам
-    в list_scripts), а связка шла по id и всегда отправляла общий вариант.
+    Связка воронки идёт по фиксированному `follow_up_script_id`, а расчёт под
+    разные рекламные метки бывает разный: на метке с жилетками своя цена, на
+    обычной — своя. Подменяем звено на месте.
 
-    Берём среди активных скриптов того же типа те, у кого совпадает условие, и
-    выбираем самый специфичный из подходящих клиенту. Не нашли — исходный.
+    Вариант ищем двумя способами:
+
+    1. По явной привязке `variant_of_script_id` — её ставят в админке: «этот
+       скрипт заменяет расчёт». Основной путь.
+    2. По дословно совпадающему условию — так работало раньше, оставляем для
+       уже заведённых копий. Условие длинное и пишется руками, поэтому
+       полагаться на него одно нельзя: скрипт «свитшот + жилетка, 8980 ₽»
+       завели с другим условием, и клиент получил общий расчёт (диалог 731).
+
+    Из подходящих берём самый специфичный по меткам. Не нашли — исходный.
     """
     if not client_tags:
         return script
@@ -466,8 +473,18 @@ async def tagged_variant(db, script, client_tags: set[str] | None):
     cond = _norm_condition(script)
     candidates = [
         s for s in rows.scalars().all()
-        if _norm_condition(s) == cond and _parse_tags(s.marketing_tag) <= client_tags
+        if (
+            getattr(s, "variant_of_script_id", None) == script.id
+            or _norm_condition(s) == cond
+        )
+        and _parse_tags(s.marketing_tag) <= client_tags
     ]
     if not candidates:
         return script
-    return max(candidates, key=lambda s: (len(_parse_tags(s.marketing_tag)), -s.id))
+    # Явная привязка сильнее совпадения условия: её поставили руками именно
+    # ради этой подмены.
+    return max(candidates, key=lambda s: (
+        getattr(s, "variant_of_script_id", None) == script.id,
+        len(_parse_tags(s.marketing_tag)),
+        -s.id,
+    ))

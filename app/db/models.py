@@ -263,6 +263,13 @@ class Script(Base):
     funnel_stage = Column(String(32), nullable=True)  # earliest valid funnel step; see migration 033
     # Скрипт, который уходит клиенту вторым сообщением сразу за этим, не дожидаясь
     # ответа (регламент ОП: приветствие + вопрос про имя/фамилию). См. миграцию 041.
+    # Этот скрипт — вариант другого шага под рекламную метку: расчёт со
+    # свитшотом и жилеткой вместо общего расчёта. Связка воронки идёт по общему
+    # скрипту, а на месте подставляет вариант, если метка клиента совпала
+    # (миграция 050).
+    variant_of_script_id = Column(
+        Integer, ForeignKey("scripts.id", ondelete="SET NULL"), nullable=True
+    )
     follow_up_script_id = Column(
         Integer, ForeignKey("scripts.id", ondelete="SET NULL"), nullable=True
     )
