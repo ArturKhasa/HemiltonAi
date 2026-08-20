@@ -57,11 +57,18 @@ class TestProductGate:
         out = format_scripts_list(self._scripts(), None, client_product="свитшот")
         assert "script_id=403" in out
 
-    def test_without_a_known_product_nothing_is_hidden(self):
+    def test_without_a_known_product_the_funnel_line_is_assumed(self):
+        """Клиент товар не называл — это ещё не значит «покажи что угодно».
+
+        Диалог 1847, 20.08: на «интересно, как это визуально будет» ушли
+        фотографии костюма, потому что фильтр без названного товара не работал.
+        Линейка воронки — кофты, костюм ждёт, пока клиент назовёт его сам.
+        """
         from app.ai.tools import format_scripts_list
 
         out = format_scripts_list(self._scripts(), None)
-        assert all(f"script_id={i}" in out for i in (406, 380, 403))
+        assert "script_id=406" not in out
+        assert all(f"script_id={i}" in out for i in (380, 403))
 
     def test_hoodie_and_sweatshirt_are_one_family(self):
         from app.ai.tools import client_product_family
