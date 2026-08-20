@@ -261,6 +261,58 @@ async def _get_or_create_dialog(
     return dialog
 
 
+
+# Сколько последних сообщений переписки смотрим, решая, новая она или старая.
+# Диалог с рассылками бывает длинным, но пятидесяти хватает: если за это время
+# клиент не написал ни разу, переписка для нас всё равно новая.
+_HISTORY_LOOKBACK = 50
+
+
+async def conversation_is_new(
+    group: VkGroup, vk_user_id: int, external_message_id: str | None,
+) -> bool:
+    """Первое ли это сообщение клиента в переписке.
+
+    Сообщество подключают к ИИ, когда у него уже есть годы переписок. Лид,
+    которого вели раньше руками, отвечает на рассылку или пишет сам — и ИИ
+    начинал вести его с приветствия «меня зовут София», поверх живой истории.
+    Требование заказчика от 20.08: ИИ берёт только новые диалоги.
+
+    Считаем по сообщениям КЛИЕНТА: исходящие сюда не годятся — сообщество и
+    новому лиду пишет первым (кнопка «Начать» и приветствие рассылки).
+
+    ВК недоступен — отвечаем «новая»: молчание в диалоге нового лида дороже,
+    чем лишний ответ в старом.
+    """
+    from app.vk.sender import vk_api_call
+
+    if not group.access_token:
+        return True
+    try:
+        response = await vk_api_call(
+            group.access_token, "messages.getHistory",
+            {"user_id": vk_user_id, "count": _HISTORY_LOOKBACK},
+        )
+    except Exception as exc:
+        logger.warning(
+            "[vk=%s/%s] историю переписки не прочитать, считаем диалог новым: %s",
+            group.group_id, vk_user_id, exc,
+        )
+        return True
+
+    if not isinstance(response, dict):
+        # Ответ не той формы — разбирать нечего, считаем переписку новой.
+        return True
+
+    for item in response.get("items") or []:
+        if external_message_id and str(item.get("id")) == str(external_message_id):
+            continue
+        # from_id > 0 — пользователь; у сообщества он отрицательный.
+        if int(item.get("from_id") or 0) == int(vk_user_id):
+            return False
+    return True
+
+
 async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMessage) -> None:
     """Входящее сообщение пользователя: сохранить, запустить ИИ, отправить ответ."""
     client = await _get_or_create_client(db, group, msg.vk_user_id, ref=msg.ref)
@@ -270,6 +322,19 @@ async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMe
     from app.sales.ref_tags import RefTagService
     client_tag = (client.marketing_tags or [None])[0]
     ai_allowed = await RefTagService(db).ai_allowed(client_tag, type_id)
+    known_dialog = await db.scalar(
+        select(Dialog.id).where(Dialog.client_id == client.id, Dialog.type_id == type_id)
+    )
+    # Переписку, которая шла до подключения ИИ, он не подхватывает: проверяем
+    # только в момент, когда диалог заводится у нас впервые.
+    if known_dialog is None and ai_allowed:
+        ai_allowed = await conversation_is_new(group, msg.vk_user_id, msg.external_message_id)
+        if not ai_allowed:
+            logger.info(
+                "[vk=%s/%s] переписка велась раньше — ИИ не подключаем, диалог человеку",
+                group.group_id, msg.vk_user_id,
+            )
+
     dialog = await _get_or_create_dialog(db, client, type_id, ai_allowed=ai_allowed)
     ctx = f"vk={group.group_id}/{msg.vk_user_id}"
 
