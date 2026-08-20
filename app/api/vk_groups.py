@@ -80,7 +80,10 @@ async def create_vk_group(
 ):
     existing = await db.scalar(select(VkGroup).where(VkGroup.group_id == body.group_id))
     if existing:
-        raise HTTPException(status_code=409, detail="Group with this group_id already exists")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Сообщество {body.group_id} уже подключено — «{existing.name}»",
+        )
     group = VkGroup(
         group_id=body.group_id,
         name=body.name,
