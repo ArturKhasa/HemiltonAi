@@ -54,6 +54,18 @@ async def test_disabled_variant_is_not_used(scripts):
     assert picked.id == 367
 
 
+async def test_tag_matches_regardless_of_case_and_hash(db):
+    """В скрипте метку пишет человек, к клиенту она приезжает из ссылки."""
+    db.add_all([
+        Script(id=10, is_active=True, type_id=1, condition=COND, phrase_text="общий"),
+        Script(id=11, is_active=True, type_id=1, condition=COND,
+               marketing_tag="#SweetGold", phrase_text="под метку"),
+    ])
+    await db.flush()
+    picked = await tagged_variant(db, await db.get(Script, 10), {"sweetgold"})
+    assert picked.id == 11
+
+
 async def test_other_dialog_type_is_not_borrowed(db):
     db.add_all([
         Script(id=1, is_active=True, type_id=1, condition=COND, phrase_text="наш"),

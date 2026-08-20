@@ -90,12 +90,23 @@ async def fetch_client_tags(client_id: int | None) -> set[str] | None:
         tags = await db.scalar(select(Client.marketing_tags).where(Client.id == client_id))
     if tags is None:
         return None
-    return set(tags)
+    return {norm_tag(str(t)) for t in tags if str(t).strip()}
+
+
+def norm_tag(tag: str) -> str:
+    """Метка в сравнимом виде: «#SweetGold» и «sweetgold» — одно и то же.
+
+    В скрипте её пишет человек, а к клиенту она приезжает из рекламной ссылки —
+    регистр и решётка не совпадают почти никогда. Пинги так сравнивают давно
+    (см. ping.worker._resolve_marketing_tag), скрипты сравнивали побуквенно: под
+    меткой с другим регистром клиент молча получал общий расчёт вместо своего.
+    """
+    return tag.strip().lstrip("#").upper()
 
 
 def _parse_tags(raw: str | None) -> set[str]:
     """scripts.marketing_tag holds one or more comma-separated tags ('СУПЕРГЕРОИ, ДЕТИ СУПЕРГЕРОИ')."""
-    return {t.strip() for t in (raw or "").split(",") if t.strip()}
+    return {norm_tag(t) for t in (raw or "").split(",") if t.strip()}
 
 
 # Семейства товаров. Клиент 44731492 покупал толстовку, попросил показать, как
@@ -434,6 +445,7 @@ async def tagged_variant(db, script, client_tags: set[str] | None):
     """
     if not client_tags:
         return script
+    client_tags = {norm_tag(str(t)) for t in client_tags if str(t).strip()}
     from sqlalchemy import select as _select
 
     from app.db.models import Script as _Script

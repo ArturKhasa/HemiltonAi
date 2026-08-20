@@ -16,7 +16,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.tools import _parse_tags
+from app.ai.tools import _parse_tags, norm_tag
 from app.db.models import Client, Dialog, Message, MessageRole, Script
 from app.utils.media import attachment_tokens, strip_attachment_tokens
 
@@ -81,9 +81,12 @@ async def pick_greeting_script(
         return None
 
     if client_tags:
+        # Сравниваем в нормализованном виде: в скрипте метку пишет человек, к
+        # клиенту она приезжает из рекламной ссылки (см. tools.norm_tag).
+        normalized = {norm_tag(str(t)) for t in client_tags if str(t).strip()}
         tagged = [
             s for s in candidates
-            if _parse_tags(s.marketing_tag) and _parse_tags(s.marketing_tag) <= client_tags
+            if _parse_tags(s.marketing_tag) and _parse_tags(s.marketing_tag) <= normalized
         ]
         if tagged:
             return tagged[0]
