@@ -44,6 +44,7 @@ from app.sales.color_palette import with_palette
 from app.sales.non_answer import is_non_answer
 from app.sales.offer_terms import (
     data_requested_after_payment,
+    hedges_delivery_price,
     promises_both_gifts,
     promises_offer_another_day,
 )
@@ -349,6 +350,13 @@ _GIFT_RETRY_INSTRUCTION = (
 # раз» в промпте относится к уже НАЗВАННЫМ фактам, а незакрытый слот под него не
 # попадает.
 _SLOT_REPEAT_LIMIT = 2
+
+_DELIVERY_PRICE_RETRY_INSTRUCTION = (
+    "Стоимость доставки у нас одна и она известна: СДЭК — 1 000 ₽ по любому "
+    "направлению, клиент платит её при получении, после того как осмотрит и "
+    "примерит заказ. Назови сумму прямо; «зависит от города» и «уточню позже» "
+    "писать нельзя."
+)
 
 _SLOT_REPEAT_RETRY_INSTRUCTION = (
     "[Служебное] Ты уже дважды просила эти данные в последних сообщениях, клиент "
@@ -1209,10 +1217,13 @@ async def run_ai(
         both_gifts = promises_both_gifts(output.reply_text)
         deferred_offer = promises_offer_another_day(output.reply_text)
         repeated_slot = repeats_slot_request(output.reply_text, manager_history_texts, slots)
+        # Стоимость доставки известна и одна — уходить от неё нельзя.
+        hedged_delivery = hedges_delivery_price(output.reply_text)
         if (
             not dup_match and not requote and not no_question and not ignores_refusal
             and not repeated_chunk and not bad_payment_order and not both_gifts
             and not deferred_offer and not repeated_slot
+            and not hedged_delivery
         ) or dup_attempt == 2:
             break
         if no_photo_shown:
@@ -1243,6 +1254,12 @@ async def run_ai(
                 ctx, repeated_slot,
             )
             correction = _SLOT_REPEAT_RETRY_INSTRUCTION
+        elif hedged_delivery:
+            logger.warning(
+                "[%s] стоимость доставки названа обтекаемо — retrying | reply_head=%r",
+                ctx, (output.reply_text or "")[:80],
+            )
+            correction = _DELIVERY_PRICE_RETRY_INSTRUCTION
         elif ignores_refusal and design_edit and not refused:
             logger.warning(
                 "[%s] клиент просит правку, а ответ двигает воронку — retrying", ctx,
