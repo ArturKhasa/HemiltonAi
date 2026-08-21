@@ -23,6 +23,7 @@ class ScriptOut(BaseModel):
     funnel_stage: str | None
     follow_up_script_id: int | None
     variant_of_script_id: int | None
+    is_pair_variant: bool
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -38,7 +39,7 @@ class ScriptCreateRequest(BaseModel):
     funnel_stage: str | None = None
     follow_up_script_id: int | None = None
     variant_of_script_id: int | None = None
-
+    is_pair_variant: bool = False
 
 
 class ScriptUpdateRequest(BaseModel):
@@ -50,7 +51,7 @@ class ScriptUpdateRequest(BaseModel):
     follow_up_script_id: int | None = None
     is_active: bool | None = None
     variant_of_script_id: int | None = None
-
+    is_pair_variant: bool | None = None
 
 
 @router.get("/", response_model=list[ScriptOut])
@@ -98,6 +99,7 @@ async def create_script(
         funnel_stage=body.funnel_stage or None,
         follow_up_script_id=body.follow_up_script_id or None,
         variant_of_script_id=body.variant_of_script_id or None,
+        is_pair_variant=bool(body.is_pair_variant),
     )
     await db.commit()
     await db.refresh(script)

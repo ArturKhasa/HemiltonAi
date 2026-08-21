@@ -2102,16 +2102,21 @@ async def _build_follow_up_part(
         )
         return None, None
 
-    # Под рекламную метку клиента бывает своя версия шага — например свой
-    # расчёт со свитшотом и жилеткой. Связка ведёт на общий вариант, поэтому
-    # подменяем здесь. Цепочку продолжаем по ОБЩЕМУ скрипту, если у варианта
-    # своего продолжения нет: иначе за подменённым расчётом не ушла бы доставка.
+    # Под клиента бывает своя версия шага: свой расчёт со свитшотом и жилеткой
+    # под рекламную метку, свой — на заказ из двух изделий. Связка ведёт на общий
+    # вариант, поэтому подменяем здесь. Цепочку продолжаем по ОБЩЕМУ скрипту,
+    # если у варианта своего продолжения нет: иначе за подменённым расчётом не
+    # ушла бы доставка.
     chain_id = follow_up.id
-    tagged = await tagged_variant(db, follow_up, set(getattr(client, "marketing_tags", None) or []))
+    tagged = await tagged_variant(
+        db, follow_up,
+        set(getattr(client, "marketing_tags", None) or []),
+        pair=bool((known_slots or {}).get("pair")),
+    )
     if tagged.id != follow_up.id:
         logger.info(
-            "[%s] звено %s заменено на версию под метку — %s (%s)",
-            ctx, follow_up.id, tagged.id, tagged.marketing_tag,
+            "[%s] звено %s заменено на версию под клиента — %s (метка %s, парный %s)",
+            ctx, follow_up.id, tagged.id, tagged.marketing_tag, tagged.is_pair_variant,
         )
         follow_up = tagged
         if tagged.follow_up_script_id:

@@ -439,12 +439,18 @@ def make_find_similar_examples(type_id: int | None):
         return format_similar_examples(rows)
     return find_similar_examples
 
-async def tagged_variant(db, script, client_tags: set[str] | None):
-    """Тот же шаг воронки, но в версии под метку клиента.
+async def tagged_variant(db, script, client_tags: set[str] | None, pair: bool = False):
+    """Тот же шаг воронки, но в версии под этого клиента.
 
-    Связка воронки идёт по фиксированному `follow_up_script_id`, а расчёт под
-    разные рекламные метки бывает разный: на метке с жилетками своя цена, на
-    обычной — своя. Подменяем звено на месте.
+    Связка воронки идёт по фиксированному `follow_up_script_id`, а шаг бывает
+    разным. Причин две, и обе задаются в админке отдельным скриптом:
+
+    * **рекламная метка** — расчёт со свитшотом и жилеткой на метке, где в
+      приветствии жилетки, и обычный на всех остальных;
+    * **заказ на двоих** — клиент назвал две надписи, и считать надо за два
+      изделия (флаг «вариант для парного заказа», миграция 051). Без него
+      клиент, заказавший два свитшота, получал расчёт на один и сумму заказа
+      5 990 ₽ за оба (диалог 75853, 21.08).
 
     Вариант ищем двумя способами:
 
@@ -455,11 +461,11 @@ async def tagged_variant(db, script, client_tags: set[str] | None):
        полагаться на него одно нельзя: скрипт «свитшот + жилетка, 8980 ₽»
        завели с другим условием, и клиент получил общий расчёт (диалог 731).
 
-    Из подходящих берём самый специфичный по меткам. Не нашли — исходный.
+    Из подходящих берём самый специфичный. Не нашли — исходный.
     """
-    if not client_tags:
+    if not client_tags and not pair:
         return script
-    client_tags = {norm_tag(str(t)) for t in client_tags if str(t).strip()}
+    client_tags = {norm_tag(str(t)) for t in (client_tags or []) if str(t).strip()}
     from sqlalchemy import select as _select
 
     from app.db.models import Script as _Script
@@ -478,12 +484,16 @@ async def tagged_variant(db, script, client_tags: set[str] | None):
             or _norm_condition(s) == cond
         )
         and _parse_tags(s.marketing_tag) <= client_tags
+        # Парный расчёт заказу на одно изделие не уходит никогда.
+        and (pair or not getattr(s, "is_pair_variant", False))
     ]
     if not candidates:
         return script
-    # Явная привязка сильнее совпадения условия: её поставили руками именно
-    # ради этой подмены.
+    # Парный вариант важнее всего: он про то, СКОЛЬКО изделий считаем. Нет его —
+    # берём вариант под метку, как и раньше. Явная привязка сильнее совпадения
+    # условия: её поставили руками именно ради этой подмены.
     return max(candidates, key=lambda s: (
+        bool(getattr(s, "is_pair_variant", False)) == pair,
         getattr(s, "variant_of_script_id", None) == script.id,
         len(_parse_tags(s.marketing_tag)),
         -s.id,

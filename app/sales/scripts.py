@@ -25,12 +25,14 @@ class ScriptService:
         marketing_tag: str | None = None, funnel_stage: str | None = None,
         follow_up_script_id: int | None = None,
         variant_of_script_id: int | None = None,
+        is_pair_variant: bool = False,
     ) -> Script:
         script = Script(
             condition=condition, phrase_text=phrase_text, type_id=type_id,
             marketing_tag=marketing_tag, funnel_stage=funnel_stage,
             follow_up_script_id=follow_up_script_id,
             variant_of_script_id=variant_of_script_id,
+            is_pair_variant=is_pair_variant,
         )
         self.db.add(script)
         await self.db.flush()
