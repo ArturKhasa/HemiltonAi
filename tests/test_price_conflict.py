@@ -39,3 +39,41 @@ class TestDropConflictingPrices:
     def test_replies_without_prices_pass_through(self):
         parts = [FakePart("А цвет какой выберем?"), FakePart("Рост и вес подскажете?")]
         assert len(_drop_conflicting_prices(parts, ["Стоимость - 5 990 ₽"], "ctx")) == 2
+
+
+class TestPricesWrittenByHand:
+    """ОП пишет цены в скрипты руками и по-своему.
+
+    Расчёт комплекта (скрипт 519) — «8.980р (вместо 12.980р)»: точка разделителем
+    тысяч и одна буква «р». Такую сумму шаблон не видел вовсе, и проверки цены
+    считали, что клиенту ничего не называли.
+    """
+
+    KOMBO = (
+        "Расскажу по цене:\n"
+        "- Толстовка (хлопок 85%) - 5490р\n"
+        "- Демисезонная жилетка непромокаемая - 3490р\n\n"
+        "Комплект из двух изделий со скидкой - 8.980р (вместо 12.980р)"
+    )
+
+    def test_hand_written_sums_are_seen(self):
+        from app.ai.runner import _prices_in
+
+        assert _prices_in(self.KOMBO) == {"5490", "3490", "8980", "12980"}
+
+    def test_single_price_does_not_follow_the_set(self):
+        """За расчётом комплекта уходила сумма заказа на одно изделие."""
+        parts = [FakePart("Получается сумма заказа - 5 990 ₽")]
+
+        assert _drop_conflicting_prices(parts, [self.KOMBO], "ctx") == []
+
+    def test_the_set_price_itself_passes(self):
+        parts = [FakePart("Получается сумма заказа - 8 980 ₽")]
+
+        assert len(_drop_conflicting_prices(parts, [self.KOMBO], "ctx")) == 1
+
+    def test_percentages_and_measurements_are_not_money(self):
+        from app.ai.runner import _prices_in
+
+        assert _prices_in("вискоза/хлопок - 85%, лайкра - 15%") == set()
+        assert _prices_in("Рост 183 см, вес 93 кг") == set()
