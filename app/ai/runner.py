@@ -35,7 +35,7 @@ from app.utils.media import (
     is_video_url,
     strip_attachment_tokens,
 )
-from app.vk.outgoing import delivered_only
+from app.vk.outgoing import delivered_only, mark_failed
 from app.vk.spintax import resolve_spintax
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
@@ -49,7 +49,11 @@ from app.sales.offer_terms import (
     promises_offer_another_day,
 )
 from app.sales.price_objection import concession_allowed
-from app.sales.product_photo import asks_to_see_product, reply_shows_photo
+from app.sales.product_photo import (
+    asks_to_see_product,
+    claims_picture_already_sent,
+    reply_shows_photo,
+)
 from app.sales.price_placeholder import payment_link_configured, render_price_placeholders
 from app.sales.status_names import (
     AWAITING_PREPAY,
@@ -62,6 +66,8 @@ from app.sales.funnel_steps import (
     CHECKOUT_PRESENTED_RE,
     PAYMENT_LINK_RE,
     answered_inscription_question,
+    asks_confirmation,
+    confirmations_in_a_row,
     checkout_presented,
     client_refused,
     client_wants_design_edit,
@@ -351,11 +357,24 @@ _GIFT_RETRY_INSTRUCTION = (
 # попадает.
 _SLOT_REPEAT_LIMIT = 2
 
+_REPEATED_CONFIRMATION_RETRY_INSTRUCTION = (
+    "Сверку «Всё верно?» ты уже отправляла подряд, и клиент на неё не ответил — "
+    "значит его занимает другое. Ответь на то, о чём он пишет, и не повторяй "
+    "сверку: она уйдёт следующим ходом, когда будет что сверять."
+)
+
 _DELIVERY_PRICE_RETRY_INSTRUCTION = (
     "Стоимость доставки у нас одна и она известна: СДЭК — 1 000 ₽ по любому "
     "направлению, клиент платит её при получении, после того как осмотрит и "
     "примерит заказ. Назови сумму прямо; «зависит от города» и «уточню позже» "
     "писать нельзя."
+)
+
+_MOCKUP_CLAIM_RETRY_INSTRUCTION = (
+    "Не отсылай клиента к прошлому сообщению за картинкой: он пишет, что её не "
+    "видит. Приложи картинку заново. Макета с надписями клиента у тебя нет — его "
+    "рисует дизайнер после брони; не пиши, что макет или пример с его именами "
+    "уже отправлен."
 )
 
 _SLOT_REPEAT_RETRY_INSTRUCTION = (
@@ -446,6 +465,23 @@ def _questions_in(text: str) -> list[str]:
 def _last_question(text: str) -> str | None:
     found = _questions_in(text or "")
     return found[-1].strip() if found else None
+
+
+def _is_praise_only(
+    reply_text: str, praise_text: str | None, source_script_id, praise_id,
+) -> bool:
+    """Ход модели свёлся к присоединению «Супер, зафиксировала» и больше ни к чему.
+
+    Проверяем и ссылку на скрипт, и сам текст: скрипт похвалы модель отправляет и
+    своими словами, без source_script_id.
+    """
+    body = strip_attachment_tokens(reply_text)
+    if not body:
+        return False
+    if source_script_id is not None and source_script_id == praise_id:
+        return True
+    head = _normalize_for_dup((praise_text or "").split("\n")[0])[:30]
+    return bool(head and _normalize_for_dup(body).startswith(head))
 
 
 # Предложения, которые звучат один раз за диалог. ОП, 10 августа, 13:53:
@@ -542,8 +578,11 @@ _SLOT_QUESTIONS: list[tuple[str, str]] = [
     ("color", "Какой цвет выберем?"),
     ("size", "Подскажите рост и вес, чтобы точно подобрать размер?"),
 ]
-# Про заказ известно всё — остаётся вернуть слово клиенту.
-_FALLBACK_QUESTION = "Что скажете?"
+# Про заказ известно всё, кроме раскладки — её и спрашиваем: это следующий шаг
+# воронки. Прежнее «Что скажете?» вопросом было только по форме: клиенту, который
+# только что уточнил «Два свитшота», ушло «Супер, зафиксировала / Сделаем всё как
+# Вы хотите! / Что скажете?» (диалог 75853, 21.08 08:47).
+_FALLBACK_QUESTION = "Что и где разместим на изделии?"
 
 
 def _ensure_question(parts, slots: dict[str, str], ctx: str):
@@ -1011,11 +1050,20 @@ async def run_ai(
     if non_answer:
         logger.info("[%s] клиент переспрашивает, а не отвечает — воронку не двигаем | text=%r", ctx, text[:40])
     held = refused or design_edit or non_answer
-    praise_point = not held and await answered_inscription_question(db, dialog.id)
+    praise_point = not held and await answered_inscription_question(db, dialog.id, type_id)
+    # Клиент не назвал надпись, а спросил своё — чаще всего про цену. Связка
+    # нужна, присоединение «Супер, зафиксировала» — нет: фиксировать нечего.
+    # Лена, 21.08: «Если после первого приветственного сообщения клиент сразу
+    # спрашивает про цену, то её нужно отправить без присоединения "Супер,
+    # зафиксировала", потому что оно тут не в тему».
+    asked_instead_of_answering = praise_point and "?" in text
     payment_choice_point = not held and await payment_option_chosen(db, dialog.id, text)
     # Клиент назвал рост и вес — следующим ходом идёт сверка дизайна, и она
     # уходит скриптом: свой пересказ модель пишет без раскладки нанесений.
     design_review_point = not held and await size_just_given(db, dialog.id, text)
+    # Сколько наших сообщений подряд закончились сверкой «Всё верно?»: третью
+    # клиенту не отправляем (диалог 75853, 21.08 — их ушло пять подряд).
+    confirmation_streak = await confirmations_in_a_row(db, dialog.id)
     # Сверки «всё верно?» встречаются и после оплаты — при подведении итогов заказа
     # и при согласовании макета. Без этой проверки «да» на итоговую сверку тянуло
     # диалог обратно в оформление: клиент, уже приславший чек, получил условия
@@ -1040,6 +1088,7 @@ async def run_ai(
     acc_input = acc_output = acc_cache_read = acc_cache_write = 0
     dup_match: str | None = None
     ignores_refusal = False
+    repeated_confirmation = False
     for dup_attempt in (1, 2):
         uncached_tail = 1 + len(dynamic_context) + 2 * (dup_attempt - 1)
         result = None  # set on the openai-agents path; read by the failure logger
@@ -1217,12 +1266,25 @@ async def run_ai(
         both_gifts = promises_both_gifts(output.reply_text)
         deferred_offer = promises_offer_another_day(output.reply_text)
         repeated_slot = repeats_slot_request(output.reply_text, manager_history_texts, slots)
+        # Третья сверка «Всё верно?» подряд. Клиент дважды ответил не про неё —
+        # значит его занимает другое, и повтор он читает как то, что его не слышат.
+        repeated_confirmation = (
+            confirmation_streak >= 2
+            and not design_point
+            and asks_confirmation(output.reply_text)
+        )
         # Стоимость доставки известна и одна — уходить от неё нельзя.
         hedged_delivery = hedges_delivery_price(output.reply_text)
+        # Отсылка к картинке, которой клиент не видит, вместо самой картинки.
+        mockup_claim = (
+            claims_picture_already_sent(output.reply_text)
+            and not reply_shows_photo(output.reply_text)
+        )
         if (
             not dup_match and not requote and not no_question and not ignores_refusal
             and not repeated_chunk and not bad_payment_order and not both_gifts
             and not deferred_offer and not repeated_slot
+            and not repeated_confirmation and not mockup_claim
             and not hedged_delivery
         ) or dup_attempt == 2:
             break
@@ -1260,6 +1322,18 @@ async def run_ai(
                 ctx, (output.reply_text or "")[:80],
             )
             correction = _DELIVERY_PRICE_RETRY_INSTRUCTION
+        elif mockup_claim:
+            logger.warning(
+                "[%s] ответ отсылает к картинке вместо картинки — retrying | reply_head=%r",
+                ctx, (output.reply_text or "")[:80],
+            )
+            correction = _MOCKUP_CLAIM_RETRY_INSTRUCTION
+        elif repeated_confirmation:
+            logger.warning(
+                "[%s] сверка «Всё верно?» третий раз подряд — retrying | подряд=%d",
+                ctx, confirmation_streak,
+            )
+            correction = _REPEATED_CONFIRMATION_RETRY_INSTRUCTION
         elif ignores_refusal and design_edit and not refused:
             logger.warning(
                 "[%s] клиент просит правку, а ответ двигает воронку — retrying", ctx,
@@ -1298,6 +1372,18 @@ async def run_ai(
             correction = _DUP_RETRY_INSTRUCTION
         input_messages.append({"role": "assistant", "content": output.reply_text})
         input_messages.append({"role": "user", "content": correction})
+
+    # Сверка пережила повтор — значит модель по третьему кругу спрашивает то, на
+    # что клиент не отвечает. Дальше по-хорошему нужен человек: в диалоге 75853
+    # клиент к пятой сверке ушёл с «Удачи с вашими тупыми ботами».
+    if repeated_confirmation:
+        logger.warning("[%s] сверка подряд пережила повтор — куратору", ctx)
+        output = output.model_copy(update={
+            "need_curator": True,
+            "curator_reason": (
+                "Третья сверка «Всё верно?» подряд: клиент отвечает про другое"
+            ),
+        })
 
     if dup_match:
         logger.warning("[%s] duplicate reply survived the retry — escalating to curator", ctx)
@@ -1739,6 +1825,21 @@ async def run_ai(
                     ctx, entry.id, len(forced),
                 )
                 parts.extend(forced)
+
+    # Клиент спросил вместо ответа, а модель всё равно ответила похвалой: тогда
+    # весь её ход — это «Супер, зафиксировала» на вопрос «Сколько будет стоить?»
+    # (диалог 75854, 21.08 08:39). Присоединение снимаем, связка со стоимостью
+    # уходит без него. Реплику по существу вопроса не трогаем: снимаем только
+    # ту, что свелась к самой похвале.
+    if asked_instead_of_answering and len(parts) > 1:
+        praise = await find_praise_script(db, type_id)
+        if praise is not None and _is_praise_only(
+            parts[0].text, praise.phrase_text, output.source_script_id, praise.id,
+        ):
+            logger.info("[%s] похвала снята — клиент задал вопрос, а не назвал надпись", ctx)
+            if parts[0].message is not None:
+                mark_failed(parts[0].message)
+            parts = parts[1:]
 
     # Клиент выбрал способ оплаты — теперь и только теперь уместен запрос данных
     # получателя. Отдельным шагом, а не связкой к «5. Оформление»: тот скрипт

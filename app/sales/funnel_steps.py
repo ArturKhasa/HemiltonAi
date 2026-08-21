@@ -393,6 +393,33 @@ async def _last_outgoing(db: AsyncSession, dialog_id: int) -> str | None:
     return None
 
 
+def asks_confirmation(text: str) -> bool:
+    """Реплика заканчивается сверкой «Всё верно?»."""
+    return bool(text and "?" in text and _ASKS_CONFIRMATION_RE.search(text))
+
+
+async def confirmations_in_a_row(db: AsyncSession, dialog_id: int) -> int:
+    """Сколько наших последних сообщений подряд закончились сверкой «Всё верно?».
+
+    Регламент (промпт, «Отказ клиента»): «Один и тот же вопрос-сверку третий раз
+    не задавай». Исполнять это было некому: защита от повторов сравнивает
+    формулировки, а модель каждый раз пишет сверку заново. В диалоге 75853 их
+    ушло пять подряд, 08:48–08:50, — клиент всё это время просил показать макет
+    и в итоге ответил «Удачи с вашими тупыми ботами».
+    """
+    streak = 0
+    for text in await _recent_outgoing_texts(db, dialog_id, _CONFIRMATION_LOOKBACK):
+        if not asks_confirmation(text):
+            break
+        streak += 1
+    return streak
+
+
+# Сколько последних наших сообщений считаем «подряд». Ход даёт максимум пять
+# сообщений, но сверка всегда последняя в ходе — трёх хватает.
+_CONFIRMATION_LOOKBACK = 3
+
+
 async def design_just_confirmed(db: AsyncSession, dialog_id: int, client_text: str) -> bool:
     """Клиент подтвердил сверку дизайна — по регламенту следом идут фиксация,
     сумма заказа со способами оплаты и запрос данных получателя.
@@ -490,13 +517,45 @@ async def dialog_has_payment_link(db: AsyncSession, dialog_id: int) -> bool:
     )
 
 
-async def answered_inscription_question(db: AsyncSession, dialog_id: int) -> bool:
+def _normalized(text: str | None) -> str:
+    """Текст без пунктуации и регистра — для сравнения «это уже говорили»."""
+    return re.sub(r"\W+", " ", (text or "").lower()).strip()
+
+
+async def script_already_sent(
+    db: AsyncSession, dialog_id: int, phrase_text: str | None,
+) -> bool:
+    """Этот скрипт в диалоге уже уходил.
+
+    Сравниваем по первой строке: она уходит дословно, а хвост скрипта модель
+    переписывает и дополняет подстановками.
+    """
+    head = _normalized((phrase_text or "").split("\n")[0])[:40]
+    if not head:
+        return False
+    return any(head in _normalized(t) for t in await _outgoing_texts(db, dialog_id))
+
+
+async def answered_inscription_question(
+    db: AsyncSession, dialog_id: int, type_id: int | None = None,
+) -> bool:
     """Последнее наше сообщение — вопрос воронки про имя/фамилию для нанесения.
 
     Значит текущая реплика клиента и есть ответ на него, а следом по регламенту
     обязаны уйти похвала, стоимость и доставка.
+
+    Ровно один раз за диалог. Шаблон вопроса ловит «имя … фамилия» и в сверке
+    дизайна тоже — «На белом свитшоте разместим имена и фамилии: …», — и на
+    уточнение «Два свитшота» клиент во второй раз получил «Супер, зафиксировала»
+    вместе с заглушкой «Что скажете?» (диалог 75853, 21.08 08:47). Похвала уже
+    уходила девятью минутами раньше, вместе с ценой.
     """
     from app.sales.order_slots import ASKS_INSCRIPTION_RE
 
     last = await _last_outgoing(db, dialog_id)
-    return bool(last and ASKS_INSCRIPTION_RE.search(last))
+    if not last or not ASKS_INSCRIPTION_RE.search(last):
+        return False
+    praise = await find_praise_script(db, type_id)
+    if praise is None:
+        return True
+    return not await script_already_sent(db, dialog_id, praise.phrase_text)
