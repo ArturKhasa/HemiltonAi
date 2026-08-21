@@ -328,6 +328,12 @@ async def verify_attachments_delivered(
 
     expected = [a for a in attachment.split(",") if a]
     if not message_id or not expected:
+        # Проверять нечего, но знать об этом надо: молчание в логах читалось как
+        # «проверка прошла успешно», хотя она просто не начиналась.
+        logger.info(
+            "вложения не проверяем | message_id=%s | объектов=%d",
+            message_id, len(expected),
+        )
         return True
     try:
         data = await vk_api_call(
@@ -340,6 +346,10 @@ async def verify_attachments_delivered(
         logger.warning("не удалось проверить вложения | message_id=%s: %s", message_id, exc)
         return True
     if delivered >= len(expected):
+        logger.info(
+            "вложения доехали: ожидали %d, доехало %d | message_id=%s",
+            len(expected), delivered, message_id,
+        )
         return True
     dropped = await forget_attachments(db, group.id, expected)
     logger.error(
