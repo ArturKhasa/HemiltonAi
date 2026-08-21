@@ -9,11 +9,10 @@
   сообщения, чтобы диалог продолжался».
 - 13:53: «Примерно четвёртое предложение о бесплатном макете в этом диалоге».
 """
-from dataclasses import dataclass, field
-
 import pytest
 
 from app.ai.runner import (
+    ReplyPart,
     _drop_duplicate_parts,
     _drop_repeated_offers,
     _ensure_question,
@@ -23,10 +22,9 @@ from app.ai.runner import (
 from app.sales.funnel_steps import client_wants_design_edit
 
 
-@dataclass
-class FakePart:
-    text: str
-    image_urls: list = field(default_factory=list)
+def FakePart(text, image_urls=None):
+    """Настоящая часть хода без строки в базе: гейты правят и то, и другое."""
+    return ReplyPart(text=text, image_urls=image_urls or [], message=None)
 
 
 def _texts(parts):
@@ -174,3 +172,114 @@ class TestOneQuestionPerTurn:
         assert len(got) == 2
         assert got[1].text == ""
         assert got[1].image_urls
+
+
+# Ссылка на картинку в скрипте кончается на «…RoMf.jpg?quality=95&as=32x53,…» —
+# внутри неё живёт свой «вопрос».
+PHOTO = (
+    "[photo-https://sun9-30.vkuserphoto.ru/s/v1/ig2/AbwtA1sC3ebMeBIulTma4C.jpg"
+    "?quality=95&as=32x53,48x79&from=bu&cs=539x0&attachment=photo-44440184_457423774]"
+)
+
+
+class TestAttachmentTokensAreNotQuestions:
+    """Клиент вместо суммы заказа получил одно слово «jpg?».
+
+    Диалог 75800, 20.08 23:19: скрипт оформления уходил повторно, дубль свернулся
+    «до последнего вопроса», а последним вопросом оказался хвост ссылки. В базе
+    при этом лежал полный текст со статусом «доставлено».
+    """
+
+    CHECKOUT = (
+        "Получается сумма заказа - 5 990 ₽\n\n"
+        "Прикрепляю наши отзывы!\n\n"
+        "Удобно оплатить всю сумму сразу с подарком или сначала 500 рублей?)\n\n"
+        f"{PHOTO}"
+    )
+
+    def test_duplicate_collapses_to_the_real_question(self):
+        parts = [FakePart(self.CHECKOUT)]
+
+        got = _texts(_drop_duplicate_parts(parts, [self.CHECKOUT], "ctx"))
+
+        assert got[0].startswith("Удобно оплатить всю сумму сразу с подарком")
+        assert "jpg?" not in got[0].split("[photo-")[0]
+
+    def test_pictures_survive_the_collapse(self):
+        parts = [FakePart(self.CHECKOUT)]
+
+        got = _texts(_drop_duplicate_parts(parts, [self.CHECKOUT], "ctx"))
+
+        # Картинки к вопросу про оплату — это отзывы, уходят ровно с ним.
+        assert PHOTO in got[0]
+
+    def test_photo_only_part_does_not_spend_the_turn_question(self):
+        parts = [
+            FakePart(f"Стоимость толстовки - 5 990 ₽\n\n{PHOTO}"),
+            FakePart("Шьём по Вашим меркам.\n\nВ какой город нужна будет доставка?"),
+        ]
+
+        got = _texts(_keep_one_question(parts, "ctx"))
+
+        assert got[1].endswith("В какой город нужна будет доставка?")
+        assert PHOTO in got[0]
+
+    def test_link_is_not_torn_apart_as_a_repeated_question(self):
+        parts = [
+            FakePart("В какой город нужна будет доставка?"),
+            FakePart(f"Стоимость толстовки - 5 990 ₽\n\n{PHOTO}"),
+        ]
+
+        got = _texts(_keep_one_question(parts, "ctx"))
+
+        # Раньше «jpg?» вырезалось из середины ссылки, токен становился мусорным
+        # и картинка молча пропадала.
+        assert PHOTO in got[1]
+
+    def test_turn_of_pictures_alone_still_gets_a_question(self):
+        parts = [FakePart(f"Вот наши работы\n\n{PHOTO}")]
+
+        got = _texts(_ensure_question(parts, {}, "ctx"))
+
+        assert got[0].endswith("В какой город нужна будет доставка?")
+
+
+class TestPanelShowsWhatTheClientGot:
+    """Гейты правят и строку в базе: иначе ОП разбирает диалог по тексту,
+    которого клиент не видел (сообщение 160076 против «jpg?» в ВК)."""
+
+    class FakeMessage:
+        def __init__(self, text):
+            self.text = text
+
+    def _part(self, text):
+        message = self.FakeMessage(text)
+        return ReplyPart(text=text, image_urls=[], message=message), message
+
+    def test_collapsed_duplicate_is_rewritten_in_the_database(self):
+        checkout = (
+            "Получается сумма заказа - 5 990 ₽\n\n"
+            "Удобно оплатить всю сумму сразу с подарком или сначала 500 рублей?"
+        )
+        part, message = self._part(checkout)
+
+        _drop_duplicate_parts([part], [checkout], "ctx")
+
+        assert message.text == part.text
+        assert message.text.startswith("Удобно оплатить")
+
+    def test_stripped_second_question_is_rewritten_in_the_database(self):
+        first, _ = self._part("Какой цвет выберем?")
+        second, message = self._part("Шьём по меркам.\n\nВ какой город доставка?")
+
+        _keep_one_question([first, second], "ctx")
+
+        assert message.text == "Шьём по меркам."
+
+    def test_appended_question_is_rewritten_in_the_database(self):
+        part, message = self._part("Супер, зафиксировала")
+
+        _ensure_question([part], {"city": "Казань", "color": "чёрный"}, "ctx")
+
+        assert message.text == part.text
+        assert message.text.endswith("?")

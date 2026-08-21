@@ -33,6 +33,7 @@ from app.utils.media import (
     is_image_url,
     is_sticker_url,
     is_video_url,
+    strip_attachment_tokens,
 )
 from app.vk.outgoing import delivered_only
 from app.vk.spintax import resolve_spintax
@@ -149,6 +150,18 @@ class ReplyPart:
     text: str
     image_urls: list[str]
     message: Message
+
+    def set_text(self, text: str) -> None:
+        """Поменять текст части — вместе со строкой в базе.
+
+        Строка `messages` создаётся при сборке хода, а гейты ниже правят её текст
+        уже после. Правку в базу никто не возвращал, и в панели лежало не то, что
+        получил клиент: сообщение 160076 — полное оформление со статусом
+        «доставлено», а в ВК по тому же id ушло одно слово «jpg?».
+        """
+        self.text = text
+        if self.message is not None:
+            self.message.text = text
 
 # Cap history sent to the model — older turns rarely change the reply but cost input tokens.
 _HISTORY_MAX_MESSAGES = 100
@@ -400,10 +413,30 @@ def awaits_client_answer(text: str) -> bool:
 # скрипта. Вместо него можно было задублировать только вопрос про удобный способ
 # оплаты».
 _LAST_QUESTION_RE = re.compile(r"[^.!?\n]*\?")
+# В вопросе есть хотя бы одна буква. Голый огрызок ссылки буквы тоже содержит,
+# поэтому одной этой проверки мало — вопросы ищем в тексте без токенов.
+_HAS_LETTER_RE = re.compile(r"[а-яёa-z]", re.I)
+
+
+def _questions_in(text: str) -> list[str]:
+    """Вопросы реплики — по тексту БЕЗ токенов вложений.
+
+    Внутри токена живёт свой «вопрос»: ссылка на CDN ВК заканчивается
+    «…RoMf.jpg?quality=95&as=…», и шаблон вопроса вытаскивал из неё хвост
+    «jpg?». Клиент вместо суммы заказа со способами оплаты получил одно слово
+    «jpg?» и ушёл (диалог 75800, 20.08 23:19). Тот же огрызок считался вопросом
+    и в гейтах ниже: сообщение с одними картинками съедало лимит «один вопрос за
+    ход», а вырезание такого «повтора» рвало ссылку пополам — и картинка
+    пропадала следом за вопросом.
+    """
+    return [
+        q for q in _LAST_QUESTION_RE.findall(strip_attachment_tokens(text))
+        if _HAS_LETTER_RE.search(q)
+    ]
 
 
 def _last_question(text: str) -> str | None:
-    found = _LAST_QUESTION_RE.findall(text or "")
+    found = _questions_in(text or "")
     return found[-1].strip() if found else None
 
 
@@ -444,7 +477,7 @@ def _drop_repeated_offers(parts, manager_texts: list[str], ctx: str):
             text = trimmed
         if not text and not part.image_urls:
             continue
-        part.text = text
+        part.set_text(text)
         kept.append(part)
     return kept
 
@@ -473,13 +506,15 @@ def _drop_duplicate_parts(parts, manager_texts: list[str], ctx: str):
                 logger.info(
                     "[%s] дубль скрипта свёрнут до вопроса | %r", ctx, question[:60],
                 )
-                part.text = question
+                # Картинки скрипта возвращаем к вопросу: у оформления это отзывы,
+                # и уходят они ровно с ним. Раньше вместе с текстом терялись и они.
+                part.set_text(carry_over_attachments(question, text))
                 seen.append(part.text)
                 kept.append(part)
                 continue
             logger.info("[%s] дубль без вопроса не отправлен | %r", ctx, text[:60])
             if part.image_urls:
-                part.text = ""
+                part.set_text("")
                 kept.append(part)
             continue
         seen.append(text)
@@ -505,13 +540,13 @@ _FALLBACK_QUESTION = "Что скажете?"
 
 def _ensure_question(parts, slots: dict[str, str], ctx: str):
     """Дописать вопрос к последней реплике хода, если его нет ни в одной."""
-    if not parts or any("?" in (p.text or "") for p in parts):
+    if not parts or any(_questions_in(p.text or "") for p in parts):
         return parts
     question = next(
         (q for slot, q in _SLOT_QUESTIONS if not slots.get(slot)), _FALLBACK_QUESTION,
     )
     last = parts[-1]
-    last.text = f"{(last.text or '').rstrip()}\n\n{question}".strip()
+    last.set_text(f"{(last.text or '').rstrip()}\n\n{question}".strip())
     logger.info("[%s] ход заканчивался без вопроса — дописан %r", ctx, question)
     return parts
 
@@ -520,7 +555,10 @@ def _ensure_question(parts, slots: dict[str, str], ctx: str):
 # его несли два ценовых скрипта и скрипт доставки (диалог 111, 07:37-07:38).
 # Ценовые дубли выключены, но связка может свести любые два звена с одинаковым
 # хвостом, поэтому повтор снимается на выходе.
-_QUESTION_RE = re.compile(r"[^.!?\n]*\?")
+#
+# Сам вопрос ищет _questions_in — по тексту без токенов вложений: «…jpg?» из
+# ссылки съедало лимит вопроса за ход, а вырезание такого «повтора» рвало ссылку
+# пополам, и картинка пропадала.
 
 
 def _keep_one_question(parts, ctx: str):
@@ -539,7 +577,7 @@ def _keep_one_question(parts, ctx: str):
     kept = []
     for part in parts:
         text = part.text or ""
-        questions = _QUESTION_RE.findall(text)
+        questions = _questions_in(text)
         if seen_question and questions:
             for q in questions:
                 text = text.replace(q, "")
@@ -549,7 +587,7 @@ def _keep_one_question(parts, ctx: str):
             seen_question = True
         if not text and not part.image_urls:
             continue
-        part.text = text
+        part.set_text(text)
         kept.append(part)
     return kept
 
@@ -560,7 +598,7 @@ def _drop_repeated_questions(parts, ctx: str):
     kept = []
     for part in parts:
         text = part.text or ""
-        for q in _QUESTION_RE.findall(text):
+        for q in _questions_in(text):
             key = _normalize_for_dup(q)
             if not key:
                 continue
@@ -572,7 +610,7 @@ def _drop_repeated_questions(parts, ctx: str):
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
         if not text and not part.image_urls:
             continue
-        part.text = text
+        part.set_text(text)
         kept.append(part)
     return kept
 
