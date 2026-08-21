@@ -3,15 +3,12 @@
 Клиент 44731492 за один ход получил «В какой город нужна доставка?» трижды и два
 разных расчёта — 5 990 ₽ и 4 990 ₽ (диалог 111, 07:37-07:38).
 """
-from dataclasses import dataclass, field
-
-from app.ai.runner import _drop_repeated_questions
+from app.ai.runner import ReplyPart, _drop_repeated_questions
 
 
-@dataclass
-class FakePart:
-    text: str
-    image_urls: list = field(default_factory=list)
+def FakePart(text, image_urls=None):
+    """Настоящая часть хода без строки в базе: гейты правят и то, и другое."""
+    return ReplyPart(text=text, image_urls=image_urls or [], message=None)
 
 
 def _texts(parts):

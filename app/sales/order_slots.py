@@ -114,6 +114,7 @@ _COLORS = {
 # Порядок = порядок показа в блоке [Уже собрано]: как в воронке ОП1.
 SLOT_LABELS: dict[str, str] = {
     "inscription": "надпись на изделии",
+    "pair": "сколько изделий",
     "product": "изделие",
     "city": "город доставки",
     "color": "цвет",
@@ -163,6 +164,40 @@ def has_size(text: str) -> bool:
     return _find_size(text) is not None
 
 
+# Парный заказ. Лена, 21.08: «Клиент пишет 2 имени/фамилии = пришел за парными
+# изделиями, соответственно, цену нужно отправлять на парные». В диалоге 75853
+# клиент ответил «Шишкин Кирилл и Виктория Шишкина», прислал два роста с весом и
+# прямо написал «Два свитшота» — а получил цену на одно изделие и в оформлении
+# сумму 5 990 ₽ за два свитшота.
+#
+# Прямое указание на два изделия — самое надёжное, его и ловим первым.
+_TWO_ITEMS_RE = re.compile(
+    r"\bпарн\w+|\bдв[ае]\s+(?:свитшот|худи|толстовк|кофт|издели|штук)\w*"
+    r"|\bдво[ий]м\b|\bна\s+двоих\b"
+    r"|\b(?:мне|нам)\s+и\s+(?:жене|мужу|супруг\w+|девушке|парню|брату|сестре|сыну|дочери)\b"
+    r"|\bдля\s+(?:меня|нас)\s+и\s+(?:жены|мужа|супруг\w+|девушки|парня|брата|сестры|сына|дочери)\b",
+    re.I,
+)
+
+# Разделители между двумя надписями: «Шишкин Кирилл и Виктория Шишкина»,
+# «Кирилл, Виктория», «Маша + Петя».
+_NAMES_SPLIT_RE = re.compile(r"\s+и\s+|\s*[,+/]\s*|\s+&\s+", re.I)
+# Часть, похожая на имя человека: одно или два слова с большой буквы. «Иванов
+# Иван Иванович» — три слова, это ФИО одного человека, а не двое.
+_PERSON_RE = re.compile(r"^[А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+)?$")
+
+
+def names_two_people(text: str) -> bool:
+    """Надпись названа для двух человек: «Шишкин Кирилл и Виктория Шишкина»."""
+    parts = [p.strip() for p in _NAMES_SPLIT_RE.split((text or "").strip()) if p.strip()]
+    return len(parts) == 2 and all(_PERSON_RE.match(p) for p in parts)
+
+
+def wants_two_items(text: str) -> bool:
+    """Клиент прямо сказал, что изделий два."""
+    return bool(_TWO_ITEMS_RE.search(text or ""))
+
+
 def collect_slots(history: list[tuple[str, str]]) -> dict[str, str]:
     """Факты заказа из истории. history — [(role, text)] по возрастанию времени,
     role: 'client' для клиента, любое другое значение — наша сторона.
@@ -201,6 +236,8 @@ def collect_slots(history: list[tuple[str, str]]) -> dict[str, str]:
         product = _PRODUCT_RE.search(text)
         if product:
             slots["product"] = product.group(0).lower()
+        if wants_two_items(text):
+            slots["pair"] = "два изделия"
 
         # Надпись — единственный слот без собственного шаблона: на изделии может
         # быть что угодно. Её засчитываем по ответу на наш вопрос «какое имя или
@@ -217,11 +254,16 @@ def collect_slots(history: list[tuple[str, str]]) -> dict[str, str]:
         if asked == "inscription" and "?" not in text:
             words = _words(text)
             if words and not _INSCRIPTION_META_RE.match(text.strip()):
-                if len(words) <= _MAX_ANSWER_WORDS:
+                # Два имени в четыре слова не укладываются: «Шишкин Кирилл и
+                # Виктория Шишкина» — пять, и надпись целиком терялась вместе с
+                # самим фактом, что изделий два (диалог 75853).
+                if len(words) <= _MAX_ANSWER_WORDS or names_two_people(text):
                     known = slots.get("inscription", "")
                     joined = f"{known} {text.strip()}".strip() if known else text.strip()
                     if len(_words(joined)) <= _MAX_INSCRIPTION_WORDS:
                         slots["inscription"] = joined
+                        if names_two_people(joined):
+                            slots["pair"] = "два изделия"
                 # Длинную фразу надписью не считаем, но и ждать дальше нечего:
                 # клиент перешёл к другой теме.
                 else:

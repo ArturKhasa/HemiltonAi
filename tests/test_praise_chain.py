@@ -7,7 +7,7 @@
 """
 import pytest
 
-from app.ai.runner import build_script_parts
+from app.ai.runner import _is_praise_only, build_script_parts
 from app.db.models import Client, Dialog, DialogType, Script, VkGroup
 from app.sales.funnel_steps import find_praise_script
 
@@ -68,3 +68,31 @@ async def test_praise_unrolls_into_price_and_delivery(funnel):
     assert PRICE_PHOTO in texts[1]
     # Ход заканчивается вопросом про город — это последнее звено связки.
     assert texts[2].endswith("В какой город нужна будет доставка?")
+
+
+class TestPraiseDroppedWhenTheClientAsked:
+    """«Супер, зафиксировала» на «Сколько будет стоить?» — присоединение не в тему.
+
+    Лена, 21.08: «Если после первого приветственного сообщения клиент сразу
+    спрашивает про цену, то её нужно отправить без присоединения "Супер,
+    зафиксировала"». Диалог 75854, 08:39 — ушло именно оно, и следом прайс.
+    """
+
+    PRAISE = "Супер, зафиксировала\nСделаем всё как Вы хотите!"
+
+    def test_reply_by_script_id_is_praise_only(self):
+        assert _is_praise_only(self.PRAISE, self.PRAISE, 363, 363)
+
+    def test_retold_praise_without_script_id_is_praise_only(self):
+        assert _is_praise_only("Супер, зафиксировала!", self.PRAISE, None, 363)
+
+    def test_answer_to_the_question_is_kept(self):
+        reply = "Состав наших изделий: вискоза/хлопок 85%. Что напишем на кофте?"
+        assert not _is_praise_only(reply, self.PRAISE, None, 363)
+
+    def test_another_script_is_kept(self):
+        reply = "Стоимость толстовки - 5 990 ₽"
+        assert not _is_praise_only(reply, self.PRAISE, 367, 363)
+
+    def test_reply_of_pictures_alone_is_not_praise(self):
+        assert not _is_praise_only(PRICE_PHOTO, self.PRAISE, None, 363)

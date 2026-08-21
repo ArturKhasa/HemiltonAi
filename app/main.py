@@ -59,8 +59,14 @@ for _noisy in ("openai", "anthropic", "httpx", "httpcore", "openai._base_client"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.commands.rehost_script_media import rehost_on_startup
     from app.ping.scheduler import start as start_ping
     tasks = start_ping()
+    # Картинки скриптов держим у себя, а не ссылками на CDN ВК: чужая ссылка
+    # умирает молча, и сообщение уходит без картинки. Фоном, а не до старта:
+    # переносить нечего в подавляющем большинстве запусков, но если есть —
+    # это скачивание десятков файлов, и ждать его клиенту незачем.
+    tasks.append(asyncio.create_task(rehost_on_startup()))
     yield
     for task in tasks:
         task.cancel()

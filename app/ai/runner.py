@@ -33,8 +33,9 @@ from app.utils.media import (
     is_image_url,
     is_sticker_url,
     is_video_url,
+    strip_attachment_tokens,
 )
-from app.vk.outgoing import delivered_only
+from app.vk.outgoing import delivered_only, mark_failed
 from app.vk.spintax import resolve_spintax
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
@@ -43,11 +44,16 @@ from app.sales.color_palette import with_palette
 from app.sales.non_answer import is_non_answer
 from app.sales.offer_terms import (
     data_requested_after_payment,
+    hedges_delivery_price,
     promises_both_gifts,
     promises_offer_another_day,
 )
 from app.sales.price_objection import concession_allowed
-from app.sales.product_photo import asks_to_see_product, reply_shows_photo
+from app.sales.product_photo import (
+    asks_to_see_product,
+    claims_picture_already_sent,
+    reply_shows_photo,
+)
 from app.sales.price_placeholder import payment_link_configured, render_price_placeholders
 from app.sales.status_names import (
     AWAITING_PREPAY,
@@ -60,6 +66,8 @@ from app.sales.funnel_steps import (
     CHECKOUT_PRESENTED_RE,
     PAYMENT_LINK_RE,
     answered_inscription_question,
+    asks_confirmation,
+    confirmations_in_a_row,
     checkout_presented,
     client_refused,
     client_wants_design_edit,
@@ -149,6 +157,18 @@ class ReplyPart:
     text: str
     image_urls: list[str]
     message: Message
+
+    def set_text(self, text: str) -> None:
+        """Поменять текст части — вместе со строкой в базе.
+
+        Строка `messages` создаётся при сборке хода, а гейты ниже правят её текст
+        уже после. Правку в базу никто не возвращал, и в панели лежало не то, что
+        получил клиент: сообщение 160076 — полное оформление со статусом
+        «доставлено», а в ВК по тому же id ушло одно слово «jpg?».
+        """
+        self.text = text
+        if self.message is not None:
+            self.message.text = text
 
 # Cap history sent to the model — older turns rarely change the reply but cost input tokens.
 _HISTORY_MAX_MESSAGES = 100
@@ -337,6 +357,26 @@ _GIFT_RETRY_INSTRUCTION = (
 # попадает.
 _SLOT_REPEAT_LIMIT = 2
 
+_REPEATED_CONFIRMATION_RETRY_INSTRUCTION = (
+    "Сверку «Всё верно?» ты уже отправляла подряд, и клиент на неё не ответил — "
+    "значит его занимает другое. Ответь на то, о чём он пишет, и не повторяй "
+    "сверку: она уйдёт следующим ходом, когда будет что сверять."
+)
+
+_DELIVERY_PRICE_RETRY_INSTRUCTION = (
+    "Стоимость доставки у нас одна и она известна: СДЭК — 1 000 ₽ по любому "
+    "направлению, клиент платит её при получении, после того как осмотрит и "
+    "примерит заказ. Назови сумму прямо; «зависит от города» и «уточню позже» "
+    "писать нельзя."
+)
+
+_MOCKUP_CLAIM_RETRY_INSTRUCTION = (
+    "Не отсылай клиента к прошлому сообщению за картинкой: он пишет, что её не "
+    "видит. Приложи картинку заново. Макета с надписями клиента у тебя нет — его "
+    "рисует дизайнер после брони; не пиши, что макет или пример с его именами "
+    "уже отправлен."
+)
+
 _SLOT_REPEAT_RETRY_INSTRUCTION = (
     "[Служебное] Ты уже дважды просила эти данные в последних сообщениях, клиент "
     "их пока не прислал и пишет о другом. Третий раз просить нельзя — это читается "
@@ -400,11 +440,48 @@ def awaits_client_answer(text: str) -> bool:
 # скрипта. Вместо него можно было задублировать только вопрос про удобный способ
 # оплаты».
 _LAST_QUESTION_RE = re.compile(r"[^.!?\n]*\?")
+# В вопросе есть хотя бы одна буква. Голый огрызок ссылки буквы тоже содержит,
+# поэтому одной этой проверки мало — вопросы ищем в тексте без токенов.
+_HAS_LETTER_RE = re.compile(r"[а-яёa-z]", re.I)
+
+
+def _questions_in(text: str) -> list[str]:
+    """Вопросы реплики — по тексту БЕЗ токенов вложений.
+
+    Внутри токена живёт свой «вопрос»: ссылка на CDN ВК заканчивается
+    «…RoMf.jpg?quality=95&as=…», и шаблон вопроса вытаскивал из неё хвост
+    «jpg?». Клиент вместо суммы заказа со способами оплаты получил одно слово
+    «jpg?» и ушёл (диалог 75800, 20.08 23:19). Тот же огрызок считался вопросом
+    и в гейтах ниже: сообщение с одними картинками съедало лимит «один вопрос за
+    ход», а вырезание такого «повтора» рвало ссылку пополам — и картинка
+    пропадала следом за вопросом.
+    """
+    return [
+        q for q in _LAST_QUESTION_RE.findall(strip_attachment_tokens(text))
+        if _HAS_LETTER_RE.search(q)
+    ]
 
 
 def _last_question(text: str) -> str | None:
-    found = _LAST_QUESTION_RE.findall(text or "")
+    found = _questions_in(text or "")
     return found[-1].strip() if found else None
+
+
+def _is_praise_only(
+    reply_text: str, praise_text: str | None, source_script_id, praise_id,
+) -> bool:
+    """Ход модели свёлся к присоединению «Супер, зафиксировала» и больше ни к чему.
+
+    Проверяем и ссылку на скрипт, и сам текст: скрипт похвалы модель отправляет и
+    своими словами, без source_script_id.
+    """
+    body = strip_attachment_tokens(reply_text)
+    if not body:
+        return False
+    if source_script_id is not None and source_script_id == praise_id:
+        return True
+    head = _normalize_for_dup((praise_text or "").split("\n")[0])[:30]
+    return bool(head and _normalize_for_dup(body).startswith(head))
 
 
 # Предложения, которые звучат один раз за диалог. ОП, 10 августа, 13:53:
@@ -444,7 +521,7 @@ def _drop_repeated_offers(parts, manager_texts: list[str], ctx: str):
             text = trimmed
         if not text and not part.image_urls:
             continue
-        part.text = text
+        part.set_text(text)
         kept.append(part)
     return kept
 
@@ -473,13 +550,15 @@ def _drop_duplicate_parts(parts, manager_texts: list[str], ctx: str):
                 logger.info(
                     "[%s] дубль скрипта свёрнут до вопроса | %r", ctx, question[:60],
                 )
-                part.text = question
+                # Картинки скрипта возвращаем к вопросу: у оформления это отзывы,
+                # и уходят они ровно с ним. Раньше вместе с текстом терялись и они.
+                part.set_text(carry_over_attachments(question, text))
                 seen.append(part.text)
                 kept.append(part)
                 continue
             logger.info("[%s] дубль без вопроса не отправлен | %r", ctx, text[:60])
             if part.image_urls:
-                part.text = ""
+                part.set_text("")
                 kept.append(part)
             continue
         seen.append(text)
@@ -499,19 +578,22 @@ _SLOT_QUESTIONS: list[tuple[str, str]] = [
     ("color", "Какой цвет выберем?"),
     ("size", "Подскажите рост и вес, чтобы точно подобрать размер?"),
 ]
-# Про заказ известно всё — остаётся вернуть слово клиенту.
-_FALLBACK_QUESTION = "Что скажете?"
+# Про заказ известно всё, кроме раскладки — её и спрашиваем: это следующий шаг
+# воронки. Прежнее «Что скажете?» вопросом было только по форме: клиенту, который
+# только что уточнил «Два свитшота», ушло «Супер, зафиксировала / Сделаем всё как
+# Вы хотите! / Что скажете?» (диалог 75853, 21.08 08:47).
+_FALLBACK_QUESTION = "Что и где разместим на изделии?"
 
 
 def _ensure_question(parts, slots: dict[str, str], ctx: str):
     """Дописать вопрос к последней реплике хода, если его нет ни в одной."""
-    if not parts or any("?" in (p.text or "") for p in parts):
+    if not parts or any(_questions_in(p.text or "") for p in parts):
         return parts
     question = next(
         (q for slot, q in _SLOT_QUESTIONS if not slots.get(slot)), _FALLBACK_QUESTION,
     )
     last = parts[-1]
-    last.text = f"{(last.text or '').rstrip()}\n\n{question}".strip()
+    last.set_text(f"{(last.text or '').rstrip()}\n\n{question}".strip())
     logger.info("[%s] ход заканчивался без вопроса — дописан %r", ctx, question)
     return parts
 
@@ -520,7 +602,10 @@ def _ensure_question(parts, slots: dict[str, str], ctx: str):
 # его несли два ценовых скрипта и скрипт доставки (диалог 111, 07:37-07:38).
 # Ценовые дубли выключены, но связка может свести любые два звена с одинаковым
 # хвостом, поэтому повтор снимается на выходе.
-_QUESTION_RE = re.compile(r"[^.!?\n]*\?")
+#
+# Сам вопрос ищет _questions_in — по тексту без токенов вложений: «…jpg?» из
+# ссылки съедало лимит вопроса за ход, а вырезание такого «повтора» рвало ссылку
+# пополам, и картинка пропадала.
 
 
 def _keep_one_question(parts, ctx: str):
@@ -539,7 +624,7 @@ def _keep_one_question(parts, ctx: str):
     kept = []
     for part in parts:
         text = part.text or ""
-        questions = _QUESTION_RE.findall(text)
+        questions = _questions_in(text)
         if seen_question and questions:
             for q in questions:
                 text = text.replace(q, "")
@@ -549,7 +634,7 @@ def _keep_one_question(parts, ctx: str):
             seen_question = True
         if not text and not part.image_urls:
             continue
-        part.text = text
+        part.set_text(text)
         kept.append(part)
     return kept
 
@@ -560,7 +645,7 @@ def _drop_repeated_questions(parts, ctx: str):
     kept = []
     for part in parts:
         text = part.text or ""
-        for q in _QUESTION_RE.findall(text):
+        for q in _questions_in(text):
             key = _normalize_for_dup(q)
             if not key:
                 continue
@@ -572,7 +657,7 @@ def _drop_repeated_questions(parts, ctx: str):
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
         if not text and not part.image_urls:
             continue
-        part.text = text
+        part.set_text(text)
         kept.append(part)
     return kept
 
@@ -965,11 +1050,20 @@ async def run_ai(
     if non_answer:
         logger.info("[%s] клиент переспрашивает, а не отвечает — воронку не двигаем | text=%r", ctx, text[:40])
     held = refused or design_edit or non_answer
-    praise_point = not held and await answered_inscription_question(db, dialog.id)
+    praise_point = not held and await answered_inscription_question(db, dialog.id, type_id)
+    # Клиент не назвал надпись, а спросил своё — чаще всего про цену. Связка
+    # нужна, присоединение «Супер, зафиксировала» — нет: фиксировать нечего.
+    # Лена, 21.08: «Если после первого приветственного сообщения клиент сразу
+    # спрашивает про цену, то её нужно отправить без присоединения "Супер,
+    # зафиксировала", потому что оно тут не в тему».
+    asked_instead_of_answering = praise_point and "?" in text
     payment_choice_point = not held and await payment_option_chosen(db, dialog.id, text)
     # Клиент назвал рост и вес — следующим ходом идёт сверка дизайна, и она
     # уходит скриптом: свой пересказ модель пишет без раскладки нанесений.
     design_review_point = not held and await size_just_given(db, dialog.id, text)
+    # Сколько наших сообщений подряд закончились сверкой «Всё верно?»: третью
+    # клиенту не отправляем (диалог 75853, 21.08 — их ушло пять подряд).
+    confirmation_streak = await confirmations_in_a_row(db, dialog.id)
     # Сверки «всё верно?» встречаются и после оплаты — при подведении итогов заказа
     # и при согласовании макета. Без этой проверки «да» на итоговую сверку тянуло
     # диалог обратно в оформление: клиент, уже приславший чек, получил условия
@@ -994,6 +1088,7 @@ async def run_ai(
     acc_input = acc_output = acc_cache_read = acc_cache_write = 0
     dup_match: str | None = None
     ignores_refusal = False
+    repeated_confirmation = False
     for dup_attempt in (1, 2):
         uncached_tail = 1 + len(dynamic_context) + 2 * (dup_attempt - 1)
         result = None  # set on the openai-agents path; read by the failure logger
@@ -1171,10 +1266,26 @@ async def run_ai(
         both_gifts = promises_both_gifts(output.reply_text)
         deferred_offer = promises_offer_another_day(output.reply_text)
         repeated_slot = repeats_slot_request(output.reply_text, manager_history_texts, slots)
+        # Третья сверка «Всё верно?» подряд. Клиент дважды ответил не про неё —
+        # значит его занимает другое, и повтор он читает как то, что его не слышат.
+        repeated_confirmation = (
+            confirmation_streak >= 2
+            and not design_point
+            and asks_confirmation(output.reply_text)
+        )
+        # Стоимость доставки известна и одна — уходить от неё нельзя.
+        hedged_delivery = hedges_delivery_price(output.reply_text)
+        # Отсылка к картинке, которой клиент не видит, вместо самой картинки.
+        mockup_claim = (
+            claims_picture_already_sent(output.reply_text)
+            and not reply_shows_photo(output.reply_text)
+        )
         if (
             not dup_match and not requote and not no_question and not ignores_refusal
             and not repeated_chunk and not bad_payment_order and not both_gifts
             and not deferred_offer and not repeated_slot
+            and not repeated_confirmation and not mockup_claim
+            and not hedged_delivery
         ) or dup_attempt == 2:
             break
         if no_photo_shown:
@@ -1205,6 +1316,24 @@ async def run_ai(
                 ctx, repeated_slot,
             )
             correction = _SLOT_REPEAT_RETRY_INSTRUCTION
+        elif hedged_delivery:
+            logger.warning(
+                "[%s] стоимость доставки названа обтекаемо — retrying | reply_head=%r",
+                ctx, (output.reply_text or "")[:80],
+            )
+            correction = _DELIVERY_PRICE_RETRY_INSTRUCTION
+        elif mockup_claim:
+            logger.warning(
+                "[%s] ответ отсылает к картинке вместо картинки — retrying | reply_head=%r",
+                ctx, (output.reply_text or "")[:80],
+            )
+            correction = _MOCKUP_CLAIM_RETRY_INSTRUCTION
+        elif repeated_confirmation:
+            logger.warning(
+                "[%s] сверка «Всё верно?» третий раз подряд — retrying | подряд=%d",
+                ctx, confirmation_streak,
+            )
+            correction = _REPEATED_CONFIRMATION_RETRY_INSTRUCTION
         elif ignores_refusal and design_edit and not refused:
             logger.warning(
                 "[%s] клиент просит правку, а ответ двигает воронку — retrying", ctx,
@@ -1243,6 +1372,18 @@ async def run_ai(
             correction = _DUP_RETRY_INSTRUCTION
         input_messages.append({"role": "assistant", "content": output.reply_text})
         input_messages.append({"role": "user", "content": correction})
+
+    # Сверка пережила повтор — значит модель по третьему кругу спрашивает то, на
+    # что клиент не отвечает. Дальше по-хорошему нужен человек: в диалоге 75853
+    # клиент к пятой сверке ушёл с «Удачи с вашими тупыми ботами».
+    if repeated_confirmation:
+        logger.warning("[%s] сверка подряд пережила повтор — куратору", ctx)
+        output = output.model_copy(update={
+            "need_curator": True,
+            "curator_reason": (
+                "Третья сверка «Всё верно?» подряд: клиент отвечает про другое"
+            ),
+        })
 
     if dup_match:
         logger.warning("[%s] duplicate reply survived the retry — escalating to curator", ctx)
@@ -1685,6 +1826,21 @@ async def run_ai(
                 )
                 parts.extend(forced)
 
+    # Клиент спросил вместо ответа, а модель всё равно ответила похвалой: тогда
+    # весь её ход — это «Супер, зафиксировала» на вопрос «Сколько будет стоить?»
+    # (диалог 75854, 21.08 08:39). Присоединение снимаем, связка со стоимостью
+    # уходит без него. Реплику по существу вопроса не трогаем: снимаем только
+    # ту, что свелась к самой похвале.
+    if asked_instead_of_answering and len(parts) > 1:
+        praise = await find_praise_script(db, type_id)
+        if praise is not None and _is_praise_only(
+            parts[0].text, praise.phrase_text, output.source_script_id, praise.id,
+        ):
+            logger.info("[%s] похвала снята — клиент задал вопрос, а не назвал надпись", ctx)
+            if parts[0].message is not None:
+                mark_failed(parts[0].message)
+            parts = parts[1:]
+
     # Клиент выбрал способ оплаты — теперь и только теперь уместен запрос данных
     # получателя. Отдельным шагом, а не связкой к «5. Оформление»: тот скрипт
     # заканчивается вопросом про способ оплаты, и оба сообщения одним ходом
@@ -1946,16 +2102,21 @@ async def _build_follow_up_part(
         )
         return None, None
 
-    # Под рекламную метку клиента бывает своя версия шага — например свой
-    # расчёт со свитшотом и жилеткой. Связка ведёт на общий вариант, поэтому
-    # подменяем здесь. Цепочку продолжаем по ОБЩЕМУ скрипту, если у варианта
-    # своего продолжения нет: иначе за подменённым расчётом не ушла бы доставка.
+    # Под клиента бывает своя версия шага: свой расчёт со свитшотом и жилеткой
+    # под рекламную метку, свой — на заказ из двух изделий. Связка ведёт на общий
+    # вариант, поэтому подменяем здесь. Цепочку продолжаем по ОБЩЕМУ скрипту,
+    # если у варианта своего продолжения нет: иначе за подменённым расчётом не
+    # ушла бы доставка.
     chain_id = follow_up.id
-    tagged = await tagged_variant(db, follow_up, set(getattr(client, "marketing_tags", None) or []))
+    tagged = await tagged_variant(
+        db, follow_up,
+        set(getattr(client, "marketing_tags", None) or []),
+        pair=bool((known_slots or {}).get("pair")),
+    )
     if tagged.id != follow_up.id:
         logger.info(
-            "[%s] звено %s заменено на версию под метку — %s (%s)",
-            ctx, follow_up.id, tagged.id, tagged.marketing_tag,
+            "[%s] звено %s заменено на версию под клиента — %s (метка %s, парный %s)",
+            ctx, follow_up.id, tagged.id, tagged.marketing_tag, tagged.is_pair_variant,
         )
         follow_up = tagged
         if tagged.follow_up_script_id:

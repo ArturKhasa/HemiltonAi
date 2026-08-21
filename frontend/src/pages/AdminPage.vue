@@ -462,7 +462,7 @@
             <p class="text-xs text-gray-400 mt-1">Скрипт виден, пока диалог не прошёл эту стадию. «Любая» — без ограничения.</p>
           </div>
           <div>
-            <label class="block text-xs text-gray-500 mb-1.5">Заменяет шаг под меткой</label>
+            <label class="block text-xs text-gray-500 mb-1.5">Заменяет шаг</label>
             <select v-model="form.variant_of_script_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white">
               <option :value="0">— ничего не заменяет —</option>
               <option v-for="s in followUpOptions" :key="s.id" :value="s.id">
@@ -473,6 +473,16 @@
               Уйдёт вместо выбранного шага клиентам с меткой этого скрипта. Так делают
               свой расчёт под метку: обычный остаётся для всех остальных.
             </p>
+            <label v-if="form.variant_of_script_id" class="flex items-start gap-2 mt-2 text-sm">
+              <input type="checkbox" v-model="form.is_pair_variant" class="mt-0.5" />
+              <span>
+                Вариант для заказа на двоих
+                <span class="block text-xs text-gray-400">
+                  Уйдёт вместо выбранного шага, когда клиент назвал две надписи или
+                  сказал, что изделий два. Метка при этом не нужна.
+                </span>
+              </span>
+            </label>
           </div>
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Отправить следом</label>
@@ -739,7 +749,7 @@ const showModal = ref(false)
 const editScript = ref(null)
 const deleteTarget = ref(null)
 
-const form = ref({ type_id: null, condition: '', phrase_text: '', tokens: [], marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, variant_of_script_id: 0, is_active: true })
+const form = ref({ type_id: null, condition: '', phrase_text: '', tokens: [], marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, variant_of_script_id: 0, is_pair_variant: false, is_active: true })
 
 // Метка скрипта должна совпадать с реф-меткой из рекламной ссылки. В поле
 // писали человеческое название — «свитшот + жилет, 8980р», — и такой скрипт не
@@ -821,7 +831,7 @@ async function load() {
 
 function openCreate() {
   editScript.value = null
-  form.value = { type_id: activeTypeId.value, condition: '', phrase_text: '', tokens: [], marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, variant_of_script_id: 0, is_active: true }
+  form.value = { type_id: activeTypeId.value, condition: '', phrase_text: '', tokens: [], marketing_tag: '', funnel_stage: '', follow_up_script_id: 0, variant_of_script_id: 0, is_pair_variant: false, is_active: true }
   showModal.value = true
 }
 
@@ -830,7 +840,7 @@ function openEdit(s) {
   // Картинки правятся блоком ниже, а не ссылками посреди текста: в расчёте их
   // три штуки по триста символов, и добраться до самого текста было нельзя.
   const { body, tokens } = splitGreeting(s.phrase_text)
-  form.value = { type_id: s.type_id, condition: s.condition, phrase_text: body, tokens, marketing_tag: s.marketing_tag || '', funnel_stage: s.funnel_stage || '', follow_up_script_id: s.follow_up_script_id || 0, variant_of_script_id: s.variant_of_script_id || 0, is_active: s.is_active }
+  form.value = { type_id: s.type_id, condition: s.condition, phrase_text: body, tokens, marketing_tag: s.marketing_tag || '', funnel_stage: s.funnel_stage || '', follow_up_script_id: s.follow_up_script_id || 0, variant_of_script_id: s.variant_of_script_id || 0, is_pair_variant: !!s.is_pair_variant, is_active: s.is_active }
   showModal.value = true
 }
 
@@ -843,10 +853,12 @@ async function saveScript() {
     // нет» приходит нулём и там же превращается обратно в NULL.
     const follow_up_script_id = form.value.follow_up_script_id || 0
     const variant_of_script_id = form.value.variant_of_script_id || 0
+    // Флаг живёт только вместе с заменой шага: без неё заменять нечего.
+    const is_pair_variant = !!variant_of_script_id && !!form.value.is_pair_variant
     const phrase_text = joinGreeting({ body: form.value.phrase_text, tokens: form.value.tokens })
     if (editScript.value) {
       const { tokens: _tokens, ...rest } = form.value
-      const res = await api.patch(`/scripts/${editScript.value.id}`, { ...rest, phrase_text, marketing_tag, funnel_stage, follow_up_script_id, variant_of_script_id })
+      const res = await api.patch(`/scripts/${editScript.value.id}`, { ...rest, phrase_text, marketing_tag, funnel_stage, follow_up_script_id, variant_of_script_id, is_pair_variant })
       const idx = scripts.value.findIndex(s => s.id === editScript.value.id)
       if (idx !== -1) scripts.value[idx] = res.data
     } else {
@@ -858,6 +870,7 @@ async function saveScript() {
         funnel_stage,
         follow_up_script_id,
         variant_of_script_id,
+        is_pair_variant,
       })
       scripts.value.push(res.data)
     }

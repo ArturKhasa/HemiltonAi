@@ -270,6 +270,10 @@ class Script(Base):
     variant_of_script_id = Column(
         Integer, ForeignKey("scripts.id", ondelete="SET NULL"), nullable=True
     )
+    # Вариант шага не под метку, а для заказа на двоих: клиент назвал две надписи
+    # («Шишкин Кирилл и Виктория Шишкина») — расчёт и сумма заказа считаются за
+    # два изделия. См. миграцию 051.
+    is_pair_variant = Column(Boolean, nullable=False, server_default=sa_text("false"))
     follow_up_script_id = Column(
         Integer, ForeignKey("scripts.id", ondelete="SET NULL"), nullable=True
     )

@@ -7,6 +7,7 @@ import pytest
 
 from app.sales.offer_terms import (
     data_requested_after_payment,
+    hedges_delivery_price,
     promises_both_gifts,
     promises_offer_another_day,
 )
@@ -77,3 +78,36 @@ class TestOfferAnotherDay:
     ])
     def test_legitimate_replies_allowed(self, reply):
         assert promises_offer_another_day(reply) is False
+
+
+class TestDeliveryPrice:
+    """Стоимость доставки известна и одна — уходить от неё нельзя.
+
+    Лена, 21.08: «Можно зафиксировать, что стоимость доставки СДЭКом фикс. по
+    всем направлениям - 1000р, она оплачивается при получении после просмотра и
+    примерки». До этого суммы не было нигде, и на прямой вопрос клиента модель
+    отвечала «её стоимость зависит от города» (диалог 75800, 20.08 23:15).
+    """
+
+    @pytest.mark.parametrize("text", [
+        "Доставка оплачивается при получении, её стоимость зависит от города.",
+        "Стоимость доставки уточню и напишу Вам.",
+        "Доставку СДЭКом рассчитаем при оформлении.",
+    ])
+    def test_hedging_is_caught(self, text):
+        assert hedges_delivery_price(text)
+
+    @pytest.mark.parametrize("text", [
+        "Доставка СДЭК - 1 000 ₽ по всем направлениям, оплачиваете при получении.",
+        "В Белорецк отправляем СДЭКом - быстрее и выгоднее Почты.",
+        "Вышивка нитками не входит в стоимость и рассчитывается индивидуально.",
+    ])
+    def test_a_straight_answer_passes(self, text):
+        assert not hedges_delivery_price(text)
+
+    def test_the_rule_is_in_the_prompt(self):
+        from app.ai.prompts import _SALES_PROMPT_FALLBACK
+
+        assert "## Доставка" in _SALES_PROMPT_FALLBACK
+        assert "1 000 ₽" in _SALES_PROMPT_FALLBACK
+        assert "примерит" in _SALES_PROMPT_FALLBACK

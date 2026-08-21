@@ -90,4 +90,15 @@ class TestPalette:
 
     async def test_token_picked_per_product(self, color_scripts):
         assert await palette_token(color_scripts, 1, "свитшот") == SWEATSHIRT_PHOTO
-        assert await palette_token(color_scripts, 1, "толстовка") == HOODIE_PHOTO
+        assert await palette_token(color_scripts, 1, "худи") == HOODIE_PHOTO
+
+    async def test_hoodie_palette_only_when_the_client_said_hoodie(self, color_scripts):
+        """«Толстовка» — это свитшот.
+
+        Так это слово стоит в скриптах ОП («Стоимость толстовки — 5 990 ₽»), и так
+        сказано в условии самого скрипта палитры худи. Лена, 21.08: «В этом диалоге
+        на выбор цвета ИИ отправила худи, хотя изначально разговор велся про
+        свитшот» — клиент до этого спросил «А из какого материала толстовка?».
+        """
+        assert await palette_token(color_scripts, 1, "толстовка") == SWEATSHIRT_PHOTO
+        assert await palette_token(color_scripts, 1, "толстовка с капюшоном") == HOODIE_PHOTO

@@ -120,6 +120,39 @@ class TestPraisePoint:
     async def test_empty_dialog(self, db, funnel):
         assert not await answered_inscription_question(db, funnel["dialog"].id)
 
+    async def test_praise_point_happens_once_per_dialog(self, db, funnel):
+        """Сверка дизайна тоже говорит «имена и фамилии» — второй похвале не быть.
+
+        Диалог 75853, 21.08: на уточнение «Два свитшота» клиенту второй раз ушло
+        «Супер, зафиксировала» — через девять минут после первого, вместе с
+        которым уже уходила цена.
+        """
+        db.add_all([
+            Message(
+                dialog_id=funnel["dialog"].id, role=MessageRole.ai,
+                text="Супер, зафиксировала",
+            ),
+            Message(
+                dialog_id=funnel["dialog"].id, role=MessageRole.ai,
+                text="Зафиксировала размеры! На белом свитшоте разместим имена и "
+                     "фамилии: «Шишкин Кирилл» и «Виктория Шишкина». Всё верно?",
+            ),
+        ])
+        await db.commit()
+
+        assert not await answered_inscription_question(
+            db, funnel["dialog"].id, type_id=1,
+        )
+
+    async def test_first_praise_still_fires(self, db, funnel):
+        db.add(Message(
+            dialog_id=funnel["dialog"].id, role=MessageRole.ai,
+            text="Ирина, какое имя или фамилию напишем на Вашей кофте?",
+        ))
+        await db.commit()
+
+        assert await answered_inscription_question(db, funnel["dialog"].id, type_id=1)
+
 
 class TestDesignConfirmation:
     async def test_design_fixed_script_found(self, db, funnel):
