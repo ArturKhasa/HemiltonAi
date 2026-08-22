@@ -74,6 +74,21 @@ def strip_repeated_greeting(text: str) -> str:
     return stripped[:1].upper() + stripped[1:]
 
 
+def looks_like_surname(word: str | None) -> bool:
+    """Слово похоже на фамилию, а не на имя.
+
+    Нужно не только для обращения. Место нанесения по умолчанию зависит от того,
+    что клиент написал на изделии: имя идёт на грудь, фамилия — на спину
+    (правка ОП от 22.08).
+    """
+    lowered = (word or "").strip().lower()
+    if not lowered or not _CYRILLIC_NAME_RE.match(lowered):
+        return False
+    if lowered in _FULL_NAMES or lowered in _NAMES_LOOKING_LIKE_SURNAMES:
+        return False
+    return len(lowered) >= _MIN_SURNAME_LEN and lowered.endswith(_SURNAME_SUFFIXES)
+
+
 def usable_name(client_name: str | None) -> str | None:
     """Имя, которым можно обратиться к клиенту, либо None — тогда просто «Вы».
 

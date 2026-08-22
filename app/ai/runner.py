@@ -86,7 +86,10 @@ from app.sales.funnel_steps import (
     HONEST_CURATOR_OPTIONS,
     HONEST_OPTIONS,
     honest_answer,
+    client_walks_away,
+    lets_client_go,
     payment_option_chosen,
+    places_inscription_in_the_center,
     render_design_review,
     reply_advances_funnel,
     size_just_given,
@@ -303,6 +306,28 @@ _REFUSAL_RETRY_INSTRUCTION = (
     "не фиксируй дизайн, не называй сумму заказа, не проси ФИО и телефон, не "
     "выставляй счёт. Присоединись к клиенту и одним коротким вопросом уточни, от "
     "чего именно отказ и что не подошло."
+)
+
+# «Надпись размещаем на груди по центру» — модель пишет это своими словами даже
+# после того, как код перестал так рисовать раскладку (диалоги 76950 и 77116).
+_CENTER_PLACEMENT_RETRY_INSTRUCTION = (
+    "[Служебное] Ты ставишь надпись по центру — мы так не наносим. Умолчания: "
+    "ИМЯ - на груди справа, ФАМИЛИЯ - на спине вместе с гербом; место, названное "
+    "самим клиентом, главнее умолчания. Перепиши ответ с правильным местом, "
+    "остальное сохрани."
+)
+
+# «Пока ничего не нужно» — и в ответ «Хорошо, поняла. Если решите вернуться к
+# заказу, напишите мне» (диалог с Сергеем Ескиным, 10:40). Причину отказа никто
+# не узнал, а клиент из воронки вышел. ОП, 22.08: «Клиента просто так не отпускаем
+# думать/возвращаться к диалогу когда ему будет удобно. Тут нужно узнавать
+# обязательно и дожимать».
+_LETS_GO_RETRY_INSTRUCTION = (
+    "[Служебное] Твой ответ отпускает клиента: «если решите вернуться — напишите», "
+    "«буду на связи», прощание. После такой фразы он не возвращается, а причину "
+    "отказа мы так и не узнали. Перепиши: коротко присоединись и спроси, что "
+    "именно не подошло — цена, сроки, дизайн или размер. Ответ должен "
+    "заканчиваться этим вопросом, прощание убери."
 )
 
 # Абзац из скрипта, который клиент уже читал в другом сообщении: «Ткани таааак
@@ -1045,6 +1070,19 @@ async def run_ai(
     refused = client_refused(text)
     if refused:
         logger.info("[%s] клиент отказывается — воронку не двигаем | text=%r", ctx, text[:60])
+    # Который раз подряд клиент отказывается. Первые два раза причину выясняем и
+    # дожимаем; на третьем отпускаем тепло — иначе разговор превращается в допрос.
+    walks_away = client_walks_away(text)
+    # Реплики клиента этого диалога — по ним видно, просил ли он место сам.
+    client_texts_so_far = [
+        m.text for m in local_msgs if m.role == MessageRole.client
+    ] + [text]
+    refusals_so_far = 0
+    if refused:
+        refusals_so_far = 1 + sum(
+            1 for m in local_msgs
+            if m.role == MessageRole.client and client_refused(m.text or "")
+        )
     # Просьба переделать дизайн — шаг не закрыт: ни фиксировать дизайн, ни
     # называть сумму заказа нельзя, пока правка не внесена и не подтверждена.
     design_edit = client_wants_design_edit(text)
@@ -1252,6 +1290,22 @@ async def run_ai(
             output.reply_text, output.source_script_id,
             await funnel_advancing_script_ids(db, type_id),
         )
+        # Клиент отказался, а ответ не двигает воронку, но и не выясняет причину:
+        # «Хорошо, поняла. Если решите вернуться к заказу, напишите мне». Отпускать
+        # клиента без причины отказа нельзя — на отказе обязателен вопрос, что
+        # именно не подошло.
+        # Голое «Нет» — чаще ответ на наш же вопрос («Всё верно?»), а не уход:
+        # спрашивать «что именно не подошло» там незачем. Гейт держим на явном
+        # уходе и только когда мы не ждём подтверждения сверки.
+        lets_go = (
+            walks_away and refusals_so_far < 3 and confirmation_streak == 0
+            and lets_client_go(output.reply_text)
+        )
+        # Надпись по центру груди — умолчания ОП другие (имя справа, фамилия на
+        # спине). Если центр попросил сам клиент, это его выбор.
+        center_placement = places_inscription_in_the_center(
+            output.reply_text, client_texts_so_far,
+        )
         # Вопрос спрашиваем только с самой модели: когда следом уходит связка
         # скриптов (своя у похвалы, своя у выбранного моделью скрипта), вопрос
         # задаёт последнее звено связки, а не эта реплика.
@@ -1292,7 +1346,7 @@ async def run_ai(
             and not repeated_chunk and not bad_payment_order and not both_gifts
             and not deferred_offer and not repeated_slot
             and not repeated_confirmation and not mockup_claim
-            and not hedged_delivery
+            and not hedged_delivery and not lets_go and not center_placement
         ) or dup_attempt == 2:
             break
         if no_photo_shown:
@@ -1363,6 +1417,18 @@ async def run_ai(
                 ctx, (output.reply_text or "")[:80],
             )
             correction = _REFUSAL_RETRY_INSTRUCTION
+        elif lets_go:
+            logger.warning(
+                "[%s] клиент отказался, а ответ прощается вместо вопроса о причине — retrying "
+                "| reply_head=%r", ctx, (output.reply_text or "")[:80],
+            )
+            correction = _LETS_GO_RETRY_INSTRUCTION
+        elif center_placement:
+            logger.warning(
+                "[%s] надпись поставлена по центру — retrying | reply_head=%r",
+                ctx, (output.reply_text or "")[:80],
+            )
+            correction = _CENTER_PLACEMENT_RETRY_INSTRUCTION
         elif requote:
             logger.warning(
                 "[%s] reply re-quotes a known price in answer to an objection — retrying", ctx,

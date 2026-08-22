@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Message, MessageRole, Script
 from app.sales.order_slots import asked_slot, has_size
+from app.utils.text import looks_like_surname
 from app.vk.outgoing import delivered_only, was_delivered
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,9 @@ _DESIGN_INSCRIPTION_RE = re.compile(r"надпись\s*[«\"„][^»\"“]*[»\"
 # фразу шага модель пишет и своими словами, без ссылки на скрипт.
 _FUNNEL_ADVANCE_TEXT_RE = re.compile(
     r"фиксирую\s+под\s+вас|ставлю\s+(?:его\s+)?в\s+работу|передаю\s+(?:его\s+)?в\s+работу|"
-    r"зафиксировал\w*\s+дизайн|фио\s+и\s+(?:номер\s+)?телефон", re.I,
+    r"зафиксировал\w*\s+дизайн|фио\s+и\s+(?:номер\s+)?телефон|"
+    # Текст скрипта «2. Похвала» — модель пишет его и без ссылки на скрипт.
+    r"^\W*(?:супер|отлично)\W+зафиксировал", re.I,
 )
 
 
@@ -82,6 +85,85 @@ def render_design_inscription(text: str, inscription: str | None) -> str:
     if not inscription:
         return text
     return _DESIGN_INSCRIPTION_RE.sub(lambda _: f"надпись «{inscription}»", text, count=1)
+
+
+# Место нанесения по умолчанию. В скрипте раскладка записана под патриотическую
+# линейку, где по центру груди идёт надпись «РОССИЯ», — и модель ставила туда же
+# имя клиента. ОП, 22.08: «ИИ во всех диалогах прописывает имя спереди
+# посередине, мы так не делаем. Если имя — то это по умолчанию на груди справа.
+# Если фамилия — то это по умолчанию на спине с гербом».
+_NAME_PLACEMENT = "На груди справа"
+_SURNAME_PLACEMENT = "На спине"
+
+# Место в строке раскладки — всё, что стоит слева от тире: «На груди по центру -
+# надпись "РОССИЯ"».
+_LAYOUT_PLACE_RE = re.compile(r"^[^\n\-]*-\s*(?=надпись)", re.I)
+
+# Клиент назвал место сам — его слово главнее умолчания. Андрей Олейник, 22.08:
+# «по центру не нужно. Лучше слева и небольшими буквами».
+_CLIENT_PLACEMENT_RES = (
+    (re.compile(r"на\s+спин[еу]|сзади|со\s+спины", re.I), "На спине"),
+    (re.compile(r"на\s+рукав\w*", re.I), "На рукаве справа"),
+    (re.compile(r"\bслева\b|\bлев\w+\s+сторон\w+", re.I), "На груди слева"),
+    (re.compile(r"\bсправа\b|\bправ\w+\s+сторон\w+", re.I), "На груди справа"),
+    (re.compile(r"по\s+центру|посередине|посредине|в\s+центре", re.I), "На груди по центру"),
+)
+
+# Куски реплики. «по центру не нужно» и «лучше слева» — два разных куска, и
+# отрицание относится только к первому.
+_CLAUSE_SPLIT_RE = re.compile(r"[.,;!?\n]+|\bно\b|\bа\s+лучше\b|\bлучше\b")
+_NEGATION_RE = re.compile(r"\bне\b|\bнет\b|\bбез\b", re.I)
+# Кусок про герб или флаг — место в нём относится к ним, а не к надписи.
+_OTHER_ELEMENT_RE = re.compile(r"герб|орёл|орел|флаг|триколор", re.I)
+_INSCRIPTION_WORD_RE = re.compile(r"надпис|им[яё]|фамили|букв", re.I)
+
+
+def _stated_placement(client_texts: list[str]) -> str | None:
+    """Место нанесения надписи, названное самим клиентом, либо None."""
+    found: str | None = None
+    for raw in client_texts:
+        for clause in _CLAUSE_SPLIT_RE.split(raw or ""):
+            if _NEGATION_RE.search(clause):
+                continue
+            if _OTHER_ELEMENT_RE.search(clause) and not _INSCRIPTION_WORD_RE.search(clause):
+                continue
+            for rx, place in _CLIENT_PLACEMENT_RES:
+                if rx.search(clause):
+                    found = place
+                    break
+    return found
+
+
+def _default_placement(inscription: str) -> tuple[str, bool]:
+    """Место по умолчанию и нужен ли рядом герб: фамилия идёт на спину с гербом."""
+    if any(looks_like_surname(w) for w in re.split(r"[\s,]+", inscription) if w):
+        return _SURNAME_PLACEMENT, True
+    return _NAME_PLACEMENT, False
+
+
+def render_design_placement(
+    text: str, inscription: str | None, client_texts: list[str], emblem_requested: bool = False,
+) -> str:
+    """Проставить в строке с надписью место нанесения вместо примера из скрипта."""
+    if not inscription:
+        return text
+    place = _stated_placement(client_texts)
+    with_emblem = False
+    if place is None:
+        place, with_emblem = _default_placement(inscription)
+    # Герб клиент назвал сам — он уже стоит отдельной строкой раскладки, второй
+    # раз в строке с надписью его не повторяем.
+    head = f"{place} - герб РФ и " if with_emblem and not emblem_requested else f"{place} - "
+    lines = (text or "").split("\n")
+    for i, line in enumerate(lines):
+        if _LAYOUT_PLACE_RE.search(line):
+            lines[i] = _LAYOUT_PLACE_RE.sub(lambda _: head, line, count=1)
+            break
+        # Строка без места («надпись «Соколов»») — место дописываем перед ней.
+        if line.lstrip().lower().startswith("надпись"):
+            lines[i] = head + line.lstrip()
+            break
+    return "\n".join(lines)
 
 
 # Элементы раскладки. В скрипте она записана под патриотическую линейку — герб,
@@ -125,8 +207,11 @@ def render_design_review(
         kept.append(line)
     if not layout_lines:
         return None
-    return render_design_inscription(
+    body = render_design_inscription(
         re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip(), inscription,
+    )
+    return render_design_placement(
+        body, inscription, client_texts, emblem_requested="герб" in requested,
     )
 
 
@@ -156,7 +241,7 @@ _AFFIRMATIVE_RE = re.compile(
 # их как согласие: на третье подряд она ответила «фиксирую под Вас этот вариант»
 # и следом развернула связку со счётом на 4 990 ₽ (диалог 89, 11:24-11:25).
 _REFUSAL_RE = re.compile(
-    r"^\W*(?:(?:нет|спасибо|ой|ну|да)\W+){0,2}"
+    r"^\W*(?:(?:нет|спасибо|ой|ну|да|пока|я)\W+){0,3}"
     r"(?:не\s+(?:надо|нужно|хочу|буду|интересует|интересно|актуально|готов\w*)"
     r"|нет\b|отказ\w*|откажусь|передума\w+|отмен(?:а|ю|и|ите|ить|яем)\w*"
     r"|ничего\s+не\s+(?:надо|нужно))",
@@ -217,6 +302,81 @@ def client_refused(client_text: str) -> bool:
     if m.group(0).strip(" ,.!-").lower() == "нет" and _CONFIRMS_RE.search(text):
         return False
     return True
+
+
+# Прощание вместо вопроса. На «Пока ничего не нужно» модель ответила «Хорошо,
+# поняла. Если решите вернуться к заказу, напишите мне» — и клиент ушёл, так и не
+# сказав, что его остановило. ОП, 22.08: «Если клиент говорит, что ему ничего не
+# нужно, то мы всегда обязательно уточняем, что именно ему не подошло. Клиента
+# просто так не отпускаем думать/возвращаться к диалогу когда ему будет удобно.
+# Тут нужно узнавать обязательно и дожимать».
+#
+# «Как Вам будет удобно» сюда не входит: этим заканчивается скрипт брони, и речь
+# там про сроки работы, а не про то, когда клиенту вернуться.
+_LETS_GO_RE = re.compile(
+    r"(?:если|когда|как\s+только)\s+(?:вдруг\s+|снова\s+|что-то\s+|вам\s+)?"
+    r"(?:реши\w+|надума\w+|захоти\w+|понадоб\w+|передума\w+|верн[её]\w+|"
+    r"будет\s+нужн\w+|нужно\s+будет|станет\s+актуальн\w+)"
+    r"|верн[её](?:мся|тесь)\s+к\s+(?:эт\w+\s+)?(?:вопрос\w*|разговор\w*|заказ\w*|диалог\w*)"
+    r"|напишите\s+мне\s*[.!)]"
+    r"|буду\s+на\s+связи"
+    r"|обращайтесь"
+    r"|хорошего\s+(?:дня|вечера)|всего\s+доброго|удачи\b",
+    re.I,
+)
+
+# Вопрос про причину отказа: что именно не подошло. Ровно его на отказе и ждём.
+_ASKS_REASON_RE = re.compile(
+    r"что\s+(?:именно|же|такое)\b|что\s+не\s+|почему|по\s+какой\s+причине"
+    r"|в\s+ч[её]м\s+(?:причина|дело|сомнени\w*|вопрос)|причин\w*"
+    r"|смути\w*|останов\w*|устро\w*|подошл\w*|понрав\w*|сомнева\w*|не\s+устраива\w*",
+    re.I,
+)
+
+
+# Отказ отказу рознь. Голое «Нет» чаще всего отвечает на наш же вопрос («Всё
+# верно?», «Добавим герб?») — это правка заказа, а не уход клиента. Выяснять
+# «что именно не подошло» надо там, где клиент уходит совсем: «не надо»,
+# «ничего не нужно», «не актуально», «откажусь» (диалоги 77116 и 76943, 21-22.08:
+# там «Нет» правило дизайн, а не закрывало разговор).
+_WALKS_AWAY_RE = re.compile(
+    r"не\s+(?:надо|нужно|хочу|буду|интересует|интересно|актуально|готов\w*)"
+    r"|ничего\s+не\s+(?:надо|нужно)|не\s+актуальн\w*"
+    r"|отказ\w*|откажусь|передума\w+|отмен(?:а|ю|и|ите|ить|яем)\w*"
+    r"|нет\W+спасибо|спасибо\W+нет",
+    re.I,
+)
+
+
+def client_walks_away(client_text: str) -> bool:
+    """Клиент уходит из диалога, а не поправляет заказ словом «нет»."""
+    return client_refused(client_text) and bool(_WALKS_AWAY_RE.search(client_text or ""))
+
+
+def lets_client_go(reply_text: str) -> bool:
+    """Ответ отпускает клиента вместо того, чтобы узнать причину отказа."""
+    text = reply_text or ""
+    if _LETS_GO_RE.search(text):
+        return True
+    # Вопроса нет вовсе — разговор закончен той же прощальной фразой, только без
+    # приметных слов.
+    return "?" not in text or not _ASKS_REASON_RE.search(text)
+
+
+# Надпись посередине груди. Раскладку из скрипта код уже правит сам, но своими
+# словами модель по-прежнему пишет «размещаем на груди по центру» (диалоги 76950
+# и 77116, 21-22.08). ОП, 22.08: «мы так не делаем».
+_CENTER_PLACEMENT_RE = re.compile(r"по\s+центру|посередине|посредине|в\s+центре", re.I)
+_PLACEMENT_SUBJECT_RE = re.compile(r"надпис|им[яею]|фамили|размещ|нанос|напиш", re.I)
+
+
+def places_inscription_in_the_center(reply_text: str, client_texts: list[str] | None = None) -> bool:
+    """Ответ ставит надпись по центру, хотя клиент об этом не просил."""
+    text = reply_text or ""
+    if not (_CENTER_PLACEMENT_RE.search(text) and _PLACEMENT_SUBJECT_RE.search(text)):
+        return False
+    # Клиент сам попросил центр — тогда это его выбор, а не умолчание модели.
+    return _stated_placement(client_texts or []) != "На груди по центру"
 
 
 # Шаг «5. Оформление» показан: названа сумма заказа и способы оплаты. Тем же
@@ -280,11 +440,17 @@ async def find_design_review_script(db: AsyncSession, type_id: int | None) -> Sc
 
 
 async def funnel_advancing_script_ids(db: AsyncSession, type_id: int | None) -> set[int]:
-    """Шаги, которые двигают заказ к оплате: фиксация дизайна, оформление,
-    данные получателя, ссылка на счёт. После отказа клиента ни один из них
-    уходить не должен."""
+    """Шаги, которые двигают заказ к оплате: похвала, фиксация дизайна,
+    оформление, данные получателя, ссылка на счёт. После отказа клиента ни один
+    из них уходить не должен.
+
+    Похвала попала сюда после диалога 77117 (22.08, 12:10): на «Не надо» в ответ
+    на вопрос про надпись модель выбрала скрипт «2. Похвала», и связка развернула
+    следом прайс и доставку. В условии скрипта так и написано — «применяй ВСЕГДА,
+    чем бы клиент ни ответил», — поэтому держать его должен код."""
     ids = set()
     for finder in (
+        _PRAISE_CONDITION_RE,
         _DESIGN_FIXED_CONDITION_RE,
         _CHECKOUT_CONDITION_RE,
         _CONTACTS_CONDITION_RE,
