@@ -150,3 +150,72 @@ class TestDesignPlacement:
 
     def test_no_inscription_leaves_the_text_alone(self):
         assert render_design_placement(SCRIPT, None, []) == SCRIPT
+
+
+TEMPLATE = (
+    "Зафиксировала размер! Теперь давайте согласуем дизайн:\n\n"
+    "[раскладка]\n\n"
+    "Всё верно?)"
+)
+
+
+class TestDesignLayoutTemplate:
+    """Раскладку собирает система, формулировки вокруг остаются за панелью.
+
+    Формат взят у менеджеров (боевые диалоги 183 и 409, 20.08): имя справа на
+    груди, фамилия на спине с гербом в центре. Скрипт был записан иначе — «На
+    груди по центру - надпись "РОССИЯ"», — и с 21.08 по 22.08 двенадцать клиентов
+    получили сверку с именем посреди груди.
+    """
+
+    def test_name_goes_to_the_right_of_the_chest(self):
+        got = render_design_review(TEMPLATE, "Андрей", ["белый свитшот"])
+        assert got == (
+            "Зафиксировала размер! Теперь давайте согласуем дизайн:\n\n"
+            "НА ГРУДИ\n- Справа: Андрей\n\n"
+            "Всё верно?)"
+        )
+
+    def test_surname_goes_to_the_back_with_the_emblem(self):
+        got = render_design_review(TEMPLATE, "Соколов", ["чёрный свитшот"])
+        assert "НА СПИНЕ\n- Сверху: Соколов\n- В центре: Герб РФ" in got
+        assert "НА ГРУДИ" not in got
+
+    def test_name_and_surname_split_between_chest_and_back(self):
+        got = render_design_review(TEMPLATE, "Артур Халитов", ["170 70"])
+        assert "НА ГРУДИ\n- Справа: Артур" in got
+        assert "НА СПИНЕ\n- Сверху: Халитов" in got
+
+    def test_client_placement_beats_the_default(self):
+        got = render_design_review(
+            TEMPLATE, "Андрей", ["по центру не нужно. Лучше слева и небольшими буквами"],
+        )
+        assert "НА ГРУДИ\n- Слева: Андрей" in got
+        assert "Справа" not in got
+
+    def test_only_what_the_client_named_gets_in(self):
+        got = render_design_review(TEMPLATE, "Чебурек", ["Свитшот", "Черный", "170 70"])
+        assert "флаг" not in got.lower()
+        assert "герб" not in got.lower()
+
+    def test_flag_goes_to_the_sleeve_when_asked(self):
+        got = render_design_review(TEMPLATE, "Соколов", ["и флаг на рукав добавьте"])
+        assert "На правом рукаве: Флаг РФ" in got
+
+    def test_emblem_on_the_chest_when_there_is_no_surname(self):
+        got = render_design_review(TEMPLATE, "Чебурек", ["хочу герб на груди"])
+        assert "НА ГРУДИ\n- Справа: Чебурек\n- Слева: Герб РФ" in got
+
+    def test_nothing_to_agree_gives_none(self):
+        assert render_design_review(TEMPLATE, None, ["Свитшот", "170 70"]) is None
+
+    def test_wording_around_the_layout_survives(self):
+        """Панель правит текст вокруг плейсхолдера — код его не трогает."""
+        custom = "Собрала Ваш дизайн ❤\n\n[раскладка]\n\nВсё так?"
+        got = render_design_review(custom, "Андрей", [])
+        assert got.startswith("Собрала Ваш дизайн ❤")
+        assert got.endswith("Всё так?")
+
+    def test_inscription_with_backslash_is_inserted_literally(self):
+        got = render_design_review(TEMPLATE, r"C\N", [])
+        assert "- Справа: C\\N" in got

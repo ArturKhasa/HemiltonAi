@@ -930,6 +930,23 @@ async def run_ai(
                 ctx, sorted(_discounts),
             )
 
+    # «Супер, зафиксировала» на отказе фиксировать нечего. Условие скрипта
+    # требует применять похвалу «ВСЕГДА, когда клиент ответил на вопрос про
+    # имя/фамилию, — чем бы он ни ответил», и модель послушно отправляла её на
+    # «Не надо» (диалог 77117, 22.08), на «+» (76943) и на «Такое есть?» (77843),
+    # разворачивая следом связку с прайсом. Правилом в промпте это не лечится:
+    # условие скрипта модель читает как приказ. Прячем скрипт целиком — так же,
+    # как уже прячем прайс и скидочные скрипты.
+    if client_refused(text) or is_non_answer(text) or client_wants_design_edit(text):
+        _praise_script = await find_praise_script(db, type_id)
+        if _praise_script is not None:
+            skip_script_ids.add(_praise_script.id)
+            used_script_ids.add(_praise_script.id)
+            logger.info(
+                "[%s] клиент не назвал надпись — скрипт похвалы %s скрыт",
+                ctx, _praise_script.id,
+            )
+
     # Вопрос, заданный только что, повторять нельзя — ни тем же скриптом, ни
     # другим с тем же смыслом.
     repeating = await scripts_repeating_recent_question(db, dialog.id, type_id)

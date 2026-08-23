@@ -96,3 +96,44 @@ class TestPraiseDroppedWhenTheClientAsked:
 
     def test_reply_of_pictures_alone_is_not_praise(self):
         assert not _is_praise_only(PRICE_PHOTO, self.PRAISE, None, 363)
+
+
+class TestPraiseIsHiddenWhenNothingWasNamed:
+    """Похвала уходит только на названную надпись.
+
+    Условие скрипта 363 требует применять его «ВСЕГДА … чем бы клиент ни
+    ответил», и модель отправляла «Супер, зафиксировала» на отказ, на «+» и на
+    встречный вопрос, разворачивая следом связку с прайсом: диалоги 77117
+    (22.08, «Не надо»), 76943 (21.08, «+») и 77843 (22.08, «Такое есть?»).
+    Runner прячет скрипт от модели — те же ворота, что у прайса и скидок.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "Не надо",
+        "Нет не нужно",
+        "Пока ничего не нужно",
+        "Что?",
+        "М?",
+        "Поменяйте надпись на спине",
+    ])
+    def test_praise_is_hidden(self, text):
+        from app.sales.funnel_steps import client_refused, client_wants_design_edit
+        from app.sales.non_answer import is_non_answer
+
+        assert (
+            client_refused(text) or is_non_answer(text) or client_wants_design_edit(text)
+        ), "скрипт похвалы должен быть скрыт на этой реплике"
+
+    @pytest.mark.parametrize("text", [
+        "Соколов",
+        "Имя Андрей",
+        "Шишкин Кирилл и Виктория Шишкина",
+        "напишите фамилию Измайлова",
+    ])
+    def test_praise_stays_for_a_real_answer(self, text):
+        from app.sales.funnel_steps import client_refused, client_wants_design_edit
+        from app.sales.non_answer import is_non_answer
+
+        assert not (
+            client_refused(text) or is_non_answer(text) or client_wants_design_edit(text)
+        ), "на названную надпись похвала обязана уйти"

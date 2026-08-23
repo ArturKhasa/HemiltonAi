@@ -109,6 +109,16 @@ _CLIENT_PLACEMENT_RES = (
     (re.compile(r"по\s+центру|посередине|посредине|в\s+центре", re.I), "На груди по центру"),
 )
 
+# То же место, но разложенное на блок и строку внутри него — для формата, которым
+# сверку пишут менеджеры (см. build_design_layout).
+_PLACEMENT_SECTIONS = {
+    "На спине": ("НА СПИНЕ", "Сверху"),
+    "На рукаве справа": ("рукав", "На правом рукаве"),
+    "На груди слева": ("НА ГРУДИ", "Слева"),
+    "На груди справа": ("НА ГРУДИ", "Справа"),
+    "На груди по центру": ("НА ГРУДИ", "По центру"),
+}
+
 # Куски реплики. «по центру не нужно» и «лучше слева» — два разных куска, и
 # отрицание относится только к первому.
 _CLAUSE_SPLIT_RE = re.compile(r"[.,;!?\n]+|\bно\b|\bа\s+лучше\b|\bлучше\b")
@@ -177,14 +187,126 @@ _DESIGN_ELEMENT_RES = {
 }
 
 
+# «[раскладка]» — место нанесений в тексте скрипта сверки. Собирает его система
+# из того, что клиент назвал, а формулировки вокруг остаются за панелью: ОП
+# заводит свой вариант шага под каждую рекламную метку (так сделан прайс 519 под
+# «hood141»), и переписывать её текст кодом нельзя. Нет плейсхолдера — скрипт
+# уходит клиенту ровно так, как написан; правится только строка с надписью
+# (см. render_design_placement).
+_LAYOUT_PLACEHOLDER_RE = re.compile(r"\[раскладка\]", re.I)
+
+# Блок раскладки в том виде, в каком сверку пишут менеджеры (боевые диалоги 183
+# и 409, 20.08):
+#
+#     НА ГРУДИ
+#     - Справа: Артур
+#     - Слева: Герб РФ
+#
+#     НА СПИНЕ
+#     - Сверху: Халитов
+#     - В центре: Герб РФ
+#
+#     На правом рукаве: Флаг РФ
+#
+# Имя идёт на грудь справа, фамилия — на спину, герб к ней в центре: ровно то,
+# что ОП просила 21.08 («Если имя — то по умолчанию на груди справа. Если
+# фамилия — то по умолчанию на спине с гербом. ИИ во всех диалогах прописывает
+# имя спереди посередине, мы так не делаем»).
+_CHEST_BLOCK = "НА ГРУДИ"
+_BACK_BLOCK = "НА СПИНЕ"
+_SLEEVE_BLOCK = "рукав"
+
+# «Герб на спине» — клиент назвал место сам, и относится оно к гербу.
+_BACK_RE = _CLIENT_PLACEMENT_RES[0][0]
+
+
+def _split_inscription(inscription: str) -> tuple[list[str], list[str]]:
+    """Слова надписи, разложенные на имена и фамилии.
+
+    «Шишкин Кирилл» — фамилия на спину, имя на грудь: в раскладке менеджера это
+    две разные строки, а не одна надпись целиком.
+    """
+    names: list[str] = []
+    surnames: list[str] = []
+    for word in re.split(r"[\s,]+", inscription or ""):
+        if word:
+            (surnames if looks_like_surname(word) else names).append(word)
+    return names, surnames
+
+
+def build_design_layout(inscription: str | None, client_texts: list[str]) -> str | None:
+    """Раскладка нанесений из того, что клиент назвал сам. None — называть нечего.
+
+    В сверку попадает только заказанное: клиенту с одной надписью «Чебурек»
+    пришли ещё герб на груди, флаг на рукаве и герб на спине, которых он не
+    просил (диалог 90, 11:53).
+    """
+    requested = {
+        name for name, rx in _DESIGN_ELEMENT_RES.items()
+        if any(rx.search(t or "") for t in client_texts)
+    }
+    chest: list[tuple[str, str]] = []
+    back: list[tuple[str, str]] = []
+    sleeve: list[str] = []
+    emblem_on_back = any(
+        _DESIGN_ELEMENT_RES["герб"].search(t or "") and _BACK_RE.search(t or "")
+        for t in client_texts
+    )
+
+    if inscription:
+        stated = _stated_placement(client_texts)
+        if stated is not None:
+            block, row = _PLACEMENT_SECTIONS[stated]
+            if block == _CHEST_BLOCK:
+                chest.append((row, inscription))
+            elif block == _BACK_BLOCK:
+                back.append((row, inscription))
+            else:
+                sleeve.append(inscription)
+        else:
+            names, surnames = _split_inscription(inscription)
+            if names:
+                chest.append(("Справа", " ".join(names)))
+            if surnames:
+                back.append(("Сверху", " ".join(surnames)))
+                # Фамилия по умолчанию идёт на спину вместе с гербом.
+                emblem_on_back = True
+
+    if "герб" in requested or emblem_on_back:
+        if back or emblem_on_back:
+            back.append(("В центре", "Герб РФ"))
+        else:
+            chest.append(("Слева", "Герб РФ"))
+    if "флаг" in requested:
+        sleeve.append("Флаг РФ")
+
+    if not (chest or back or sleeve):
+        return None
+
+    blocks: list[str] = []
+    for title, rows in ((_CHEST_BLOCK, chest), (_BACK_BLOCK, back)):
+        if rows:
+            blocks.append("\n".join([title] + [f"- {row}: {value}" for row, value in rows]))
+    blocks.extend(f"На правом рукаве: {item}" for item in sleeve)
+    return "\n\n".join(blocks)
+
+
 def render_design_review(
     text: str, inscription: str | None, client_texts: list[str],
 ) -> str | None:
-    """Раскладка из скрипта, обрезанная до того, что заказал клиент.
+    """Текст сверки дизайна с раскладкой того, что заказал клиент.
 
     Возвращает None, когда согласовывать нечего: ни надписи, ни герба, ни флага
     клиент не называл — тогда шаг ведёт модель, ей есть что спросить.
     """
+    # Скрипт с плейсхолдером — единственное место, куда мы пишем: остальной текст
+    # принадлежит панели.
+    if _LAYOUT_PLACEHOLDER_RE.search(text or ""):
+        layout = build_design_layout(inscription, client_texts)
+        if not layout:
+            return None
+        return _LAYOUT_PLACEHOLDER_RE.sub(lambda _: layout, text, count=1).strip()
+
     requested = {
         name for name, rx in _DESIGN_ELEMENT_RES.items()
         if any(rx.search(t or "") for t in client_texts)
