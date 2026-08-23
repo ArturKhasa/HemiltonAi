@@ -172,16 +172,21 @@ def _out_of_grid(weight: int) -> bool:
     return weight > _MAX_WEIGHT_KG or weight < _MIN_WEIGHT_KG
 
 
-def oversize(text: str | None) -> bool:
-    """Вес вне размерной сетки — размер подбирает менеджер, не ИИ."""
+def oversize(text: str | None, size_expected: bool = False) -> bool:
+    """Вес вне размерной сетки — размер подбирает менеджер, не ИИ.
+
+    `size_expected` — наше предыдущее сообщение спрашивало рост и вес. Тогда
+    голое число в ответе это мерка, а не цена, и «120» одной строкой считается
+    весом. Без этого признака одинокие числа не трогаем: «300 рублей» и «250 за
+    доставку» уводили бы диалог к куратору на ровном месте.
+    """
     raw = text or ""
     for rx in (_WEIGHT_UNIT_RE, _WEIGHT_WORD_RE):
         if any(_out_of_grid(int(n)) for n in rx.findall(raw)):
             return True
-    # «180 125» — пара роста с весом. Вес засчитываем только когда рост назван
-    # рядом: одинокое число в реплике — это чаще цена, чем килограммы.
+    # «180/90», «180 90», «195/120» — пара роста с весом. Разделитель любой.
     numbers = [int(n) for n in _NUMBER_RE.findall(raw)]
-    if not any(_HEIGHT_MIN <= n <= _HEIGHT_MAX for n in numbers):
+    if not (size_expected or any(_HEIGHT_MIN <= n <= _HEIGHT_MAX for n in numbers)):
         return False
     return any(
         _out_of_grid(n) for n in numbers
@@ -189,8 +194,11 @@ def oversize(text: str | None) -> bool:
     )
 
 
-def curator_trigger(text: str | None) -> str | None:
-    """Название сработавшего триггера эскалации, либо None."""
+def curator_trigger(text: str | None, size_expected: bool = False) -> str | None:
+    """Название сработавшего триггера эскалации, либо None.
+
+    `size_expected` — мы только что спросили рост и вес (см. oversize).
+    """
     if mentions_embroidery(text):
         return "вышивка"
     if mentions_wholesale(text):
@@ -201,6 +209,6 @@ def curator_trigger(text: str | None) -> str | None:
         return "срочный заказ"
     if mentions_impossible_placement(text):
         return "нанесение, которое мы не делаем"
-    if oversize(text):
+    if oversize(text, size_expected):
         return "нестандартный размер"
     return None

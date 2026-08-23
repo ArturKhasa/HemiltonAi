@@ -62,3 +62,23 @@ class TestOversize:
     def test_money_is_not_weight(self, text):
         """Голое число без роста рядом — это чаще цена, чем килограммы."""
         assert oversize(text) is False
+
+    @pytest.mark.parametrize("text", ["180/90", "180 90", "180-90", "170/60", "160/45"])
+    def test_pair_of_measurements_inside_the_grid(self, text):
+        """Мерки клиент шлёт как придётся: «180/90», «180 90», «180-90»."""
+        assert oversize(text) is False
+
+    @pytest.mark.parametrize("text", ["180/125", "195/120", "170/35", "125/190"])
+    def test_pair_of_measurements_outside_the_grid(self, text):
+        assert oversize(text) is True
+
+    def test_bare_weight_counts_after_our_size_question(self):
+        """На «назовите рост и вес» клиент отвечает и одним числом."""
+        assert oversize("120", size_expected=True) is True
+        assert oversize("90", size_expected=True) is False
+        # Вне этого контекста то же число — скорее цена.
+        assert oversize("120") is False
+
+    def test_prices_stay_safe_even_after_the_size_question(self):
+        for text in ("5990", "500", "давайте 500 предоплату"):
+            assert oversize(text, size_expected=True) is False

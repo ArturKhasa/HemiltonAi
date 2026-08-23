@@ -1642,7 +1642,12 @@ async def run_ai(
         })
         dialog.ai_paused = True
 
-    trigger = curator_trigger(text)
+    # Мерки клиент шлёт голыми числами — «180/90», а то и одним весом. Отличить
+    # их от цены можно только по нашему предыдущему вопросу.
+    _asked_size = bool(
+        manager_history_texts and asked_slot(manager_history_texts[-1]) == "size"
+    )
+    trigger = curator_trigger(text, size_expected=_asked_size)
     if trigger:
         # На саму реплику с триггером отвечаем, дальше замолкаем и ждём менеджера.
         # Пауза заодно держит статус: без неё следующий же прогон перезаписал бы
