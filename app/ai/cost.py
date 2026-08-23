@@ -10,9 +10,16 @@ FALLBACK_PRICES: dict[str, tuple[Decimal, Decimal]] = {
     "gpt-5.4-mini": (Decimal("0.7500"), Decimal("4.5000")),
     "gpt-5.4-nano": (Decimal("0.2000"), Decimal("1.2500")),
     "gpt-5.5": (Decimal("5.0000"), Decimal("30.0000")),
-    # Luna — дешёвая модель линейки 5.6 под высоконагруженные диалоги. Именно "-luna":
-    # алиас "gpt-5.6" маршрутизируется на Sol, это другая модель и другой прайс.
+    # Линейка 5.6 — три ступени. Luna под высоконагруженные диалоги, на ней и
+    # работаем: Terra стоит вдесятеро, Sol — вдвадцатеро, а на боевых ходах обе
+    # ведут себя не лучше (прогон 23.08, docs/eval). Алиас "gpt-5.6" без суффикса
+    # маршрутизируется на Sol — это другая модель и другой прайс.
+    #
+    # Цены за короткий контекст (до 128k). Наши ходы — 12-15k токенов, в длинный
+    # тариф мы не попадаем; если начнём — он вдвое дороже по всем колонкам.
     "gpt-5.6-luna": (Decimal("0.2000"), Decimal("1.2000")),
+    "gpt-5.6-terra": (Decimal("2.0000"), Decimal("12.0000")),
+    "gpt-5.6-sol": (Decimal("4.0000"), Decimal("20.0000")),
     "claude-3-5-sonnet-20241022": (Decimal("3.0000"), Decimal("15.0000")),
     "claude-3-haiku-20240307": (Decimal("0.2500"), Decimal("1.2500")),
     "claude-haiku-4-5-20251001": (Decimal("0.8000"), Decimal("4.0000")),
@@ -60,6 +67,8 @@ CACHE_READ_MULT_BY_MODEL: dict[str, Decimal] = {
     "gpt-5.4-nano": Decimal("0.1"),
     "gpt-5.5": Decimal("0.1"),
     "gpt-5.6-luna": Decimal("0.1"),  # cached $0.02 / input $0.20
+    "gpt-5.6-terra": Decimal("0.1"),  # cached $0.20 / input $2.00
+    "gpt-5.6-sol": Decimal("0.1"),  # cached $0.40 / input $4.00
     # Qwen (Alibaba Model Studio): implicit cache hit billed at $0.24/M vs $1.20/M
     # tier-1 input = 0.2x — confirmed against qwencloud daysummary billing export
     # (July 2026). Requires the gateway to report cached_tokens in usage; if it
