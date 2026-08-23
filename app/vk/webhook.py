@@ -559,6 +559,7 @@ async def handle_message_reply(db: AsyncSession, group: VkGroup, msg: VkIncoming
     снова включилась ии»).
     """
     from app.ping.worker import stop_pings
+    from app.vk.broadcast import is_broadcast
     from app.vk.outgoing import is_our_echo
 
     client = await _get_or_create_client(db, group, msg.peer_id)
@@ -581,6 +582,16 @@ async def handle_message_reply(db: AsyncSession, group: VkGroup, msg: VkIncoming
     )
     db.add(message)
     dialog.last_message_at = msk_now()
+    # Массовая рассылка — не перехват диалога. Один и тот же текст уходит в сотни
+    # диалогов, и раньше каждый из них замолкал: 106 диалогов из 262 за 20-22.08
+    # заглушила именно рассылка, а не менеджер (ОП, 21.08: «ИИ здесь
+    # остановилась, ничего не отвечает клиенту больше»).
+    if is_broadcast(msg.text, dialog.id):
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+        return
     if not dialog.ai_paused:
         dialog.ai_paused = True
         logger.info(
