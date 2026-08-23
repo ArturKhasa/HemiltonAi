@@ -540,7 +540,13 @@ async def _process_state(db: AsyncSession, state: DialogPingState, now) -> None:
         state.current_step = next_rule.step
         state.next_ping_due_at = now + timedelta(seconds=next_rule.delay_seconds)
     else:
+        # Автопинги кончились, а клиент так и не ответил. Раньше диалог на этом
+        # просто затихал. Лена, 10.08: «Тут надо бросать диалог, должен
+        # подключаться менеджер и пинговать клиента индивидуально. Не общими, как
+        # бот». Дальше шаблоном давить нечем — зовём человека.
         state.is_completed = True
+        if dialog is not None:
+            await _escalate(db, dialog, "автопинги кончились, клиент не ответил")
 
     await db.commit()
 

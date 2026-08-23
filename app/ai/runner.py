@@ -47,6 +47,7 @@ from app.sales.offer_terms import (
     hedges_delivery_price,
     promises_both_gifts,
     promises_offer_another_day,
+    promises_to_return,
 )
 from app.sales.price_objection import concession_allowed
 from app.sales.product_photo import (
@@ -1472,6 +1473,41 @@ async def run_ai(
             "need_curator": True,
             "curator_reason": (
                 "Третья сверка «Всё верно?» подряд: клиент отвечает про другое"
+            ),
+        })
+
+    # «Уточню у руководителя и вернусь с ответом» — обещание следующего хода,
+    # которого у ИИ нет. Регламент сам предписывает эту фразу на срочных сроках,
+    # так что запрещать её нельзя: нужно, чтобы обещание кто-то исполнил. Значит
+    # диалог уходит куратору.
+    if promises_to_return(output.reply_text):
+        logger.info(
+            "[%s] ответ обещает вернуться с ответом — куратору | reply_head=%r",
+            ctx, (output.reply_text or "")[:80],
+        )
+        output = output.model_copy(update={
+            "need_curator": True,
+            "curator_reason": (
+                output.curator_reason
+                or "ИИ обещала вернуться с ответом — вернуться может только человек"
+            ),
+        })
+
+    # Гейт выше смотрит на текст модели, а сверку дизайна код подставляет
+    # скриптом на четыреста строк ниже — мимо любой проверки. В диалоге 76943
+    # так ушли четыре сверки подряд (21.08, 19:02-19:04): гейт видел одно
+    # сообщение, клиенту уходило другое. Останавливаем подмену здесь: если
+    # клиент дважды ответил не «да», третью раскладку он читать не станет.
+    if design_review_point and confirmation_streak >= 2:
+        logger.warning(
+            "[%s] сверка дизайна была бы третьей подряд — не подставляем, зовём куратора",
+            ctx,
+        )
+        design_review_point = False
+        output = output.model_copy(update={
+            "need_curator": True,
+            "curator_reason": (
+                "Клиент дважды не подтвердил дизайн — третью сверку не отправляем"
             ),
         })
 

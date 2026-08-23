@@ -10,6 +10,7 @@ from app.sales.offer_terms import (
     hedges_delivery_price,
     promises_both_gifts,
     promises_offer_another_day,
+    promises_to_return,
 )
 
 
@@ -111,3 +112,28 @@ class TestDeliveryPrice:
         assert "## Доставка" in _SALES_PROMPT_FALLBACK
         assert "1 000 ₽" in _SALES_PROMPT_FALLBACK
         assert "примерит" in _SALES_PROMPT_FALLBACK
+
+
+class TestPromisesToReturn:
+    """Обещание вернуться с ответом ИИ исполнить не может — следующего хода у неё
+    нет. Регламент сам предписывает эту фразу на срочных сроках, поэтому её не
+    запрещают, а передают человеку. За неделю ушла трижды."""
+
+    @pytest.mark.parametrize("text", [
+        "Уточню у руководителя отдела продаж, успеем ли к этой дате, и вернусь с ответом",
+        "Уточню у производства и вернусь",
+        "Сообщу позже",
+        "Напишу вам как только узнаю сроки",
+        "Уточню у дизайнера и вернусь с ответом",
+    ])
+    def test_promise_escalates(self, text):
+        assert promises_to_return(text) is True
+
+    @pytest.mark.parametrize("text", [
+        "Я уточню, какой цвет вам подойдёт",
+        "Уточните, пожалуйста, ваш рост и вес",
+        "В какой город нужна доставка?",
+        "Сейчас всё зафиксирую и отправлю расчёт",
+    ])
+    def test_ordinary_replies_pass(self, text):
+        assert promises_to_return(text) is False

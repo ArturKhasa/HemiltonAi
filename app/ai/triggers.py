@@ -139,6 +139,56 @@ def mentions_refund(text: str | None) -> bool:
     return bool(_REFUND_RE.search((text or "").replace("ё", "е")))
 
 
+# Места, на которые мы не наносим. Женя, 03.08: «например, мы не можем наносить
+# принт на манжету». Обещать такое нанесение нельзя: клиент согласует дизайн,
+# внесёт предоплату, а на производстве выяснится, что так не шьют.
+_IMPOSSIBLE_PLACEMENT_RE = re.compile(
+    r"\bманжет|\bрезинк[еауи]\b|\bворотник|\bкапюшон\w*\s+(?:внутри|изнутри)|"
+    r"\bмолни[июе]\b|\bкарман\w*\s+внутри",
+    re.IGNORECASE,
+)
+
+# Размерная сетка. Женя, 03.08: «по нестандартным размерам — на вес больше 110 кг
+# лучше звать менеджера». Ниже 40 кг — то же самое: детских лекал у нас нет.
+_MAX_WEIGHT_KG = 110
+_MIN_WEIGHT_KG = 40
+# Вес с единицей или со словом «вес» — самый надёжный признак.
+_WEIGHT_UNIT_RE = re.compile(r"(?<!\d)(\d{2,3})\s*(?:кг|kg)(?!\d)", re.IGNORECASE)
+_WEIGHT_WORD_RE = re.compile(
+    r"(?:вес\w*|вешу|весит|вешает)\D{0,4}(\d{2,3})(?!\d)", re.IGNORECASE,
+)
+# Голые числа: «180 125» — рост и вес. Без роста рядом голое число весом не
+# считаем, иначе «300 рублей» и «250 за доставку» уводили бы диалог к куратору.
+_NUMBER_RE = re.compile(r"(?<!\d)(\d{2,3})(?!\d)")
+_HEIGHT_MIN, _HEIGHT_MAX = 140, 220
+
+
+def mentions_impossible_placement(text: str | None) -> bool:
+    """Клиент просит нанесение туда, где мы не печатаем."""
+    return bool(_IMPOSSIBLE_PLACEMENT_RE.search((text or "").replace("ё", "е")))
+
+
+def _out_of_grid(weight: int) -> bool:
+    return weight > _MAX_WEIGHT_KG or weight < _MIN_WEIGHT_KG
+
+
+def oversize(text: str | None) -> bool:
+    """Вес вне размерной сетки — размер подбирает менеджер, не ИИ."""
+    raw = text or ""
+    for rx in (_WEIGHT_UNIT_RE, _WEIGHT_WORD_RE):
+        if any(_out_of_grid(int(n)) for n in rx.findall(raw)):
+            return True
+    # «180 125» — пара роста с весом. Вес засчитываем только когда рост назван
+    # рядом: одинокое число в реплике — это чаще цена, чем килограммы.
+    numbers = [int(n) for n in _NUMBER_RE.findall(raw)]
+    if not any(_HEIGHT_MIN <= n <= _HEIGHT_MAX for n in numbers):
+        return False
+    return any(
+        _out_of_grid(n) for n in numbers
+        if not (_HEIGHT_MIN <= n <= _HEIGHT_MAX) and 20 <= n <= 300
+    )
+
+
 def curator_trigger(text: str | None) -> str | None:
     """Название сработавшего триггера эскалации, либо None."""
     if mentions_embroidery(text):
@@ -149,4 +199,8 @@ def curator_trigger(text: str | None) -> str | None:
         return "возврат предоплаты"
     if mentions_urgency(text):
         return "срочный заказ"
+    if mentions_impossible_placement(text):
+        return "нанесение, которое мы не делаем"
+    if oversize(text):
+        return "нестандартный размер"
     return None

@@ -105,3 +105,30 @@ class TestPictureClaims:
             "[photo-https://ai.hemilton.ru/media/scripts/a3eb.jpg]"
         )
         assert reply_shows_photo(text)
+
+
+class TestConfirmationWordings:
+    """Сверку модель пишет своими словами, и счётчик обнулялся на каждой новой
+    формулировке — клиент читал одно и то же третий раз (диалог 76943, 21.08)."""
+
+    @pytest.mark.parametrize("text", [
+        "Приняла: свитшот чёрный, надпись «Соколов». Всё верно?",
+        "Собрала заказ. Всё так?",
+        "Размер М, цвет синий. Верно?",
+        "Наносим фамилию на спину. Правильно?",
+        "Ничего не упустила?",
+        "Подтверждаете?",
+        "Всё ли верно по заказу?",
+    ])
+    def test_counted_as_confirmation(self, text):
+        assert asks_confirmation(text) is True
+
+    @pytest.mark.parametrize("text", [
+        "В какой город нужна доставка?",
+        "Какой цвет свитшота выберем?",
+        "Назовите, пожалуйста, рост и вес",
+        "Оформим со скидкой?",
+        "Верно понимаю, что нужен только принт, без вышивки? Тогда расскажу по цене",
+    ])
+    def test_other_questions_are_not_confirmations(self, text):
+        assert asks_confirmation(text) is False
