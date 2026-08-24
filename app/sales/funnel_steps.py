@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 _OUTGOING_LOOKBACK = 5
 
 
+async def delivered_outgoing_texts(db: AsyncSession, dialog_id: int) -> list[str]:
+    """Публичная обёртка: что из наших сообщений реально дошло до клиента."""
+    return await _outgoing_texts(db, dialog_id)
+
+
 async def _outgoing_texts(db: AsyncSession, dialog_id: int) -> list[str]:
     """Тексты всех наших сообщений диалога, дошедших до клиента."""
     rows = await db.execute(

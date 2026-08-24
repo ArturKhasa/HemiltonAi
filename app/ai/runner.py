@@ -64,6 +64,7 @@ from app.sales.status_names import (
     is_hot,
 )
 from app.sales.funnel_steps import (
+    delivered_outgoing_texts,
     CHECKOUT_PRESENTED_RE,
     PAYMENT_LINK_RE,
     answered_inscription_question,
@@ -908,9 +909,17 @@ async def run_ai(
     # Прайс во второй раз не отправляем: клиент цену уже видел, а на возражение
     # отвечают отдельные скрипты отработки. В диалоге 156 прайс ушёл трижды за
     # два часа (замечание ОП от 10 августа, 13:53: «Опять отправили цену»).
-    # Признак «цену называли» — закреплённая за диалогом сумма (см. _pin_price).
+    #
+    # «Клиент цену видел» — это ДОСТАВЛЕННОЕ сообщение с ценой, а не отметка в
+    # базе. Клиент из диалога 78880 (24.08, 10:07) ответил двумя сообщениями
+    # подряд, первый прогон отменился на середине, и связка с ценой осталась
+    # недоставленной — но сумму за диалогом уже закрепили. Второй прогон увидел
+    # закреплённую цену, вычеркнул прайс и отправил клиенту похвалу с доставкой
+    # без единой цифры. Лена, 24.08: «ИИ перестала цену отправлять».
     skip_script_ids: set[int] = set()
-    if dialog.quoted_prices:
+    if dialog.quoted_prices and _prices_in(
+        " ".join(await delivered_outgoing_texts(db, dialog.id))
+    ):
         _price_script = await find_price_script(db, type_id)
         if _price_script is not None:
             skip_script_ids.add(_price_script.id)
