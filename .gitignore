@@ -22,6 +22,8 @@ env/
 *.pem
 *.key
 *.p12
+# Корневые сертификаты Минцифры — публичные, без них не работает MAX.
+!certs/*.pem
 
 # Testing
 .pytest_cache/

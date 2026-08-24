@@ -40,6 +40,7 @@ async def notify_curator(
     reason: str,
     last_message: str | None = None,
     vk_user_id: int | None = None,
+    platform: str = "vk",
 ) -> None:
     """Сообщить менеджерам, что диалог ждёт человека. Ошибки не пробрасываем:
     неотправленное уведомление не должно ронять ответ клиенту."""
@@ -52,7 +53,13 @@ async def notify_curator(
 
     lines = [f"🔔 Диалог ждёт менеджера: {reason}", _dialog_url(dialog_id)]
     if vk_user_id:
-        lines.append(f"Клиент: vk.com/id{vk_user_id}")
+        # У MAX публичной ссылки на профиль по числовому ID нет — показываем сам
+        # ID: по нему клиента видно в панели, а ссылка вида vk.com/id… для
+        # клиента из MAX вела бы на чужой профиль.
+        lines.append(
+            f"Клиент: vk.com/id{vk_user_id}" if platform == "vk"
+            else f"Клиент: MAX id{vk_user_id}"
+        )
     if last_message:
         lines.append(f"Последнее сообщение: «{last_message[:_QUOTE_LIMIT]}»")
 

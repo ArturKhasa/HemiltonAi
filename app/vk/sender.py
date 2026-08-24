@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db.models import Client, Dialog, VkGroup
+from app.messaging import MessagesForbiddenError
 
 logger = logging.getLogger(__name__)
 
@@ -144,8 +145,11 @@ class VkApiError(RuntimeError):
         self.message = message
 
 
-class VkMessagesForbiddenError(VkApiError):
-    """Клиент запретил сообщения от сообщества (900/901/902) — не ретраить."""
+class VkMessagesForbiddenError(VkApiError, MessagesForbiddenError):
+    """Клиент запретил сообщения от сообщества (900/901/902) — не ретраить.
+
+    Общий предок с MAX-версией: вызывающие места (пинги, приветствие, панель)
+    ловят один `MessagesForbiddenError` на обе платформы."""
 
 
 def _group_semaphore(group_id: int) -> asyncio.Semaphore:
@@ -393,7 +397,10 @@ async def resend_lost_photos(
 
 
 async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str) -> SentMessage:
-    """Отправка в диалог: находит клиента и его группу, шлёт от её имени.
+    """Отправка в диалог ВК: находит клиента и его группу, шлёт от её имени.
+
+    Зовут её не напрямую, а через app.messaging.send_to_dialog — он выбирает
+    платформу по каналу клиента (у MAX своя реализация в app.max.sender).
 
     Вложения из фраз ("[photo-url]" и т.п., см. extract_and_resolve_attachments)
     перезаливаются/вырезаются и уходят как VK attachment, а не сырой текст.

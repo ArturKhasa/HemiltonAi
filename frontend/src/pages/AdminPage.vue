@@ -397,6 +397,165 @@
           </table>
         </div>
       </div>
+
+      <!-- ===== MAX bots section ===== -->
+      <div v-else-if="activeSection === 'max-bots'" class="bg-white rounded-xl shadow-sm border overflow-hidden">
+        <div class="px-4 py-3 flex justify-between items-center border-b bg-gray-50">
+          <div class="flex flex-col gap-0.5">
+            <span class="text-sm text-gray-500">{{ maxBots.length }} ботов</span>
+            <span class="text-xs text-gray-400">
+              Вставьте токен бота и включите «Активен» — адрес вебхука пропишется в MAX сам.
+            </span>
+          </div>
+          <button @click="openMaxCreate" class="bg-brand-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-brand-700 font-medium">
+            + Добавить бота
+          </button>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="bg-gray-50 text-left border-b">
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium">Бот</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-32">ID</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-32">Токен</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-44">Вебхук</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-40">Направление</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-24">Активен</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-24">Действия</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              <tr v-if="maxLoading">
+                <td colspan="7" class="px-4 py-10 text-center text-gray-400">Загрузка...</td>
+              </tr>
+              <tr v-else-if="maxBots.length === 0">
+                <td colspan="7" class="px-4 py-10 text-center text-gray-400">Ботов нет</td>
+              </tr>
+              <tr v-else v-for="b in maxBots" :key="b.id" class="hover:bg-gray-50 transition-colors">
+                <td class="px-4 py-3">
+                  <div class="text-gray-800">{{ b.name }}</div>
+                  <div v-if="b.username" class="text-xs text-gray-400 font-mono">@{{ b.username }}</div>
+                </td>
+                <td class="px-4 py-3 text-gray-700 font-mono text-xs">{{ b.bot_id }}</td>
+                <td class="px-4 py-3 text-gray-500 font-mono text-xs">{{ b.access_token_mask }}</td>
+                <td class="px-4 py-3">
+                  <div class="flex items-center gap-2">
+                    <span :class="['text-xs font-medium', b.webhook_subscribed ? 'text-green-600' : 'text-gray-400']">
+                      {{ b.webhook_subscribed ? 'подключён' : 'не подключён' }}
+                    </span>
+                    <button
+                      @click="checkMaxBot(b)"
+                      :disabled="maxChecking === b.id"
+                      class="text-xs px-2 py-0.5 rounded border text-gray-500 hover:bg-gray-100 disabled:opacity-50"
+                    >{{ maxChecking === b.id ? '…' : 'Проверить' }}</button>
+                  </div>
+                  <div v-if="b.webhook_url" class="text-[11px] text-gray-400 font-mono truncate">{{ b.webhook_url }}</div>
+                </td>
+                <td class="px-4 py-3">
+                  <span v-if="b.dialog_type_id" class="px-2 py-0.5 rounded-full bg-brand-100 text-brand-700 text-xs font-medium">
+                    {{ dialogTypeName(b.dialog_type_id) }}
+                  </span>
+                  <span v-else class="text-gray-300 text-xs">—</span>
+                </td>
+                <td class="px-4 py-3">
+                  <!-- Галочка и есть выключатель обработки: она же ставит и снимает
+                       подписку на вебхук в MAX. -->
+                  <input
+                    type="checkbox"
+                    :checked="b.is_active"
+                    :disabled="maxToggling === b.id"
+                    @change="toggleMaxActive(b)"
+                    class="rounded w-4 h-4 cursor-pointer disabled:opacity-50"
+                  />
+                </td>
+                <td class="px-4 py-3">
+                  <div class="flex gap-3">
+                    <button @click="openMaxEdit(b)" class="text-brand-700 hover:text-brand-800 text-xs font-medium">Ред.</button>
+                    <button @click="maxDeleteTarget = b; maxDeleteError = ''" class="text-red-400 hover:text-red-600 text-xs font-medium">Удал.</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-if="maxError" class="px-4 py-3 text-xs text-red-500 border-t">{{ maxError }}</p>
+      </div>
+    </div>
+
+    <!-- Create/Edit MAX bot Modal -->
+    <div v-if="showMaxModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <div class="px-6 py-4 border-b flex items-center justify-between sticky top-0 bg-white">
+          <h2 class="font-semibold text-gray-800">{{ editMaxBot ? 'Редактировать бота MAX' : 'Добавить бота MAX' }}</h2>
+          <button @click="showMaxModal = false" class="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
+        </div>
+        <div class="p-6 space-y-4">
+          <div>
+            <label class="block text-xs text-gray-500 mb-1.5">Название <span class="text-red-500">*</span></label>
+            <input
+              v-model="maxForm.name"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+              placeholder="Хэмилтон"
+            />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 mb-1.5">
+              Токен бота <span v-if="!editMaxBot" class="text-red-500">*</span>
+            </label>
+            <input
+              v-model="maxForm.access_token"
+              class="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
+              :placeholder="editMaxBot ? 'оставить текущий' : 'токен из настроек бота в MAX'"
+            />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 mb-1.5">Направление</label>
+            <select v-model="maxForm.dialog_type_id" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white">
+              <option :value="null">— не задано —</option>
+              <option v-for="t in dialogTypes" :key="t.id" :value="t.id">{{ t.display_name }}</option>
+            </select>
+          </div>
+          <div class="flex items-center gap-2">
+            <input type="checkbox" v-model="maxForm.is_active" id="max_is_active" class="rounded w-4 h-4 cursor-pointer" />
+            <label for="max_is_active" class="text-sm text-gray-700 cursor-pointer">Активен — включить обработку сообщений</label>
+          </div>
+          <p class="text-xs text-gray-400">
+            Адрес вебхука прописывается в MAX автоматически при включении, вручную ничего
+            настраивать не нужно. ID и @username бота подтянутся из MAX по токену.
+          </p>
+          <p v-if="maxFormError" class="text-xs text-red-500">{{ maxFormError }}</p>
+        </div>
+        <div class="px-6 py-4 border-t flex justify-end gap-2 sticky bottom-0 bg-white">
+          <button @click="showMaxModal = false" class="px-4 py-2 text-sm text-gray-600 border rounded-lg hover:bg-gray-50">Отмена</button>
+          <button
+            @click="saveMaxBot"
+            :disabled="maxSaving || !canSaveMaxBot"
+            class="px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50 font-medium"
+          >
+            {{ maxSaving ? 'Сохранение...' : (editMaxBot ? 'Сохранить' : 'Добавить') }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Delete MAX bot confirm -->
+    <div v-if="maxDeleteTarget" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-xl shadow-xl w-full max-w-sm p-6">
+        <h3 class="font-semibold text-gray-800 mb-2">Удалить бота?</h3>
+        <p class="text-sm text-gray-600 mb-4">
+          «{{ maxDeleteTarget.name }}» будет отключён от системы.
+        </p>
+        <p v-if="maxDeleteError" class="text-xs text-red-500 mb-3">{{ maxDeleteError }}</p>
+        <div class="flex justify-end gap-2">
+          <button @click="maxDeleteTarget = null" class="px-4 py-2 text-sm text-gray-600 border rounded-lg hover:bg-gray-50">Отмена</button>
+          <button
+            @click="doDeleteMaxBot"
+            :disabled="maxSaving"
+            class="px-4 py-2 text-sm bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-50"
+          >Удалить</button>
+        </div>
+      </div>
     </div>
 
     <!-- Create/Edit Script Modal -->
@@ -735,6 +894,7 @@ const SECTIONS = [
   { id: 'scripts', label: 'Скрипты' },
   { id: 'ref-tags', label: 'Реф-метки' },
   { id: 'vk-groups', label: 'Группы ВК' },
+  { id: 'max-bots', label: 'Боты MAX' },
 ]
 const activeSection = ref('scripts')
 
@@ -1266,10 +1426,144 @@ async function doDeleteGroup() {
   }
 }
 
+// ===== Боты MAX =====
+// Подключение бота — одна операция: вставить токен и включить галочку. Всё
+// остальное (ID бота, @username, адрес вебхука и подписка на него в MAX)
+// делает бэк, поэтому в форме этих полей нет.
+const maxBots = ref([])
+const maxLoading = ref(false)
+const maxSaving = ref(false)
+const showMaxModal = ref(false)
+const editMaxBot = ref(null)
+const maxDeleteTarget = ref(null)
+const maxDeleteError = ref('')
+const maxFormError = ref('')
+const maxError = ref('')
+const maxToggling = ref(null)
+const maxChecking = ref(null)
+
+const maxForm = ref({ name: '', access_token: '', dialog_type_id: null, is_active: true })
+
+const canSaveMaxBot = computed(() => {
+  const f = maxForm.value
+  if (!f.name.trim()) return false
+  if (!editMaxBot.value && !f.access_token.trim()) return false
+  return true
+})
+
+async function loadMaxBots() {
+  maxLoading.value = true
+  try {
+    const res = await api.get('/max-bots/')
+    maxBots.value = res.data
+  } finally {
+    maxLoading.value = false
+  }
+}
+
+function openMaxCreate() {
+  editMaxBot.value = null
+  maxFormError.value = ''
+  maxForm.value = { name: '', access_token: '', dialog_type_id: null, is_active: true }
+  showMaxModal.value = true
+}
+
+function openMaxEdit(b) {
+  editMaxBot.value = b
+  maxFormError.value = ''
+  // Токен наружу не отдаётся — пустое поле означает «не менять».
+  maxForm.value = {
+    name: b.name,
+    access_token: '',
+    dialog_type_id: b.dialog_type_id ?? null,
+    is_active: b.is_active,
+  }
+  showMaxModal.value = true
+}
+
+function replaceMaxBot(bot) {
+  const i = maxBots.value.findIndex(x => x.id === bot.id)
+  if (i !== -1) maxBots.value[i] = bot
+  else maxBots.value.push(bot)
+}
+
+async function saveMaxBot() {
+  maxSaving.value = true
+  maxFormError.value = ''
+  try {
+    const f = maxForm.value
+    const payload = {
+      name: f.name.trim(),
+      dialog_type_id: f.dialog_type_id,
+      is_active: f.is_active,
+    }
+    if (f.access_token.trim()) payload.access_token = f.access_token.trim()
+    if (editMaxBot.value) {
+      const res = await api.patch(`/max-bots/${editMaxBot.value.id}`, payload)
+      replaceMaxBot(res.data)
+    } else {
+      const res = await api.post('/max-bots/', payload)
+      maxBots.value.push(res.data)
+    }
+    showMaxModal.value = false
+  } catch (e) {
+    // Отказ MAX (неверный токен, вебхук не прописался) показываем словами: без
+    // него окно просто «не закрывалось».
+    maxFormError.value = e.response?.data?.detail || 'Ошибка сохранения'
+  } finally {
+    maxSaving.value = false
+  }
+}
+
+async function toggleMaxActive(b) {
+  maxToggling.value = b.id
+  maxError.value = ''
+  try {
+    const res = await api.patch(`/max-bots/${b.id}`, { is_active: !b.is_active })
+    replaceMaxBot(res.data)
+  } catch (e) {
+    maxError.value = e.response?.data?.detail || 'Не удалось переключить бота'
+    // Галочка в таблице привязана к данным с бэка — перечитываем, чтобы она не
+    // осталась в положении, до которого дело не дошло.
+    await loadMaxBots()
+  } finally {
+    maxToggling.value = null
+  }
+}
+
+async function checkMaxBot(b) {
+  maxChecking.value = b.id
+  maxError.value = ''
+  try {
+    const res = await api.post(`/max-bots/${b.id}/check`)
+    replaceMaxBot(res.data)
+  } catch (e) {
+    maxError.value = e.response?.data?.detail || 'MAX не ответил'
+  } finally {
+    maxChecking.value = null
+  }
+}
+
+async function doDeleteMaxBot() {
+  maxSaving.value = true
+  maxDeleteError.value = ''
+  try {
+    await api.delete(`/max-bots/${maxDeleteTarget.value.id}`)
+    maxBots.value = maxBots.value.filter(b => b.id !== maxDeleteTarget.value.id)
+    maxDeleteTarget.value = null
+  } catch (e) {
+    // Бота с перепиской бэк удалить не даст — объясняем, что делать вместо.
+    maxDeleteError.value = e.response?.data?.detail || 'Не удалось удалить бота'
+  } finally {
+    maxSaving.value = false
+  }
+}
+
 onMounted(async () => {
   // Метки после скриптов: экран показывает тексты приветствий, а они из scripts.
   await load()
   loadGroups()
   loadRefTags()
+  loadMaxBots()
 })
 </script>

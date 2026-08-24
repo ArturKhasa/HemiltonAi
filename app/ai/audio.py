@@ -1,10 +1,10 @@
 """Audio transcription via OpenAI Whisper."""
 import logging
 
-import httpx
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.ssl_trust import async_client
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,8 @@ async def transcribe_audio_url(url: str) -> str | None:
     """Download audio from URL and transcribe via Whisper. Returns None on failure."""
     logger.info("transcribe_audio | url=%s", url)
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # Голосовое из MAX лежит на их хранилище с сертификатом Минцифры.
+        async with async_client(timeout=30.0) as client:
             response = await client.get(url)
             response.raise_for_status()
             audio_bytes = response.content

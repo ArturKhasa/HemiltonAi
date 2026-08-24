@@ -16,6 +16,7 @@ import uuid
 
 import httpx
 
+from app.ssl_trust import async_client
 from app.storage.local import safe_extension, save_file
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ def _extension(url: str) -> str:
 async def fetch_and_store(url: str) -> str | None:
     """Скачать картинку и положить к себе. Ссылка на наш файл, либо None."""
     try:
-        async with httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
+        async with async_client(timeout=_DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
             resp = await client.get(url)
         resp.raise_for_status()
         data = resp.content

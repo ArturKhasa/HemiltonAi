@@ -39,7 +39,7 @@ from app.vk.outgoing import delivered_only, mark_failed
 from app.vk.spintax import resolve_spintax
 from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
-from app.ai.greeting import greeting_text, resolve_greeting
+from app.ai.greeting import dialog_has_outgoing, greeting_text, resolve_greeting
 from app.sales.color_palette import with_palette
 from app.sales.non_answer import is_non_answer
 from app.sales.offer_terms import (
@@ -103,7 +103,8 @@ from app.sales.order_slots import (
     render_order_placeholders,
     slot_is_filled,
 )
-from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole, Script
+from app.db.models import AIRun, Client, Dialog, DialogStatusConfig, Message, MessageRole, Script, VkGroup
+from app.messaging import platform_of
 from app.utils.text import (
     normalize_dashes,
     render_name_placeholder,
@@ -787,7 +788,14 @@ async def run_ai(
 
     client = await db.get(Client, dialog.client_id)
     vk_user_id = client.vk_user_id if client else None
-    ctx = f"vk_user={vk_user_id}" if vk_user_id else f"dialog={dialog.id}"
+    # Клиент может писать и из ВК, и из MAX — ID у них свои, и путать их в
+    # логах и в контексте модели нельзя.
+    channel = (
+        await db.get(VkGroup, client.vk_group_id)
+        if client and client.vk_group_id else None
+    )
+    platform = platform_of(channel)
+    ctx = f"{platform}_user={vk_user_id}" if vk_user_id else f"dialog={dialog.id}"
 
     logger.info(
         "[%s] run_ai start | type_id=%s | msg_id=%s | text=%r",
@@ -990,7 +998,7 @@ async def run_ai(
 
     ctx_lines: list[str] = []
     if vk_user_id:
-        ctx_lines.append(f"VK ID клиента: {vk_user_id}")
+        ctx_lines.append(f"{platform.upper()} ID клиента: {vk_user_id}")
     client_name = (client.name or "").strip() if client else ""
     if client_name:
         ctx_lines.append(f"Имя клиента: {client_name}")
@@ -1740,6 +1748,7 @@ async def run_ai(
             output.curator_reason or "ИИ снят с диалога",
             last_message=text,
             vk_user_id=vk_user_id,
+            platform=platform,
         )
 
     ai_run = AIRun(
@@ -2137,6 +2146,29 @@ async def _run_scripted_greeting(
         ctx, script.id, len(image_urls), len(parts),
     )
     return output, ai_run, parts
+
+
+async def run_greeting(
+    db: AsyncSession, dialog: Dialog, client: Client | None, ctx: str,
+) -> list[ReplyPart]:
+    """Приветствие, когда входящего сообщения ещё нет.
+
+    В ВК первым всегда пишет клиент, и приветствие уходит в ответ на его
+    сообщение (см. run_ai выше). В MAX точка входа другая: человек нажимает
+    «Начать» — и ждёт, что бот заговорит сам. Текст тот же самый, из
+    приветственного скрипта, поэтому здесь только вход без client_message.
+
+    Пустой список означает «здороваться нечем или уже поздоровались» — тогда
+    диалог идёт обычным путём, с первого сообщения клиента.
+    """
+    if await dialog_has_outgoing(db, dialog.id):
+        logger.info("[%s] в диалог уже писали — приветствие не повторяем", ctx)
+        return []
+    script = await resolve_greeting(db, dialog, client, dialog.type_id)
+    if script is None:
+        return []
+    _, _, parts = await _run_scripted_greeting(db, dialog, client, script, ctx)
+    return parts
 
 
 # Воронка ОП — лестница: «2. Похвала» → «2.2 Стоимость» → «2.3 Доставка». Каждый

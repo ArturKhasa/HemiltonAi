@@ -668,7 +668,7 @@ async def reply_as_manager(
     """
     from app.ping.worker import stop_pings
     from app.vk.outgoing import mark_delivered, mark_failed
-    from app.vk.sender import VkMessagesForbiddenError, send_to_dialog
+    from app.messaging import MessagesForbiddenError, send_to_dialog
 
     text = (body.text or "").strip()
     # Одно вложение без подписи — нормальный ответ менеджера: «вот как выглядит»
@@ -709,14 +709,14 @@ async def reply_as_manager(
     else:
         try:
             result = await send_to_dialog(db, dialog, outgoing)
-        except VkMessagesForbiddenError:
+        except MessagesForbiddenError:
             mark_failed(message)
             await db.commit()
-            raise HTTPException(status_code=409, detail="Клиент запретил сообщения от сообщества")
+            raise HTTPException(status_code=409, detail="Клиент запретил сообщения от бота или сообщества")
         except Exception as exc:
             mark_failed(message)
             await db.commit()
-            raise HTTPException(status_code=502, detail=f"ВК не принял сообщение: {exc}")
+            raise HTTPException(status_code=502, detail=f"Мессенджер не принял сообщение: {exc}")
         mark_delivered(message, result)
 
     dialog.last_message_at = msk_now()

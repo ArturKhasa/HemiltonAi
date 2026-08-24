@@ -56,7 +56,7 @@ def fake_send(monkeypatch):
         sent.append((dialog.id, text))
         return SentMessage(message_id=161450, random_ids=[424242])
 
-    monkeypatch.setattr("app.vk.sender.send_to_dialog", _send)
+    monkeypatch.setattr("app.messaging.send_to_dialog", _send)
     return sent
 
 
@@ -107,7 +107,7 @@ async def test_failed_send_does_not_leave_a_phantom_message(
     async def _boom(db_, dialog, text):
         raise RuntimeError("VK недоступен")
 
-    monkeypatch.setattr("app.vk.sender.send_to_dialog", _boom)
+    monkeypatch.setattr("app.messaging.send_to_dialog", _boom)
 
     resp = await client.post(
         f"/api/chat/{live_dialog.id}/reply", headers=curator_headers, json={"text": "Проверка"},

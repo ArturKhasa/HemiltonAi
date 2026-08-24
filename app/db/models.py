@@ -75,18 +75,44 @@ class UserDialogType(Base):
 
 
 class VkGroup(Base):
-    """Подключённое сообщество ВКонтакте. Токен и секреты живут только в БД —
-    групп много, их добавляют через админку, не через env."""
+    """Подключённый канал: сообщество ВКонтакте или бот MAX. Токен и секреты
+    живут только в БД — каналов много, их добавляют через админку, не через env.
+
+    Имя таблицы осталось от времён, когда каналом был только ВК. Бот MAX лежит
+    здесь же намеренно: клиент привязан к каналу через `clients.vk_group_id`, и
+    на этой привязке держатся пинги, панель, выгрузки, фильтры чата и кэш
+    вложений. Вторая таблица заставила бы переписывать всё это ради одной
+    строки настроек, поэтому платформу называет колонка `platform`, а смысл
+    остальных полей от неё зависит (см. миграцию 052).
+    """
     __tablename__ = "vk_groups"
     id = Column(Integer, primary_key=True)
-    group_id = Column(BigInteger, unique=True, nullable=False)  # числовой ID сообщества
+    # 'vk' — сообщество ВКонтакте, 'max' — бот мессенджера MAX.
+    platform = Column(String(16), nullable=False, default="vk", server_default="vk")
+    # ВК: числовой ID сообщества. MAX: ID бота из GET /me.
+    group_id = Column(BigInteger, nullable=False)
     name = Column(String(255), nullable=False)
-    access_token = Column(Text, nullable=False)  # ключ доступа сообщества (права: messages)
-    confirmation_code = Column(String(255), nullable=False)  # строка подтверждения Callback API
-    secret_key = Column(String(255), nullable=True)  # секрет Callback API
+    # Публичное имя бота MAX (@username); у ВК не заполняется.
+    username = Column(String(255), nullable=True)
+    # ВК: ключ доступа сообщества (права: messages). MAX: токен бота.
+    access_token = Column(Text, nullable=False)
+    # Строка подтверждения Callback API — только у ВК, у MAX подтверждения нет.
+    confirmation_code = Column(String(255), nullable=True)
+    # ВК: секрет Callback API. MAX: секрет вебхука (X-Max-Bot-Api-Secret).
+    secret_key = Column(String(255), nullable=True)
+    # MAX: подписка на вебхук заведена на их стороне (POST /subscriptions).
+    # Ставится и снимается галочкой «Активен» в админке.
+    webhook_subscribed = Column(
+        Boolean, default=False, nullable=False, server_default="false",
+    )
     dialog_type_id = Column(Integer, ForeignKey("dialog_types.id"), nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=msk_now)
+    # ID сообщества ВК и ID бота MAX — числа из разных пространств, совпадение
+    # между ними ничего не значит.
+    __table_args__ = (
+        UniqueConstraint("platform", "group_id", name="uq_vk_groups_platform_group"),
+    )
 
 
 class Client(Base):

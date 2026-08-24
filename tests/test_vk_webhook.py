@@ -120,7 +120,7 @@ def fake_sender(monkeypatch):
         # вебхуки, — так что счётчик тут не украшение.
         return SentMessage(message_id=800 + len(sent), random_ids=[900 + len(sent)])
 
-    monkeypatch.setattr("app.vk.sender.send_to_dialog", _fake_send)
+    monkeypatch.setattr("app.messaging.send_to_dialog", _fake_send)
     return sent
 
 

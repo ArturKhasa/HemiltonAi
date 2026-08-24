@@ -28,7 +28,7 @@ from app.logging_context import current_dialog_type
 from app.sales.order_slots import ASKS_INSCRIPTION_RE
 from app.utils.time import msk_now
 from app.vk.outgoing import mark_delivered, mark_failed
-from app.vk.sender import VkMessagesForbiddenError, send_to_dialog
+from app.messaging import MessagesForbiddenError, send_to_dialog
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ async def _send_price(db: AsyncSession, dialog: Dialog, script: Script, now) -> 
     for i, part in enumerate(parts):
         try:
             result = await send_to_dialog(db, dialog, part.text)
-        except VkMessagesForbiddenError:
+        except MessagesForbiddenError:
             for rest in parts[i:]:
                 mark_failed(rest.message)
             return False

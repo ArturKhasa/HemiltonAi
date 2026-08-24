@@ -1,4 +1,9 @@
-"""CRUD подключённых сообществ ВК (только admin). Токен наружу не отдаётся — маска."""
+"""CRUD подключённых сообществ ВК (только admin). Токен наружу не отдаётся — маска.
+
+В таблице vk_groups живут и боты MAX (колонка platform, миграция 052), поэтому
+все выборки здесь ограничены платформой 'vk' — иначе бот MAX показался бы во
+вкладке «Группы ВК» с пустым кодом подтверждения. Боты MAX — в app.api.max_bots.
+"""
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -68,7 +73,9 @@ async def list_vk_groups(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_role("admin")),
 ):
-    result = await db.execute(select(VkGroup).order_by(VkGroup.id))
+    result = await db.execute(
+        select(VkGroup).where(VkGroup.platform == "vk").order_by(VkGroup.id)
+    )
     return [_to_out(g) for g in result.scalars().all()]
 
 
@@ -78,13 +85,18 @@ async def create_vk_group(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_role("admin")),
 ):
-    existing = await db.scalar(select(VkGroup).where(VkGroup.group_id == body.group_id))
+    existing = await db.scalar(
+        select(VkGroup).where(
+            VkGroup.platform == "vk", VkGroup.group_id == body.group_id,
+        )
+    )
     if existing:
         raise HTTPException(
             status_code=409,
             detail=f"Сообщество {body.group_id} уже подключено — «{existing.name}»",
         )
     group = VkGroup(
+        platform="vk",
         group_id=body.group_id,
         name=body.name,
         access_token=body.access_token,
@@ -106,7 +118,7 @@ async def update_vk_group(
     _: User = Depends(require_role("admin")),
 ):
     group = await db.get(VkGroup, group_pk)
-    if not group:
+    if not group or group.platform != "vk":
         raise HTTPException(status_code=404, detail="VK group not found")
     updates = body.model_dump(exclude_unset=True)
     # Пустой access_token в PATCH означает «оставить текущий» (в UI токен показан маской).
@@ -126,7 +138,7 @@ async def delete_vk_group(
     _: User = Depends(require_role("admin")),
 ):
     group = await db.get(VkGroup, group_pk)
-    if not group:
+    if not group or group.platform != "vk":
         raise HTTPException(status_code=404, detail="VK group not found")
 
     # Клиенты ссылаются на группу внешним ключом, и удаление группы, через

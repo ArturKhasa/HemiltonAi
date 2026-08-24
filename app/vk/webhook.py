@@ -19,6 +19,7 @@ from app.db.models import (
     Message, MessageRole, VkGroup,
 )
 from app.logging_context import current_dialog_type
+from app.messaging import platform_of
 from app.utils.time import msk_now
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,10 @@ class VkIncomingMessage:
     # Метка рекламной ссылки, по которой пришёл клиент (vk.me/club123?ref=sweetgold).
     # ВК присылает её только в ПЕРВОМ сообщении диалога.
     ref: str | None = None
+    # Имя отправителя, если мессенджер прислал его прямо в событии. Так делает
+    # MAX; у ВК имени в событии нет, его приходится спрашивать отдельно.
+    first_name: str | None = None
+    last_name: str | None = None
 
 
 # Размер превью стикера. Смысл («палец вверх», «сердечко», «грустный кот») виден
@@ -179,9 +184,27 @@ async def _resolve_dialog_type(db: AsyncSession, group: VkGroup) -> tuple[int | 
     return None, "default"
 
 
-async def _fill_client_name(db: AsyncSession, group: VkGroup, client: Client) -> None:
-    """Подтянуть имя клиента из его профиля ВК. Не вышло — работаем на «Вы»."""
-    if client.name or not group.access_token:
+async def _fill_client_name(
+    db: AsyncSession, group: VkGroup, client: Client,
+    first_name: str | None = None, last_name: str | None = None,
+) -> None:
+    """Проставить имя клиента. Не вышло — работаем на «Вы».
+
+    MAX кладёт имя прямо в событие, и спрашивать его не у кого — берём оттуда.
+    У ВК имени в событии нет, поэтому лезем в профиль через users.get.
+    """
+    if client.name:
+        return
+    if first_name or last_name:
+        client.name = first_name
+        client.last_name = last_name
+        await db.flush()
+        logger.info(
+            "[%s=%s/%s] имя клиента из события: %r %r",
+            platform_of(group), group.group_id, client.vk_user_id, first_name, last_name,
+        )
+        return
+    if platform_of(group) != "vk" or not group.access_token:
         return
     from app.vk.sender import fetch_user_name
 
@@ -199,6 +222,7 @@ async def _fill_client_name(db: AsyncSession, group: VkGroup, client: Client) ->
 
 async def _get_or_create_client(
     db: AsyncSession, group: VkGroup, vk_user_id: int, ref: str | None = None,
+    first_name: str | None = None, last_name: str | None = None,
 ) -> Client:
     client = await db.scalar(
         select(Client).where(
@@ -210,7 +234,7 @@ async def _get_or_create_client(
         client = Client(
             vk_user_id=vk_user_id,
             vk_group_id=group.id,
-            source=f"vk:{group.group_id}",
+            source=f"{platform_of(group)}:{group.group_id}",
             # Тег ref-ссылки = marketing_tag скриптов ('sweetgold', 'ПАВЕЛ_ПАТРИОТ_1'),
             # по нему list_scripts отбирает приветствие под конкретную рекламу.
             # Сравнение в format_scripts_list точное — сохраняем как прислал ВК.
@@ -219,18 +243,24 @@ async def _get_or_create_client(
         db.add(client)
         await db.flush()
         if ref:
-            logger.info("[vk=%s/%s] client tagged by ref=%r", group.group_id, vk_user_id, ref)
+            logger.info(
+                "[%s=%s/%s] client tagged by ref=%r",
+                platform_of(group), group.group_id, vk_user_id, ref,
+            )
         # Имя тянем ровно один раз — при первом появлении клиента. Без него
         # обращаться не к кому, и модель зовёт клиента надписью с изделия
         # (см. app.vk.sender.fetch_user_name). Уже заведённым клиентам имена
         # проставляет разовая команда app.commands.backfill_client_names.
-        await _fill_client_name(db, group, client)
+        await _fill_client_name(db, group, client, first_name, last_name)
     elif ref and not client.marketing_tags:
         # Клиент уже заведён, но без тега (пришёл до подключения ref-ссылок либо
         # первое сообщение потерялось) — проставляем задним числом.
         client.marketing_tags = [ref]
         await db.flush()
-        logger.info("[vk=%s/%s] client back-tagged by ref=%r", group.group_id, vk_user_id, ref)
+        logger.info(
+            "[%s=%s/%s] client back-tagged by ref=%r",
+            platform_of(group), group.group_id, vk_user_id, ref,
+        )
     return client
 
 
@@ -302,6 +332,10 @@ async def conversation_is_new(
     """
     from app.vk.sender import vk_api_call
 
+    # У бота MAX переписки до подключения не бывает: диалог с ним и начинается
+    # с нашего подключения, читать там нечего.
+    if platform_of(group) != "vk":
+        return True
     if not group.access_token:
         return True
     try:
@@ -338,7 +372,10 @@ async def conversation_is_new(
 
 async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMessage) -> None:
     """Входящее сообщение пользователя: сохранить, запустить ИИ, отправить ответ."""
-    client = await _get_or_create_client(db, group, msg.vk_user_id, ref=msg.ref)
+    client = await _get_or_create_client(
+        db, group, msg.vk_user_id, ref=msg.ref,
+        first_name=msg.first_name, last_name=msg.last_name,
+    )
     type_id, type_name = await _resolve_dialog_type(db, group)
     current_dialog_type.set(type_name)
 
@@ -358,14 +395,14 @@ async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMe
         if prior_history:
             ai_allowed = False
             logger.info(
-                "[vk=%s/%s] переписка велась до нас — ИИ не подключаем, диалог человеку",
-                group.group_id, msg.vk_user_id,
+                "[%s=%s/%s] переписка велась до нас — ИИ не подключаем, диалог человеку",
+                platform_of(group), group.group_id, msg.vk_user_id,
             )
 
     dialog = await _get_or_create_dialog(
         db, client, type_id, ai_allowed=ai_allowed, prior_history=prior_history,
     )
-    ctx = f"vk={group.group_id}/{msg.vk_user_id}"
+    ctx = f"{platform_of(group)}={group.group_id}/{msg.vk_user_id}"
 
     # Дедуп: ВК ретраит события. Сообщение с завершённым AIRun — пропускаем;
     # сообщение без ответа (воркер убит посреди run_ai) — переобрабатываем.
@@ -453,11 +490,11 @@ async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMe
             logger.info("[%s] newer client message arrived — this turn yields", ctx)
             return
 
-        await _reply_with_ai(db, dialog, client_message, ctx)
+        await _reply_with_ai(db, group, dialog, client_message, ctx)
 
 
 async def _reply_with_ai(
-    db: AsyncSession, dialog: Dialog, client_message: Message, ctx: str,
+    db: AsyncSession, group: VkGroup, dialog: Dialog, client_message: Message, ctx: str,
 ) -> None:
     """Прогон модели и отправка всех реплик хода. Вызывается под блокировкой диалога."""
     from app.ai.dialog_lock import superseded_by_newer_message
@@ -481,9 +518,21 @@ async def _reply_with_ai(
         logger.info("[%s] need_curator=True — reply held for review", ctx)
         return
 
+    await deliver_parts(db, group, dialog, parts, ctx)
+
+
+async def deliver_parts(
+    db: AsyncSession, group: VkGroup, dialog: Dialog, parts: list, ctx: str,
+) -> int:
+    """Отправить клиенту все реплики хода. Возвращает, сколько дошло.
+
+    Общая для обеих платформ: и для ответа модели, и для приветствия, которое в
+    MAX уходит без входящего сообщения (см. app.max.webhook.handle_start).
+    """
+    from app.messaging import MessagesForbiddenError, send_to_dialog
     from app.vk.outgoing import mark_delivered, mark_failed
-    from app.vk.sender import VkApiError, VkMessagesForbiddenError, send_to_dialog
     sent = 0
+    is_max = platform_of(group) == "max"
 
     def _fail_from(idx: int) -> None:
         """Пометить недоставленными сбойную часть и весь хвост за ней: до них
@@ -496,11 +545,19 @@ async def _reply_with_ai(
             logger.info("[%s] empty reply part %d — skipped", ctx, i)
             mark_failed(part.message)
             continue
-        # Фото-вложения через VK upload API пока не поддержаны — URL уходят текстом,
-        # ВК сам рендерит превью ссылок.
+        # ВК: фото-вложения через upload API здесь пока не собираются — URL
+        # уходят текстом, ВК сам рендерит превью ссылок. MAX забирает картинку
+        # по ссылке сам, поэтому ему отдаём её токеном вложения — клиент увидит
+        # фото, а не строку с адресом.
         outgoing_text = part.text or ""
         if part.image_urls:
-            outgoing_text = (outgoing_text + "\n" + "\n".join(part.image_urls)).strip()
+            if is_max:
+                from app.utils.media import attachment_token
+
+                tail = "\n".join(attachment_token(u) for u in part.image_urls)
+            else:
+                tail = "\n".join(part.image_urls)
+            outgoing_text = (outgoing_text + "\n" + tail).strip()
 
         if sent:
             # Связка скриптов уходит двумя сообщениями подряд. Лимитам ВК это не
@@ -510,12 +567,12 @@ async def _reply_with_ai(
 
         try:
             result = await send_to_dialog(db, dialog, outgoing_text)
-        except VkMessagesForbiddenError:
+        except MessagesForbiddenError:
             _fail_from(i)
             await db.commit()  # vk_blocked проставлен в send_to_dialog
-            return
-        except (VkApiError, Exception):
-            logger.exception("[%s] vk reply send failed | part=%d", ctx, i)
+            return sent
+        except Exception:
+            logger.exception("[%s] reply send failed | part=%d", ctx, i)
             _fail_from(i)
             break
 
@@ -532,16 +589,17 @@ async def _reply_with_ai(
             await db.commit()
         except IntegrityError:
             await db.rollback()
-            logger.warning("[%s] VK id уже занят — отметка доставки пропущена", ctx)
+            logger.warning("[%s] id сообщения уже занят — отметка доставки пропущена", ctx)
         sent += 1
         logger.info(
-            "[%s] vk reply sent | part=%d/%d | vk_message_id=%s",
+            "[%s] reply sent | part=%d/%d | message_id=%s",
             ctx, i + 1, len(parts), result.message_id,
         )
 
     if sent:
         dialog.last_message_at = msk_now()
     await db.commit()
+    return sent
 
 
 async def handle_message_reply(db: AsyncSession, group: VkGroup, msg: VkIncomingMessage) -> None:
@@ -566,7 +624,7 @@ async def handle_message_reply(db: AsyncSession, group: VkGroup, msg: VkIncoming
     type_id, type_name = await _resolve_dialog_type(db, group)
     current_dialog_type.set(type_name)
     dialog = await _get_or_create_dialog(db, client, type_id)
-    ctx = f"vk={group.group_id}/{msg.peer_id}"
+    ctx = f"{platform_of(group)}={group.group_id}/{msg.peer_id}"
 
     if await is_our_echo(db, dialog.id, msg.random_id, msg.external_message_id):
         await db.commit()

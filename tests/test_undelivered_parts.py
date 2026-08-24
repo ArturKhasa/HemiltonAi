@@ -63,7 +63,7 @@ async def test_send_failure_marks_the_rest_undelivered(db, vk_group, three_part_
             return SentMessage(message_id=800, random_ids=[900])
         raise VkApiError(10, "Internal server error")
 
-    monkeypatch.setattr("app.vk.sender.send_to_dialog", _send)
+    monkeypatch.setattr("app.messaging.send_to_dialog", _send)
 
     await handle_message_new(db, vk_group, parse_message_event(_event()))
 
@@ -84,7 +84,7 @@ async def test_successful_send_records_vk_ids_on_every_part(db, vk_group, three_
         counter["n"] += 1
         return SentMessage(message_id=800 + counter["n"], random_ids=[900 + counter["n"]])
 
-    monkeypatch.setattr("app.vk.sender.send_to_dialog", _send)
+    monkeypatch.setattr("app.messaging.send_to_dialog", _send)
     monkeypatch.setattr("app.vk.webhook.FOLLOW_UP_DELAY_SECONDS", 0)
 
     await handle_message_new(db, vk_group, parse_message_event(_event()))

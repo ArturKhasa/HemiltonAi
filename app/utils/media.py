@@ -12,6 +12,8 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ssl_trust import async_client
+
 logger = logging.getLogger(__name__)
 
 _HASH_TIMEOUT = 10.0
@@ -86,7 +88,7 @@ async def hash_image_urls(urls: list[str]) -> dict[str, str]:
     unique = list(dict.fromkeys(u for u in urls if u))
     if not unique:
         return {}
-    async with httpx.AsyncClient(timeout=_HASH_TIMEOUT, follow_redirects=True) as client:
+    async with async_client(timeout=_HASH_TIMEOUT, follow_redirects=True) as client:
         hashes = await asyncio.gather(*(_hash_one(client, u) for u in unique))
     return {u: h for u, h in zip(unique, hashes) if h}
 

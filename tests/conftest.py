@@ -34,6 +34,19 @@ def no_vk_profile_lookup(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_max_network(monkeypatch):
+    """Сети в наборе быть не должно — в том числе к MAX.
+
+    Тесты, которым нужен ответ MAX, подменяют нужный вызов сами; эта заглушка
+    ловит забытые пути, чтобы они падали внятно, а не висли на таймауте.
+    """
+    async def _no_network(*args, **kwargs):
+        raise AssertionError("MAX API не должен вызываться в тестах")
+
+    monkeypatch.setattr("app.max.client._request", _no_network)
+
+
+@pytest.fixture(autouse=True)
 def no_typing_grace(monkeypatch):
     """Пауза «не допишет ли клиент» в тестах нулевая.
 

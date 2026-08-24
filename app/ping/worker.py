@@ -20,7 +20,7 @@ from app.utils.time import msk_now
 from app.ai.triggers import CURATOR_STATUS_NAME
 from app.utils.text import normalize_dashes, strip_foreign_name
 from app.vk.outgoing import delivered_only, mark_delivered, was_delivered
-from app.vk.sender import VkMessagesForbiddenError, send_to_dialog
+from app.messaging import MessagesForbiddenError, send_to_dialog
 from app.vk.spintax import resolve_spintax
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,7 @@ def _strip_greeting(text: str) -> str:
 
 def _deliverable(dialog: Dialog | None) -> bool:
     """Есть ли куда отправлять. Тестовый диалог живёт только в панели: клиента в
-    ВК за ним нет, и send_to_dialog на нём падает с «no VK client binding».
+    канала за ним нет, и send_to_dialog на нём падает с «no VK client binding».
     Сообщение всё равно сохраняем — ради него тестовый диалог и заводят."""
     return bool(dialog) and not dialog.is_test
 
@@ -238,7 +238,7 @@ async def _send_ping(
             if _deliverable(dialog):
                 try:
                     result = await send_to_dialog(db, dialog, rule.manual_text)
-                except VkMessagesForbiddenError:
+                except MessagesForbiddenError:
                     return "blocked"
                 except Exception as exc:
                     logger.error("ping: send failed | dialog=%s: %s", state.dialog_id, exc)
@@ -312,7 +312,7 @@ async def _send_ping(
     else:
         try:
             result = await send_to_dialog(db, dialog, sent_text)
-        except VkMessagesForbiddenError:
+        except MessagesForbiddenError:
             return "blocked"
         except Exception as exc:
             logger.error("ping: send failed | dialog=%s: %s", state.dialog_id, exc)

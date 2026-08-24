@@ -101,6 +101,8 @@ from app.api.dialog_statuses import router as dialog_statuses_router
 from app.api.ping_rules import router as ping_rules_router
 from app.api.vk import router as vk_webhook_router
 from app.api.vk_groups import router as vk_groups_router
+from app.api.max import router as max_webhook_router
+from app.api.max_bots import router as max_bots_router
 from app.api.feedback import router as feedback_router
 from app.api.ref_tags import router as ref_tags_router
 from app.api.media import router as media_router
@@ -114,11 +116,13 @@ app.include_router(dialog_types_router, prefix="/api")
 app.include_router(dialog_statuses_router, prefix="/api")
 app.include_router(ping_rules_router, prefix="/api")
 app.include_router(vk_groups_router, prefix="/api")
+app.include_router(max_bots_router, prefix="/api")
 app.include_router(feedback_router, prefix="/api")
 app.include_router(ref_tags_router, prefix="/api")
 app.include_router(media_router, prefix="/api")
 # Вебхук ВК без /api-префикса: адрес в настройках Callback API — /webhook/vk.
 app.include_router(vk_webhook_router)
+app.include_router(max_webhook_router)
 
 # Файлы из админки: каталог создаём сами и монтируем ДО SPA-роута ниже, иначе
 # «/media/...» уехал бы в index.html вместе со всеми неизвестными адресами.
