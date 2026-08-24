@@ -14,11 +14,18 @@ def _use_unicode_lower(engine) -> None:
     """SQLite'овский lower() знает только ASCII, поэтому «Черный» остался бы
     «Черный» и поиск по товарам вёл бы себя в тестах не так, как в проде.
     Подменяем на питоновский str.lower — он совпадает с юникодным lower()
-    постгреса, на котором работает прод."""
+    постгреса, на котором работает прод.
+
+    NULL пропускаем как есть: постгрес на `lower(NULL)` отвечает NULL, а
+    `str.lower(None)` роняет запрос целиком — на этом падал поиск клиента по
+    имени, стоило в выборке оказаться клиенту без имени."""
+
+    def _lower(value):
+        return value.lower() if isinstance(value, str) else value
 
     @event.listens_for(engine.sync_engine, "connect")
     def _register(dbapi_connection, _record):
-        dbapi_connection.create_function("lower", 1, str.lower)
+        dbapi_connection.create_function("lower", 1, _lower)
 
 
 @pytest.fixture(autouse=True)

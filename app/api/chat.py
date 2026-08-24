@@ -96,6 +96,7 @@ async def _apply_dialog_filters(
     client_date_from: datetime | None,
     client_date_to: datetime | None,
     last_message_from: str | None,
+    client_name: str | None = None,
     ping_funnel_type: str | None = None,
     funnel_stage: str | None = None,
     allowed_type_ids: list[int] | None = None,
@@ -138,6 +139,15 @@ async def _apply_dialog_filters(
         user_ids = [int(c.strip()) for c in vk_user_id.split(";") if c.strip().isdigit()]
         if user_ids:
             q = q.where(Client.vk_user_id.in_(user_ids))
+    if client_name:
+        # Каждое слово запроса должно найтись в имени ИЛИ фамилии: менеджер ищет
+        # «Аксёнов Денис», а в базе имя и фамилия лежат раздельно и в любом
+        # порядке — «Денис Аксёнов» должно находиться тем же запросом.
+        for word in client_name.split():
+            pattern = f"%{word}%"
+            q = q.where(or_(
+                Client.name.ilike(pattern), Client.last_name.ilike(pattern),
+            ))
     if client_date_from is not None:
         q = q.where(Client.created_at >= to_naive_msk(client_date_from))
     if client_date_to is not None:
@@ -210,6 +220,7 @@ async def count_chat_dialogs(
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
     vk_user_id: str | None = Query(default=None),
+    client_name: str | None = Query(default=None),
     client_date_from: datetime | None = Query(default=None),
     client_date_to: datetime | None = Query(default=None),
     last_message_from: str | None = Query(default=None),
@@ -222,7 +233,8 @@ async def count_chat_dialogs(
         q, db,
         is_test=is_test, status_filter=status_filter, ai_provider_filter=ai_provider_filter,
         dialog_type_ids=dialog_type_ids, date_from=date_from, date_to=date_to,
-        vk_user_id=vk_user_id, client_date_from=client_date_from,
+        vk_user_id=vk_user_id, client_name=client_name,
+        client_date_from=client_date_from,
         client_date_to=client_date_to, last_message_from=last_message_from,
         ping_funnel_type=ping_funnel_type, funnel_stage=funnel_stage,
         allowed_type_ids=await get_allowed_type_ids(current_user, db),
@@ -242,6 +254,7 @@ async def list_chat_dialogs(
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
     vk_user_id: str | None = Query(default=None),
+    client_name: str | None = Query(default=None),
     client_date_from: datetime | None = Query(default=None),
     client_date_to: datetime | None = Query(default=None),
     last_message_from: str | None = Query(default=None),
@@ -261,7 +274,8 @@ async def list_chat_dialogs(
         q, db,
         is_test=is_test, status_filter=status_filter, ai_provider_filter=ai_provider_filter,
         dialog_type_ids=dialog_type_ids, date_from=date_from, date_to=date_to,
-        vk_user_id=vk_user_id, client_date_from=client_date_from,
+        vk_user_id=vk_user_id, client_name=client_name,
+        client_date_from=client_date_from,
         client_date_to=client_date_to, last_message_from=last_message_from,
         ping_funnel_type=ping_funnel_type, funnel_stage=funnel_stage,
         allowed_type_ids=await get_allowed_type_ids(current_user, db),
@@ -300,6 +314,7 @@ async def export_chat_dialogs_csv(
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
     vk_user_id: str | None = Query(default=None),
+    client_name: str | None = Query(default=None),
     client_date_from: datetime | None = Query(default=None),
     client_date_to: datetime | None = Query(default=None),
     last_message_from: str | None = Query(default=None),
@@ -348,6 +363,12 @@ async def export_chat_dialogs_csv(
         user_ids = [int(c.strip()) for c in vk_user_id.split(";") if c.strip().isdigit()]
         if user_ids:
             q = q.where(Client.vk_user_id.in_(user_ids))
+    if client_name:
+        for word in client_name.split():
+            pattern = f"%{word}%"
+            q = q.where(or_(
+                Client.name.ilike(pattern), Client.last_name.ilike(pattern),
+            ))
     if client_date_from is not None:
         q = q.where(Client.created_at >= to_naive_msk(client_date_from))
     if client_date_to is not None:
@@ -432,6 +453,7 @@ async def export_chat_client_ids(
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
     vk_user_id: str | None = Query(default=None),
+    client_name: str | None = Query(default=None),
     client_date_from: datetime | None = Query(default=None),
     client_date_to: datetime | None = Query(default=None),
     last_message_from: str | None = Query(default=None),
@@ -449,7 +471,8 @@ async def export_chat_client_ids(
         q, db,
         is_test=is_test, status_filter=status_filter, ai_provider_filter=ai_provider_filter,
         dialog_type_ids=dialog_type_ids, date_from=date_from, date_to=date_to,
-        vk_user_id=vk_user_id, client_date_from=client_date_from,
+        vk_user_id=vk_user_id, client_name=client_name,
+        client_date_from=client_date_from,
         client_date_to=client_date_to, last_message_from=last_message_from,
         ping_funnel_type=ping_funnel_type, funnel_stage=funnel_stage,
         allowed_type_ids=await get_allowed_type_ids(current_user, db),

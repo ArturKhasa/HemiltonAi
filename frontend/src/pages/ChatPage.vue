@@ -769,10 +769,22 @@
           </div>
 
           <div>
+            <p class="text-sm font-medium text-gray-700 mb-2">Имя клиента</p>
+            <input
+              type="text"
+              v-model="filterClientName"
+              @keyup.enter="applyFilters"
+              placeholder="Фамилия или имя"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+            />
+          </div>
+
+          <div>
             <p class="text-sm font-medium text-gray-700 mb-2">VK ID клиента</p>
             <input
               type="text"
               v-model="filterClientId"
+              @keyup.enter="applyFilters"
               placeholder="VK ID (несколько через ;)"
               class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
@@ -1203,6 +1215,7 @@ function saveFiltersToStorage() {
     filterDateFrom: filterDateFrom.value,
     filterDateTo: filterDateTo.value,
     filterClientId: filterClientId.value,
+    filterClientName: filterClientName.value,
     filterClientDatePreset: filterClientDatePreset.value,
     filterClientDateFrom: filterClientDateFrom.value,
     filterClientDateTo: filterClientDateTo.value,
@@ -1229,6 +1242,9 @@ const filterDatePreset = ref(_saved?.filterDatePreset ?? 'all')
 const filterDateFrom = ref(_saved?.filterDateFrom ?? '')
 const filterDateTo = ref(_saved?.filterDateTo ?? '')
 const filterClientId = ref(_saved?.filterClientId ?? '')
+// Менеджеры ищут клиента по фамилии, а не по числовому ID: в списке 239 диалогов
+// глазами не найти, а ID под рукой нет.
+const filterClientName = ref(_saved?.filterClientName ?? '')
 const filterClientDatePreset = ref(_saved?.filterClientDatePreset ?? 'all')
 const filterClientDateFrom = ref(_saved?.filterClientDateFrom ?? '')
 const filterClientDateTo = ref(_saved?.filterClientDateTo ?? '')
@@ -1277,7 +1293,7 @@ const isCurator = computed(() => auth.user?.role === 'curator')
 // единственным пунктом «Тестовые диалоги» (Георгий, 17.08). Доступ всё равно
 // решает сервер: /chat/dialogs пускает только админа и куратора.
 const canSeeRealDialogs = computed(() => !auth.ready || !auth.user || isAdmin.value || isCurator.value)
-const hasActiveFilters = computed(() => filterShowTest.value || !filterShowReal.value || filterStatuses.value.length > 0 || filterDatePreset.value !== 'all' || filterClientId.value.trim() !== '' || filterClientDatePreset.value !== 'all' || filterAiProviders.value.length > 0 || filterDialogTypeId.value !== null || filterPingFunnelType.value !== null || filterFunnelStage.value !== null || filterLastMessageFrom.value !== '')
+const hasActiveFilters = computed(() => filterShowTest.value || !filterShowReal.value || filterStatuses.value.length > 0 || filterDatePreset.value !== 'all' || filterClientId.value.trim() !== '' || filterClientName.value.trim() !== '' || filterClientDatePreset.value !== 'all' || filterAiProviders.value.length > 0 || filterDialogTypeId.value !== null || filterPingFunnelType.value !== null || filterFunnelStage.value !== null || filterLastMessageFrom.value !== '')
 const dialogTypeFilterValue = computed(() => {
   if (filterShowTest.value && filterShowReal.value) return 'all'
   if (filterShowReal.value) return 'real'
@@ -1318,6 +1334,7 @@ function buildDialogParams(offset = 0) {
   if (filterFunnelStage.value !== null) params.append('funnel_stage', filterFunnelStage.value)
   if (filterLastMessageFrom.value) params.append('last_message_from', filterLastMessageFrom.value)
   if (filterClientId.value.trim()) params.append('vk_user_id', filterClientId.value.trim())
+  if (filterClientName.value.trim()) params.append('client_name', filterClientName.value.trim())
   const { from, to } = getDateRange(filterDatePreset.value, filterDateFrom.value, filterDateTo.value)
   if (from) params.append('date_from', from)
   if (to) params.append('date_to', to)
@@ -1398,6 +1415,7 @@ function resetFilters() {
   filterDateFrom.value = ''
   filterDateTo.value = ''
   filterClientId.value = ''
+  filterClientName.value = ''
   filterClientDatePreset.value = 'all'
   filterClientDateFrom.value = ''
   filterClientDateTo.value = ''
@@ -1420,6 +1438,7 @@ function buildExportParams() {
   if (filterFunnelStage.value !== null) params.append('funnel_stage', filterFunnelStage.value)
   if (filterLastMessageFrom.value) params.append('last_message_from', filterLastMessageFrom.value)
   if (filterClientId.value.trim()) params.append('vk_user_id', filterClientId.value.trim())
+  if (filterClientName.value.trim()) params.append('client_name', filterClientName.value.trim())
   const { from, to } = getDateRange(filterDatePreset.value, filterDateFrom.value, filterDateTo.value)
   if (from) params.append('date_from', from)
   if (to) params.append('date_to', to)
@@ -2038,6 +2057,7 @@ async function openByVkUserId(vkId) {
   filterPingFunnelType.value = null
   filterFunnelStage.value = null
   filterLastMessageFrom.value = ''
+  filterClientName.value = ''
   filterClientId.value = vkId
   saveFiltersToStorage()
   await loadDialogs()
