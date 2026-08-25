@@ -407,9 +407,16 @@
               Вставьте токен бота и включите «Активен» — адрес вебхука пропишется в MAX сам.
             </span>
           </div>
-          <button @click="openMaxCreate" class="bg-brand-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-brand-700 font-medium">
-            + Добавить бота
-          </button>
+          <div class="flex items-center gap-2">
+            <button
+              @click="loadMaxBots"
+              :disabled="maxLoading"
+              class="text-sm px-3 py-2 rounded-lg border text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+            >{{ maxLoading ? 'Обновление…' : 'Обновить' }}</button>
+            <button @click="openMaxCreate" class="bg-brand-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-brand-700 font-medium">
+              + Добавить бота
+            </button>
+          </div>
         </div>
 
         <div class="overflow-x-auto">
@@ -1453,9 +1460,16 @@ const canSaveMaxBot = computed(() => {
 
 async function loadMaxBots() {
   maxLoading.value = true
+  maxError.value = ''
   try {
     const res = await api.get('/max-bots/')
     maxBots.value = res.data
+  } catch (e) {
+    // Раньше ошибка запроса оставляла пустой массив, и админ видел «Ботов нет»,
+    // хотя добавленные записи никуда не делись. Показываем причину и не даём
+    // принять недоступный API за пустой список.
+    maxBots.value = []
+    maxError.value = e.response?.data?.detail || 'Не удалось загрузить список ботов. Попробуйте обновить страницу.'
   } finally {
     maxLoading.value = false
   }
@@ -1502,8 +1516,11 @@ async function saveMaxBot() {
       const res = await api.patch(`/max-bots/${editMaxBot.value.id}`, payload)
       replaceMaxBot(res.data)
     } else {
-      const res = await api.post('/max-bots/', payload)
-      maxBots.value.push(res.data)
+      await api.post('/max-bots/', payload)
+      // Берём итоговый список из БД, а не полагаемся на локальный push: так
+      // новая строка сразу оказывается в том же порядке и состоянии, что и
+      // после обновления страницы.
+      await loadMaxBots()
     }
     showMaxModal.value = false
   } catch (e) {
@@ -1565,5 +1582,12 @@ onMounted(async () => {
   loadGroups()
   loadRefTags()
   loadMaxBots()
+})
+
+// Админка часто остаётся открытой во вкладке часами. Перечитываем ботов при
+// переходе в их раздел: созданные с другого устройства или после рестарта
+// сервиса не пропадут из старого локального состояния страницы.
+watch(activeSection, (section) => {
+  if (section === 'max-bots') loadMaxBots()
 })
 </script>

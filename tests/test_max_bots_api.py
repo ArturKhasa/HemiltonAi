@@ -90,6 +90,19 @@ async def test_inactive_bot_is_not_subscribed(client, admin_headers, max_api):
     assert max_api["subscribe"] == []
 
 
+async def test_list_returns_bots_added_in_admin(client, admin_headers, max_api):
+    """После перезагрузки админки её GET должен вернуть созданную строку."""
+    created = await client.post("/api/max-bots/", headers=admin_headers, json={
+        "name": "Хэмилтон", "access_token": "tok", "is_active": False,
+    })
+    assert created.status_code == 201
+
+    listed = await client.get("/api/max-bots/", headers=admin_headers)
+    assert listed.status_code == 200
+    assert [bot["id"] for bot in listed.json()] == [created.json()["id"]]
+    assert listed.json()[0]["name"] == "Хэмилтон"
+
+
 async def test_toggle_active_subscribes_and_unsubscribes(client, admin_headers, max_api):
     created = (await client.post("/api/max-bots/", headers=admin_headers, json={
         "name": "Хэмилтон", "access_token": "tok", "is_active": False,
