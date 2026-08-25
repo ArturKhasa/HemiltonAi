@@ -28,7 +28,7 @@ from app.logging_context import current_dialog_type
 from app.sales.order_slots import ASKS_INSCRIPTION_RE
 from app.utils.time import msk_now
 from app.vk.outgoing import mark_delivered, mark_failed
-from app.messaging import MessagesForbiddenError, send_to_dialog
+from app.messaging import MessagesForbiddenError, dialogs_on_inactive_channels, send_to_dialog
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +122,8 @@ async def send_price_to_silent() -> None:
             select(Dialog).where(
                 Dialog.funnel_stage == "greeting",
                 Dialog.ai_paused == False,
+                # Канал выключен в админке — молчунов мёртвого бота не догоняем.
+                Dialog.id.not_in(dialogs_on_inactive_channels()),
                 Dialog.vk_blocked == False,
                 Dialog.last_message_at.isnot(None),
                 Dialog.last_message_at <= now - timedelta(seconds=SILENCE_SECONDS),

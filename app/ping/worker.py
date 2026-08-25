@@ -20,7 +20,7 @@ from app.utils.time import msk_now
 from app.ai.triggers import CURATOR_STATUS_NAME
 from app.utils.text import normalize_dashes, strip_foreign_name
 from app.vk.outgoing import delivered_only, mark_delivered, was_delivered
-from app.messaging import MessagesForbiddenError, send_to_dialog
+from app.messaging import MessagesForbiddenError, dialogs_on_inactive_channels, send_to_dialog
 from app.vk.spintax import resolve_spintax
 
 logger = logging.getLogger(__name__)
@@ -718,9 +718,12 @@ async def process_due() -> None:
     async with AsyncSessionLocal() as db:
         type_id_to_name = await _load_type_names(db)
 
+        # Воронку выключенного канала не гасим (is_completed), а пропускаем: канал
+        # включат обратно — и она продолжится с того же шага.
         due_filter = (
             DialogPingState.is_completed == False,
             DialogPingState.next_ping_due_at <= now,
+            DialogPingState.dialog_id.not_in(dialogs_on_inactive_channels()),
         )
         due_total = await db.scalar(
             select(func.count()).select_from(DialogPingState).where(*due_filter)
@@ -785,6 +788,9 @@ async def discover() -> None:
                 # посмотреть, а уйти клиенту такой пинг не может — отправка в ВК
                 # для них пропускается (см. _deliverable).
                 Dialog.ai_paused == False,
+                # Канал выключен в админке — бот снят с работы целиком, догонять
+                # его клиентов нельзя (см. dialogs_on_inactive_channels).
+                Dialog.id.not_in(dialogs_on_inactive_channels()),
                 Dialog.vk_blocked == False,
                 Dialog.id.not_in(existing_ids_subq),
                 Dialog.last_message_at.isnot(None),

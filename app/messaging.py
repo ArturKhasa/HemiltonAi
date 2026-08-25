@@ -8,6 +8,7 @@
 """
 import logging
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Client, Dialog, VkGroup
@@ -40,6 +41,26 @@ async def channel_of(db: AsyncSession, dialog: Dialog) -> VkGroup | None:
     if not client or not client.vk_group_id:
         return None
     return await db.get(VkGroup, client.vk_group_id)
+
+
+def dialogs_on_inactive_channels():
+    """Подзапрос: id диалогов, чей канал выключен галочкой «Активен» в админке.
+
+    Выключенный канал перестаёт принимать входящие (вебхук отвечает 404), но на
+    исходящие это не влияло: пинги и догоняющая цена смотрели только на диалог и
+    продолжали писать клиентам мёртвого бота. 25.08 так работал снятый с публикации
+    MAX-бот id165716466071_bot — клиент видел, что «ИИ продолжает диалог», а его
+    ответы уже никуда не доходили.
+
+    Клиент без канала (тестовый диалог из панели) под фильтр не попадает: join
+    отсекает его, и лестницу пингов по-прежнему видно в тестовом диалоге.
+    """
+    return (
+        select(Dialog.id)
+        .join(Client, Dialog.client_id == Client.id)
+        .join(VkGroup, Client.vk_group_id == VkGroup.id)
+        .where(VkGroup.is_active == False)  # noqa: E712 — SQL-выражение, не Python-bool
+    )
 
 
 async def send_to_dialog(db: AsyncSession, dialog: Dialog, text: str):
