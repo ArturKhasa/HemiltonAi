@@ -134,6 +134,19 @@ async def list_subscriptions(token: str) -> list[dict]:
     return data.get("subscriptions") or []
 
 
+async def get_messages(token: str, chat_id: int, count: int = 10) -> list[dict]:
+    """Последние сообщения диалога или группового чата MAX.
+
+    Нужны только как страховка при первом сообщении клиента: если оператор
+    успел ответить от имени бота вне панели, прежде чем наш вебхук увидел это
+    исходящее, AI не должен вступать в уже ручной диалог.
+    """
+    data = await _request(
+        token, "GET", "/messages", params={"chat_id": chat_id, "count": count},
+    )
+    return data.get("messages") or []
+
+
 async def subscribe(token: str, url: str, secret: str) -> dict:
     """Подписать бота на вебхук. MAX принимает только https-адрес."""
     return await _request(

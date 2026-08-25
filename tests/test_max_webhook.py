@@ -9,8 +9,9 @@ from app.db.models import (
 )
 from app.max.client import MaxSentMessage
 from app.max.webhook import (
-    handle_bot_stopped,
+    handle_bot_message, handle_bot_stopped,
     handle_start,
+    pause_if_first_message_has_manager_reply,
     parse_message_created,
     start_command,
 )
@@ -57,6 +58,20 @@ def _message_created(
             "body": {"mid": mid, "seq": 1, "text": text, "attachments": attachments or []},
         },
         "user_locale": "ru",
+    }
+
+
+def _bot_message_created(*, user_id=555, text="Макет готов", mid="manager-mid"):
+    """Сообщение, отправленное от имени бота внешним интерфейсом менеджера."""
+    return {
+        "update_type": "message_created",
+        "timestamp": 1770000000000,
+        "message": {
+            "sender": {"user_id": 777001, "is_bot": True},
+            "recipient": {"chat_id": 900, "chat_type": "dialog", "user_id": user_id},
+            "timestamp": 1770000000000,
+            "body": {"mid": mid, "seq": 1, "text": text, "attachments": []},
+        },
     }
 
 
@@ -235,6 +250,39 @@ async def test_duplicate_mid_is_skipped(db, max_bot, fake_ai, fake_sender):
     await handle_message_new(db, max_bot, msg)
     await handle_message_new(db, max_bot, parse_message_created(_message_created()))
     assert len(fake_sender) == 1
+
+
+async def test_manager_message_from_max_pauses_dialog_before_client_replies(db, max_bot):
+    """Ручной ответ от имени бота заводит паузу ещё до первого текста клиента."""
+    handled = await handle_bot_message(db, max_bot, _bot_message_created())
+
+    assert handled is True
+    client = await db.scalar(select(Client).where(Client.vk_user_id == 555))
+    dialog = await db.scalar(select(Dialog).where(Dialog.client_id == client.id))
+    assert dialog.ai_paused is True
+    manager_msg = await db.scalar(select(Message).where(Message.role == MessageRole.curator))
+    assert manager_msg.text == "Макет готов"
+
+
+async def test_first_max_message_checks_history_for_manual_reply(
+    db, max_bot, fake_ai, fake_sender, monkeypatch,
+):
+    """Проверяем историю, если исходящее менеджера пришло раньше нашего вебхука."""
+    outgoing = _bot_message_created()["message"]
+
+    async def _history(*_args, **_kwargs):
+        return [outgoing]
+
+    monkeypatch.setattr("app.max.client.get_messages", _history)
+    payload = _message_created()
+    msg = parse_message_created(payload)
+
+    assert await pause_if_first_message_has_manager_reply(db, max_bot, payload, msg) is True
+    await handle_message_new(db, max_bot, msg)
+
+    dialog = (await db.execute(select(Dialog))).scalars().one()
+    assert dialog.ai_paused is True
+    assert fake_sender == []
 
 
 # --- «Начать»: bot_started и «/start» ------------------------------------------
