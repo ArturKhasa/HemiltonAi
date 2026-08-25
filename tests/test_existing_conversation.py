@@ -52,6 +52,25 @@ async def test_community_greeting_before_it_still_counts_as_new(group, monkeypat
     assert await conversation_is_new(group, CLIENT, NEW_MSG) is True
 
 
+async def test_fresh_operator_reply_is_an_old_conversation(group, monkeypatch):
+    """Недавний ручной ответ не путать с приветствием сообщества.
+
+    Клиент нередко отвечает менеджеру в течение нескольких минут. До этой
+    проверки такое сообщение попадало в 15-минутное окно приветствия, и ИИ
+    знакомился с клиентом поверх менеджера.
+    """
+    monkeypatch.setattr(
+        "app.vk.sender.vk_api_call",
+        _vk_returning([
+            {"id": 1000, "from_id": CLIENT, "text": "Всё верно, спасибо",
+             "date": int(time.time())},
+            {"id": 999, "from_id": GROUP, "text": "Проверьте, пожалуйста, макет",
+             "date": int(time.time()) - 5, "admin_author_id": 42},
+        ]),
+    )
+    assert await conversation_is_new(group, CLIENT, NEW_MSG) is False
+
+
 async def test_broadcast_from_yesterday_is_an_old_conversation(group, monkeypatch):
     """«Не важно, рассылка была, лид сам написал по теме» — диалог всё равно
     вели до нас, ИИ в него не вступает."""
