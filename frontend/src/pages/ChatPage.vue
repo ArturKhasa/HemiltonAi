@@ -98,6 +98,24 @@
             <span v-if="d.current_status" :class="['text-[10px] font-medium px-1.5 py-0.5 rounded-full', statusColor(d.current_status)]">
               {{ d.current_status }}
             </span>
+            <!-- Метка рекламной ссылки: тем же фирменным цветом, что и в шапке
+                 диалога, чтобы читалось как одно и то же. Клик — отбор списка по
+                 этой кампании. Меток у клиента всегда 0 или 1, но поле списочное:
+                 показываем две и «+N», чтобы узкая колонка не поехала. -->
+            <template v-if="d.marketing_tags?.length">
+              <button
+                v-for="tag in d.marketing_tags.slice(0, 2)"
+                :key="tag"
+                @click.stop="filterByTag(tag)"
+                class="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200 max-w-[9rem] truncate hover:bg-brand-100"
+                :title="`Показать все диалоги с меткой ${tag}`"
+              >{{ tag }}</button>
+              <span
+                v-if="d.marketing_tags.length > 2"
+                class="text-[10px] text-gray-400"
+                :title="d.marketing_tags.join(', ')"
+              >+{{ d.marketing_tags.length - 2 }}</span>
+            </template>
             <!-- Только когда пауза НЕ следует из статуса: «Нужен куратор» уже
                  означает, что диалог передан человеку, и второй бейдж рядом с ним
                  читался как дубль. Оператор, перехвативший диалог из ВК, статус не
@@ -720,6 +738,48 @@
             </select>
           </div>
 
+          <div v-if="marketingTags.length">
+            <div class="flex items-center justify-between mb-2">
+              <p class="text-sm font-medium text-gray-700">Метка рекламы</p>
+              <button
+                v-if="filterMarketingTags.length"
+                @click="filterMarketingTags = []"
+                class="text-xs text-gray-400 hover:text-gray-600"
+              >Снять ({{ filterMarketingTags.length }})</button>
+            </div>
+            <input
+              type="text"
+              v-model="marketingTagSearch"
+              placeholder="Поиск метки"
+              class="w-full border rounded-lg px-3 py-2 text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
+            />
+            <div class="flex flex-col gap-2 max-h-48 overflow-y-auto pr-1">
+              <label class="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  value="__none__"
+                  v-model="filterMarketingTags"
+                  class="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500"
+                />
+                <span class="text-xs font-medium px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">Без метки</span>
+              </label>
+              <label
+                v-for="tag in visibleMarketingTags"
+                :key="tag"
+                class="flex items-center gap-2 cursor-pointer select-none"
+              >
+                <input
+                  type="checkbox"
+                  :value="tag"
+                  v-model="filterMarketingTags"
+                  class="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500"
+                />
+                <span class="text-xs font-medium px-1.5 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200 truncate" :title="tag">{{ tag }}</span>
+              </label>
+              <p v-if="!visibleMarketingTags.length" class="text-xs text-gray-400">Ничего не найдено</p>
+            </div>
+          </div>
+
           <div>
             <p class="text-sm font-medium text-gray-700 mb-2">AI провайдер</p>
             <div class="flex flex-col gap-2">
@@ -1223,6 +1283,7 @@ function saveFiltersToStorage() {
     filterDialogTypeId: filterDialogTypeId.value,
     filterPingFunnelType: filterPingFunnelType.value,
     filterFunnelStage: filterFunnelStage.value,
+    filterMarketingTags: filterMarketingTags.value,
       filterLastMessageFrom: filterLastMessageFrom.value,
     }))
   } catch {}
@@ -1252,8 +1313,22 @@ const filterAiProviders = ref(_saved?.filterAiProviders ?? [])
 const filterDialogTypeId = ref(_saved?.filterDialogTypeId ?? null)
 const filterPingFunnelType = ref(_saved?.filterPingFunnelType ?? null)
 const filterFunnelStage = ref(_saved?.filterFunnelStage ?? null)
+// Метка рекламной ссылки клиента (sweetgold, ПАВЕЛ_ПАТРИОТ_1). Георгий, 26.08:
+// менеджеру надо видеть, с какой кампании лид, и отбирать список по ней.
+const filterMarketingTags = ref(_saved?.filterMarketingTags ?? [])
 const filterLastMessageFrom = ref(_saved?.filterLastMessageFrom ?? '')
 const pingFunnelTypes = ref([])
+// Все метки, встреченные в базе, а не только на загруженной странице: фильтр
+// отбирает по всей базе, а список грузится по 50 диалогов.
+const marketingTags = ref([])
+const marketingTagSearch = ref('')
+// Меток в базе десятки (каждая кампания — своя), список чекбоксов без поиска
+// пришлось бы листать. Порядок с сервера не трогаем: там сверху самые ходовые.
+const visibleMarketingTags = computed(() => {
+  const q = marketingTagSearch.value.trim().toLowerCase()
+  if (!q) return marketingTags.value
+  return marketingTags.value.filter(t => t.toLowerCase().includes(q))
+})
 const showDateDropdown = ref(false)
 const showClientDateDropdown = ref(false)
 const csvExporting = ref(false)
@@ -1293,7 +1368,7 @@ const isCurator = computed(() => auth.user?.role === 'curator')
 // единственным пунктом «Тестовые диалоги» (Георгий, 17.08). Доступ всё равно
 // решает сервер: /chat/dialogs пускает только админа и куратора.
 const canSeeRealDialogs = computed(() => !auth.ready || !auth.user || isAdmin.value || isCurator.value)
-const hasActiveFilters = computed(() => filterShowTest.value || !filterShowReal.value || filterStatuses.value.length > 0 || filterDatePreset.value !== 'all' || filterClientId.value.trim() !== '' || filterClientName.value.trim() !== '' || filterClientDatePreset.value !== 'all' || filterAiProviders.value.length > 0 || filterDialogTypeId.value !== null || filterPingFunnelType.value !== null || filterFunnelStage.value !== null || filterLastMessageFrom.value !== '')
+const hasActiveFilters = computed(() => filterShowTest.value || !filterShowReal.value || filterStatuses.value.length > 0 || filterDatePreset.value !== 'all' || filterClientId.value.trim() !== '' || filterClientName.value.trim() !== '' || filterClientDatePreset.value !== 'all' || filterAiProviders.value.length > 0 || filterDialogTypeId.value !== null || filterPingFunnelType.value !== null || filterFunnelStage.value !== null || filterMarketingTags.value.length > 0 || filterLastMessageFrom.value !== '')
 const dialogTypeFilterValue = computed(() => {
   if (filterShowTest.value && filterShowReal.value) return 'all'
   if (filterShowReal.value) return 'real'
@@ -1332,6 +1407,7 @@ function buildDialogParams(offset = 0) {
   if (filterDialogTypeId.value !== null) params.append('dialog_type_ids', filterDialogTypeId.value)
   if (filterPingFunnelType.value !== null) params.append('ping_funnel_type', filterPingFunnelType.value)
   if (filterFunnelStage.value !== null) params.append('funnel_stage', filterFunnelStage.value)
+  for (const t of filterMarketingTags.value) params.append('marketing_tag', t)
   if (filterLastMessageFrom.value) params.append('last_message_from', filterLastMessageFrom.value)
   if (filterClientId.value.trim()) params.append('vk_user_id', filterClientId.value.trim())
   if (filterClientName.value.trim()) params.append('client_name', filterClientName.value.trim())
@@ -1407,6 +1483,14 @@ async function applyFilters() {
   }
 }
 
+// Клик по метке в списке = «покажи всех с этой кампании». Именно так менеджер
+// и ориентируется: увидел метку у горячего лида — смотрит остальных оттуда же.
+function filterByTag(tag) {
+  filterMarketingTags.value = [tag]
+  marketingTagSearch.value = ''
+  applyFilters()
+}
+
 function resetFilters() {
   filterShowTest.value = false
   filterShowReal.value = true
@@ -1423,6 +1507,8 @@ function resetFilters() {
   filterDialogTypeId.value = null
   filterPingFunnelType.value = null
   filterFunnelStage.value = null
+  filterMarketingTags.value = []
+  marketingTagSearch.value = ''
   filterLastMessageFrom.value = ''
   applyFilters()
 }
@@ -1436,6 +1522,7 @@ function buildExportParams() {
   if (filterDialogTypeId.value !== null) params.append('dialog_type_ids', filterDialogTypeId.value)
   if (filterPingFunnelType.value !== null) params.append('ping_funnel_type', filterPingFunnelType.value)
   if (filterFunnelStage.value !== null) params.append('funnel_stage', filterFunnelStage.value)
+  for (const t of filterMarketingTags.value) params.append('marketing_tag', t)
   if (filterLastMessageFrom.value) params.append('last_message_from', filterLastMessageFrom.value)
   if (filterClientId.value.trim()) params.append('vk_user_id', filterClientId.value.trim())
   if (filterClientName.value.trim()) params.append('client_name', filterClientName.value.trim())
@@ -1598,6 +1685,13 @@ async function loadPingFunnelTypes() {
   try {
     const res = await api.get('/chat/ping-funnel-types')
     pingFunnelTypes.value = res.data
+  } catch {}
+}
+
+async function loadMarketingTags() {
+  try {
+    const res = await api.get('/chat/marketing-tags')
+    marketingTags.value = res.data
   } catch {}
 }
 
@@ -2056,6 +2150,7 @@ async function openByVkUserId(vkId) {
   filterDialogTypeId.value = null
   filterPingFunnelType.value = null
   filterFunnelStage.value = null
+  filterMarketingTags.value = []
   filterLastMessageFrom.value = ''
   filterClientName.value = ''
   filterClientId.value = vkId
@@ -2068,7 +2163,7 @@ async function openByVkUserId(vkId) {
 
 onMounted(async () => {
   const vkId = (route.query.vk_user_id || '').toString().trim()
-  await Promise.all([loadDialogTypes(), loadStatuses(), loadPingFunnelTypes()])
+  await Promise.all([loadDialogTypes(), loadStatuses(), loadPingFunnelTypes(), loadMarketingTags()])
   if (vkId) {
     await openByVkUserId(vkId)
   } else {

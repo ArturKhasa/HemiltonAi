@@ -99,6 +99,7 @@ async def _apply_dialog_filters(
     client_name: str | None = None,
     ping_funnel_type: str | None = None,
     funnel_stage: str | None = None,
+    marketing_tag: list[str] | None = None,
     allowed_type_ids: list[int] | None = None,
 ):
     """Apply dialog list filters to a query that has Dialog and Client in scope.
@@ -169,6 +170,23 @@ async def _apply_dialog_filters(
             q = q.where(Dialog.funnel_stage.is_(None))
         else:
             q = q.where(Dialog.funnel_stage == funnel_stage)
+    if marketing_tag:
+        want_no_tag = "__none__" in marketing_tag
+        tags = [t for t in marketing_tag if t != "__none__"]
+        conds = []
+        if tags:
+            # Метка у клиента ровно одна: её ставит вебхук из ref-ссылки
+            # (app.vk.webhook), списком поле сделано на будущее. Берём нулевой
+            # элемент, а не containment: `->> 0` есть и в JSONB на проде, и в
+            # JSON на SQLite в тестах, а `@>` — только в Postgres.
+            conds.append(Client.marketing_tags[0].as_string().in_(tags))
+        if want_no_tag:
+            # Метки нет вовсе — клиент пришёл из поиска по группе, а не с рекламы.
+            # Тем же выражением, что и выше: `->> 0` даёт NULL и когда колонка
+            # NULL, и когда массив пустой — оба случая в базе встречаются.
+            conds.append(Client.marketing_tags[0].as_string().is_(None))
+        if conds:
+            q = q.where(or_(*conds))
     if last_message_from:
         last_role_subq = (
             select(Message.role)
@@ -209,6 +227,32 @@ async def list_ping_funnel_types(
     return result.scalars().all()
 
 
+@router.get("/marketing-tags")
+async def list_marketing_tags(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "curator")),
+):
+    """Метки рекламных ссылок, встреченные у клиентов, — для фильтра списка.
+
+    Сортировка по числу диалогов, а не по алфавиту: сверху оказывается то, чем
+    отдел продаж пользуется каждый день, а не старая кампания на букву «а».
+    Считаем только по диалогам доступных пользователю направлений — иначе
+    куратор увидел бы в фильтре метки чужого направления.
+    """
+    tag = Client.marketing_tags[0].as_string().label("tag")
+    q = (
+        select(tag)
+        .select_from(Dialog)
+        .join(Client, Dialog.client_id == Client.id)
+        .where(tag.is_not(None))
+    )
+    allowed = await get_allowed_type_ids(current_user, db)
+    if allowed is not None:
+        q = q.where(Dialog.type_id.in_(allowed))
+    q = q.group_by(tag).order_by(func.count().desc(), tag)
+    return list((await db.execute(q)).scalars().all())
+
+
 @router.get("/dialogs/count")
 async def count_chat_dialogs(
     db: AsyncSession = Depends(get_db),
@@ -226,6 +270,7 @@ async def count_chat_dialogs(
     last_message_from: str | None = Query(default=None),
     ping_funnel_type: str | None = Query(default=None),
     funnel_stage: str | None = Query(default=None),
+    marketing_tag: list[str] = Query(default=[]),
 ):
     """Count dialogs matching the given filters."""
     q = select(func.count()).select_from(Dialog).join(Client, Dialog.client_id == Client.id)
@@ -237,6 +282,7 @@ async def count_chat_dialogs(
         client_date_from=client_date_from,
         client_date_to=client_date_to, last_message_from=last_message_from,
         ping_funnel_type=ping_funnel_type, funnel_stage=funnel_stage,
+        marketing_tag=marketing_tag,
         allowed_type_ids=await get_allowed_type_ids(current_user, db),
     )
     total = (await db.execute(q)).scalar_one()
@@ -260,6 +306,7 @@ async def list_chat_dialogs(
     last_message_from: str | None = Query(default=None),
     ping_funnel_type: str | None = Query(default=None),
     funnel_stage: str | None = Query(default=None),
+    marketing_tag: list[str] = Query(default=[]),
     limit: int = 50,
     offset: int = 0,
 ):
@@ -278,6 +325,7 @@ async def list_chat_dialogs(
         client_date_from=client_date_from,
         client_date_to=client_date_to, last_message_from=last_message_from,
         ping_funnel_type=ping_funnel_type, funnel_stage=funnel_stage,
+        marketing_tag=marketing_tag,
         allowed_type_ids=await get_allowed_type_ids(current_user, db),
     )
     q = q.limit(limit).offset(offset)
@@ -320,8 +368,14 @@ async def export_chat_dialogs_csv(
     last_message_from: str | None = Query(default=None),
     ping_funnel_type: str | None = Query(default=None),
     funnel_stage: str | None = Query(default=None),
+    marketing_tag: list[str] = Query(default=[]),
 ):
-    """Export filtered dialogs as CSV."""
+    """Export filtered dialogs as CSV.
+
+    Фильтры берём из общей `_apply_dialog_filters`: раньше выгрузка повторяла их
+    копипастой и уже разъехалась со списком (в копии не было разделения
+    ai_reply/ai_ping), а каждый новый фильтр приходилось дописывать дважды.
+    """
     q = (
         select(Dialog, Client, DialogStatusConfig.name.label("status_name"), Message)
         .join(Client, Dialog.client_id == Client.id)
@@ -329,81 +383,17 @@ async def export_chat_dialogs_csv(
         .outerjoin(Message, Message.dialog_id == Dialog.id)
         .order_by(Dialog.last_message_at.desc().nullslast(), Dialog.created_at.desc(), Message.created_at.asc())
     )
-    allowed = await get_allowed_type_ids(current_user, db)
-    if allowed is not None:
-        q = q.where(Dialog.type_id.in_(allowed))
-    if is_test is not None:
-        q = q.where(Dialog.is_test == is_test)
-    if status_filter:
-        want_no_status = "__none__" in status_filter
-        names = [s for s in status_filter if s != "__none__"]
-        conds = []
-        if names:
-            status_result = await db.execute(
-                select(DialogStatusConfig.id).where(DialogStatusConfig.name.in_(names))
-            )
-            status_ids = status_result.scalars().all()
-            if status_ids:
-                conds.append(Dialog.current_status_id.in_(status_ids))
-        if want_no_status:
-            conds.append(Dialog.current_status_id.is_(None))
-        if conds:
-            q = q.where(or_(*conds))
-    if ai_provider_filter:
-        q = q.where(Dialog.ai_provider.in_(ai_provider_filter))
-    if dialog_type_ids:
-        q = q.where(Dialog.type_id.in_(dialog_type_ids))
-    if date_from is not None:
-        effective_date = func.coalesce(Dialog.last_message_at, Dialog.created_at)
-        q = q.where(effective_date >= to_naive_msk(date_from))
-    if date_to is not None:
-        effective_date = func.coalesce(Dialog.last_message_at, Dialog.created_at)
-        q = q.where(effective_date <= to_naive_msk(date_to))
-    if vk_user_id:
-        user_ids = [int(c.strip()) for c in vk_user_id.split(";") if c.strip().isdigit()]
-        if user_ids:
-            q = q.where(Client.vk_user_id.in_(user_ids))
-    if client_name:
-        for word in client_name.split():
-            pattern = f"%{word}%"
-            q = q.where(or_(
-                Client.name.ilike(pattern), Client.last_name.ilike(pattern),
-            ))
-    if client_date_from is not None:
-        q = q.where(Client.created_at >= to_naive_msk(client_date_from))
-    if client_date_to is not None:
-        q = q.where(Client.created_at <= to_naive_msk(client_date_to))
-    if ping_funnel_type:
-        if ping_funnel_type == "__none__":
-            no_ping_subq = select(DialogPingState.id).where(
-                DialogPingState.dialog_id == Dialog.id
-            )
-            q = q.where(~no_ping_subq.exists())
-        else:
-            ping_subq = select(DialogPingState.id).where(
-                DialogPingState.dialog_id == Dialog.id,
-                DialogPingState.funnel_type == ping_funnel_type,
-            )
-            q = q.where(ping_subq.exists())
-    if funnel_stage:
-        if funnel_stage == "__none__":
-            q = q.where(Dialog.funnel_stage.is_(None))
-        else:
-            q = q.where(Dialog.funnel_stage == funnel_stage)
-    if last_message_from:
-        try:
-            role_enum = MessageRole(last_message_from)
-        except ValueError:
-            role_enum = None
-        if role_enum is not None:
-            last_role_subq = (
-                select(Message.role)
-                .where(Message.dialog_id == Dialog.id)
-                .order_by(Message.created_at.desc(), Message.id.desc())
-                .limit(1)
-                .scalar_subquery()
-            )
-            q = q.where(last_role_subq == role_enum)
+    q = await _apply_dialog_filters(
+        q, db,
+        is_test=is_test, status_filter=status_filter, ai_provider_filter=ai_provider_filter,
+        dialog_type_ids=dialog_type_ids, date_from=date_from, date_to=date_to,
+        vk_user_id=vk_user_id, client_name=client_name,
+        client_date_from=client_date_from,
+        client_date_to=client_date_to, last_message_from=last_message_from,
+        ping_funnel_type=ping_funnel_type, funnel_stage=funnel_stage,
+        marketing_tag=marketing_tag,
+        allowed_type_ids=await get_allowed_type_ids(current_user, db),
+    )
 
     result = await db.execute(q)
     rows = result.all()
@@ -411,7 +401,7 @@ async def export_chat_dialogs_csv(
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "dialog_id", "vk_user_id", "client_name", "client_last_name", "type_id", "current_status",
+        "dialog_id", "vk_user_id", "client_name", "client_last_name", "marketing_tag", "type_id", "current_status",
         "dialog_created_at", "last_message_at", "ai_provider", "is_test",
         "message_id", "message_role", "message_text", "message_created_at",
     ])
@@ -421,6 +411,7 @@ async def export_chat_dialogs_csv(
             client.vk_user_id,
             client.name,
             client.last_name,
+            (client.marketing_tags or [""])[0],
             dialog.type_id,
             status_name or "",
             dialog.created_at.isoformat(),
@@ -459,6 +450,7 @@ async def export_chat_client_ids(
     last_message_from: str | None = Query(default=None),
     ping_funnel_type: str | None = Query(default=None),
     funnel_stage: str | None = Query(default=None),
+    marketing_tag: list[str] = Query(default=[]),
 ):
     """Export distinct vk_user_ids of filtered dialogs, joined by ';'."""
     q = (
@@ -475,6 +467,7 @@ async def export_chat_client_ids(
         client_date_from=client_date_from,
         client_date_to=client_date_to, last_message_from=last_message_from,
         ping_funnel_type=ping_funnel_type, funnel_stage=funnel_stage,
+        marketing_tag=marketing_tag,
         allowed_type_ids=await get_allowed_type_ids(current_user, db),
     )
     result = await db.execute(q)
