@@ -88,11 +88,16 @@ class MaxSentMessage:
     """Результат отправки. Форму держим совместимой с app.vk.sender.SentMessage:
     отметки о доставке ставит общий код (app.vk.outgoing.mark_delivered).
 
-    `random_ids` у MAX всегда пуст: собственное эхо в вебхуке к нам не приходит
-    (в диалог бота с пользователем больше никто писать не может), и отличать
-    свои сообщения от чужих не от чего.
+    `random_ids` у MAX всегда пуст: своего эха вебхуком MAX не присылает, и
+    сверять их не с чем.
+
+    `message_ids` — mid ВСЕХ отправленных кусков, `message_id` — последний из
+    них (он же уходит в `external_message_id`). Список нужен, чтобы в истории
+    MAX узнать свои же куски длинного текста: чужие реплики бота мы отличаем
+    именно по тому, что их mid нам неизвестен (app.max.manager_watch).
     """
     message_id: str | None = None
+    message_ids: list[str] = field(default_factory=list)
     random_ids: list[int] = field(default_factory=list)
 
 
@@ -192,6 +197,7 @@ async def send_message(
             mid = ((data.get("message") or {}).get("body") or {}).get("mid")
             if mid:
                 sent.message_id = str(mid)
+                sent.message_ids.append(str(mid))
     return sent
 
 

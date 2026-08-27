@@ -139,6 +139,15 @@ async def send_price_to_silent() -> None:
             try:
                 if not await _greeting_unanswered(db, dialog, now):
                     continue
+                # Молчун мог замолчать потому, что с ним уже разговаривает
+                # менеджер: в MAX его реплики видно только в истории диалога.
+                from app.max.manager_watch import pause_if_manager_replied
+
+                if await pause_if_manager_replied(dialog.id):
+                    logger.info(
+                        "цена молчуну: диалог ведёт менеджер в MAX | dialog=%s", dialog.id,
+                    )
+                    continue
                 script = await find_price_script(db, dialog.type_id)
                 if script is None:
                     logger.warning(

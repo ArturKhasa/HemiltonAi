@@ -413,6 +413,13 @@ async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMe
     )
     ctx = f"{platform_of(group)}={group.group_id}/{msg.vk_user_id}"
 
+    # Клиент пишет — значит канал живой, чем бы ни был вызван прошлый отказ.
+    # Снимать отметку обязательно: она запрещает отправку насовсем, а ставится
+    # по одному отказу мессенджера, и ошибочная переживала бы диалог целиком.
+    if dialog.vk_blocked:
+        dialog.vk_blocked = False
+        logger.info("[%s] клиент снова пишет — отметка «отправка запрещена» снята", ctx)
+
     # Дедуп: ВК ретраит события. Сообщение с завершённым AIRun — пропускаем;
     # сообщение без ответа (воркер убит посреди run_ai) — переобрабатываем.
     client_message: Message | None = None
@@ -542,6 +549,21 @@ async def deliver_parts(
     from app.vk.outgoing import mark_delivered, mark_failed
     sent = 0
     is_max = platform_of(group) == "max"
+
+    # В MAX реплики менеджера, отправленные мимо панели, приходят к нам только
+    # чтением истории — событий о них MAX не шлёт. Спрашиваем перед отправкой:
+    # между проходами наблюдателя ход ИИ успевает перебить живого менеджера
+    # (диалог 79820: менеджер вёл клиента с 08:59 до 09:26, в 09:26:42 ИИ
+    # поздоровался заново).
+    if is_max:
+        from app.max.manager_watch import pause_if_manager_replied
+
+        if await pause_if_manager_replied(dialog.id):
+            logger.info("[%s] диалог ведёт менеджер в MAX — ответ не отправляем", ctx)
+            for part in parts:
+                mark_failed(part.message)
+            await db.commit()
+            return 0
 
     def _fail_from(idx: int) -> None:
         """Пометить недоставленными сбойную часть и весь хвост за ней: до них

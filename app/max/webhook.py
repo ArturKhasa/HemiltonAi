@@ -7,9 +7,13 @@
 
 Чего у MAX нет по сравнению с ВК:
 
-- отдельного события ``message_reply``. Исходящие менеджера приходят как
-  ``message_created`` от бота, поэтому их распознаём здесь по отправителю и
-  ставим AI на паузу;
+- эха исходящих. ``message_reply`` в MAX нет вовсе, а ``message_created``
+  приходит только о ВХОДЯЩИХ: о сообщении, отправленном от имени бота, MAX не
+  рассказывает никому. А отправляет их не только эта панель — к боту подключён
+  Wazzup, из которого пишут менеджеры ОП. Ловит такие реплики отдельный
+  наблюдатель, читающий историю диалога сам (app.max.manager_watch);
+  ``handle_bot_message`` ниже остаётся на случай, если MAX всё же начнёт эти
+  события присылать;
 - переписки, которая шла до подключения: у бота её не бывает.
 
 Чего нет у ВК: старта диалога как отдельного события. В MAX человек нажимает
@@ -284,9 +288,12 @@ async def pause_if_first_message_has_manager_reply(
 async def handle_bot_message(db: AsyncSession, bot: VkGroup, payload: dict) -> bool:
     """Исходящее MAX-сообщение бота: своё пропускаем, менеджерское ставит на паузу.
 
-    Сотрудники могут писать от имени бота не только из нашей панели. Когда MAX
-    присылает такое исходящее, создаём карточку получателя заранее: даже его
-    первое следующее сообщение уже не сможет запустить AI.
+    На боевом трафике этот путь не срабатывает ни разу: MAX не присылает
+    событий о сообщениях, отправленных от имени бота, чьей бы рукой они ни были
+    отправлены (за трое суток — ни одной записи с ролью curator при десятках
+    таких реплик в истории самого MAX). Ответы менеджера мимо панели ловит
+    app.max.manager_watch, читая историю диалога. Обработчик оставлен как есть:
+    начнёт MAX присылать эти события — перехват увидим на секунду раньше.
     """
     if not _is_our_bot_message(bot, payload) or _is_group_message(payload):
         return False
@@ -383,6 +390,11 @@ async def handle_start(
     client_tag = (client.marketing_tags or [None])[0]
     ai_allowed = await RefTagService(db).ai_allowed(client_tag, type_id)
     dialog = await _get_or_create_dialog(db, client, type_id, ai_allowed=ai_allowed)
+    # Клиент снова нажал «Начать» — писать ему точно можно, что бы ни отвечал
+    # MAX в прошлый раз.
+    if dialog.vk_blocked:
+        dialog.vk_blocked = False
+        logger.info("[%s] клиент вернулся — отметка «отправка запрещена» снята", ctx)
     await db.commit()
     logger.info("[%s] пользователь начал диалог с ботом | payload=%r", ctx, ref)
 
@@ -402,7 +414,21 @@ async def handle_start(
 
 
 async def handle_bot_stopped(db: AsyncSession, bot: VkGroup, payload: dict) -> None:
-    """Пользователь остановил бота или удалил диалог — писать ему больше нельзя."""
+    """Пользователь остановил бота: пинги гасим, отправку заранее не запрещаем.
+
+    Отметку `vk_blocked` ставит только фактический отказ MAX на отправку (см.
+    app.max.sender.send_to_dialog) — как это всегда работало в ВК. Раньше её
+    ставило само событие, и 27.08 в панели «в блоке» оказались 162 MAX-диалога
+    из 361. Проверка по истории MAX: в 17 из 60 таких диалогов ПОСЛЕ отметки
+    боту приходили новые исходящие (до шестнадцати штук) — то есть писать этим
+    клиентам можно было всё это время, а мы молчали навсегда: снять отметку
+    было нечем (ОП, 27.08: «через панель отображается что клиент заблокировал в
+    вк, пошла проверять через ваззап, все ок, мы не в блоке у клиента»).
+
+    Настоящий стоп-бот виден и без события: первая же отправка вернёт отказ, и
+    диалог пометится ровно тогда, когда это правда. Пинги при этом гасим сразу
+    — гонять воронку туда, где бот остановлен, незачем.
+    """
     from app.ping.worker import stop_pings
 
     user_id = payload.get("user_id") or (payload.get("user") or {}).get("user_id")
@@ -419,13 +445,54 @@ async def handle_bot_stopped(db: AsyncSession, bot: VkGroup, payload: dict) -> N
         await db.execute(select(Dialog).where(Dialog.client_id == client.id))
     ).scalars().all()
     for dialog in dialogs:
-        dialog.vk_blocked = True
         await stop_pings(db, dialog.id, "пользователь остановил бота в MAX")
     await db.commit()
     logger.info(
-        "[max=%s/%s] бот остановлен пользователем — диалоги помечены заблокированными",
+        "[max=%s/%s] бот остановлен пользователем — пинги погашены",
         bot.group_id, user_id,
     )
+
+
+async def handle_dialog_removed(db: AsyncSession, bot: VkGroup, payload: dict) -> None:
+    """Пользователь удалил переписку с ботом. Это не запрет писать.
+
+    Удалённый диалог в MAX возвращается от первого же сообщения бота — в
+    боевой истории такие переписки продолжались и после удаления. Поэтому
+    здесь только запись в лог: и пинги, и ход ИИ работают дальше, а если
+    отправка всё же окажется запрещена, её отказ пометит диалог сам.
+    """
+    user_id = payload.get("user_id") or (payload.get("user") or {}).get("user_id")
+    logger.info("[max=%s/%s] клиент удалил переписку — продолжаем как обычно", bot.group_id, user_id)
+
+
+async def _remember_dialog_chat(db: AsyncSession, bot: VkGroup, payload: dict) -> None:
+    """Запомнить chat_id личного диалога — без него не прочитать его историю.
+
+    В событии он приходит сам собой, а получить его иначе нельзя: истории по
+    `user_id` MAX не отдаёт, а список чатов бота для личных диалогов пуст.
+    Диалог, где клиент только нажал «Начать», без этого остался бы вне
+    наблюдения за ответами менеджера (app.max.manager_watch) — а это ровно тот
+    случай, с которого ОП и начал: карточка есть, переписку ведёт менеджер, у
+    нас по ней ни одного сообщения.
+    """
+    from app.max.manager_watch import remember_chat_id
+
+    raw = _message(payload)
+    recipient = raw.get("recipient") or {}
+    if _is_group_message(payload):
+        return
+    user_id = (
+        recipient.get("user_id") if _is_our_bot_message(bot, payload)
+        else (raw.get("sender") or {}).get("user_id")
+    )
+    if user_id is None:
+        return
+    try:
+        await remember_chat_id(db, bot, int(user_id), recipient.get("chat_id"))
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.warning("[max=%s/%s] chat_id не сохранён: %s", bot.group_id, user_id, exc)
 
 
 async def process_event(bot_pk: int, payload: dict) -> None:
@@ -447,11 +514,13 @@ async def process_event(bot_pk: int, payload: dict) -> None:
                     logger.info("max group message skipped — AI only works in personal dialogs")
                     return
                 if await handle_bot_message(db, bot, payload):
+                    await _remember_dialog_chat(db, bot, payload)
                     return
                 # «/start» — не сообщение клиента, а нажатая кнопка «Начать».
                 start = start_command(payload)
                 if start:
                     await handle_start(db, bot, **start)
+                    await _remember_dialog_chat(db, bot, payload)
                     return
                 msg = parse_message_created(payload)
                 if msg is None:
@@ -459,6 +528,8 @@ async def process_event(bot_pk: int, payload: dict) -> None:
                     return
                 await pause_if_first_message_has_manager_reply(db, bot, payload, msg)
                 await handle_message_new(db, bot, msg)
+                # После хода, а не до: карточку клиента заводит он же.
+                await _remember_dialog_chat(db, bot, payload)
             elif update_type == "bot_started":
                 user = payload.get("user") or {}
                 if user.get("user_id") is None:
@@ -469,8 +540,10 @@ async def process_event(bot_pk: int, payload: dict) -> None:
                     first_name=(user.get("first_name") or "").strip() or None,
                     last_name=(user.get("last_name") or "").strip() or None,
                 )
-            elif update_type in ("bot_stopped", "dialog_removed"):
+            elif update_type == "bot_stopped":
                 await handle_bot_stopped(db, bot, payload)
+            elif update_type == "dialog_removed":
+                await handle_dialog_removed(db, bot, payload)
     except Exception:
         logger.exception("max event %s processing failed | bot_pk=%s", update_type, bot_pk)
 

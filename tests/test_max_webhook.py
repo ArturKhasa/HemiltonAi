@@ -1,15 +1,17 @@
 """Вебхук MAX: разбор события, общий путь обработки, «Начать» и остановка бота."""
+import importlib
+
 import pytest
 from sqlalchemy import select
 
 from app.ai.runner import ReplyPart
 from app.ai.schemas import AgentOutput
 from app.db.models import (
-    AIRun, Client, Dialog, DialogType, Message, MessageRole, Script, VkGroup,
+    AIRun, Client, Dialog, DialogPingState, DialogType, Message, MessageRole, Script, VkGroup,
 )
 from app.max.client import MaxSentMessage
 from app.max.webhook import (
-    handle_bot_message, handle_bot_stopped,
+    handle_bot_message, handle_bot_stopped, handle_dialog_removed,
     handle_start,
     pause_if_first_message_has_manager_reply,
     parse_message_created,
@@ -371,12 +373,114 @@ class _FakeSessionCtx:
         return False
 
 
-async def test_bot_stopped_marks_dialog_blocked(db, max_bot, fake_ai, fake_sender):
+async def _dialog_of(db, user_id=555):
+    client = await db.scalar(select(Client).where(Client.vk_user_id == user_id))
+    dialog = await db.scalar(select(Dialog).where(Dialog.client_id == client.id))
+    await db.refresh(dialog)
+    return dialog
+
+
+async def test_bot_stopped_stops_pings_but_does_not_forbid_sending(
+    db, max_bot, fake_ai, fake_sender,
+):
+    """Стоп-бот гасит воронку; запрет отправки ставит только отказ самого MAX.
+
+    Событием отметку не ставим: 27.08 так «в блоке» оказались 162 MAX-диалога
+    из 361, притом что клиентам всё это время писали.
+    """
     await handle_message_new(db, max_bot, parse_message_created(_message_created()))
+    dialog = await _dialog_of(db)
+    db.add(DialogPingState(dialog_id=dialog.id, funnel_type="knows_price", current_step=1))
+    await db.commit()
+
     await handle_bot_stopped(db, max_bot, {
         "update_type": "bot_stopped", "chat_id": 900, "user_id": 555,
     })
-    client = await db.scalar(select(Client).where(Client.vk_user_id == 555))
-    dialog = await db.scalar(select(Dialog).where(Dialog.client_id == client.id))
-    await db.refresh(dialog)
-    assert dialog.vk_blocked is True
+
+    dialog = await _dialog_of(db)
+    assert dialog.vk_blocked is False
+    state = await db.scalar(
+        select(DialogPingState).where(DialogPingState.dialog_id == dialog.id)
+    )
+    assert state.is_completed is True
+
+
+async def test_dialog_removed_changes_nothing(db, max_bot, fake_ai, fake_sender):
+    """Удалённая переписка возвращается от первого же сообщения бота."""
+    await handle_message_new(db, max_bot, parse_message_created(_message_created()))
+    dialog = await _dialog_of(db)
+    db.add(DialogPingState(dialog_id=dialog.id, funnel_type="knows_price", current_step=1))
+    await db.commit()
+
+    await handle_dialog_removed(db, max_bot, {
+        "update_type": "dialog_removed", "chat_id": 900, "user_id": 555,
+    })
+
+    dialog = await _dialog_of(db)
+    assert dialog.vk_blocked is False
+    state = await db.scalar(
+        select(DialogPingState).where(DialogPingState.dialog_id == dialog.id)
+    )
+    assert state.is_completed is False
+
+
+async def test_incoming_message_clears_stale_block(db, max_bot, fake_ai, fake_sender):
+    """Клиент пишет — значит канал живой, старая отметка снимается."""
+    await handle_message_new(db, max_bot, parse_message_created(_message_created()))
+    dialog = await _dialog_of(db)
+    dialog.vk_blocked = True
+    await db.commit()
+
+    await handle_message_new(
+        db, max_bot, parse_message_created(_message_created(mid="mid-2", text="Ещё вопрос")),
+    )
+
+    dialog = await _dialog_of(db)
+    assert dialog.vk_blocked is False
+
+
+async def test_start_again_clears_stale_block(db, max_bot, fake_sender, greeting_script):
+    """Клиент вернулся по кнопке «Начать» — писать ему можно."""
+    await handle_start(db, max_bot, 555)
+    dialog = await _dialog_of(db)
+    dialog.vk_blocked = True
+    await db.commit()
+
+    await handle_start(db, max_bot, 555)
+
+    dialog = await _dialog_of(db)
+    assert dialog.vk_blocked is False
+
+
+async def test_clear_max_blocks_command_clears_only_max(db, max_bot, fake_ai, fake_sender):
+    """Разовая уборка накопленных отметок: ВК она не трогает."""
+    from app.commands.clear_max_blocks import run
+
+    await handle_message_new(db, max_bot, parse_message_created(_message_created()))
+    max_dialog = await _dialog_of(db)
+    max_dialog.vk_blocked = True
+
+    vk_group = VkGroup(
+        platform="vk", group_id=44440184, name="Hemilton MAIN", access_token="t",
+        dialog_type_id=max_bot.dialog_type_id,
+    )
+    db.add(vk_group)
+    await db.flush()
+    vk_client = Client(vk_user_id=999, vk_group_id=vk_group.id, name="Пётр")
+    db.add(vk_client)
+    await db.flush()
+    vk_dialog = Dialog(client_id=vk_client.id, type_id=max_bot.dialog_type_id, vk_blocked=True)
+    db.add(vk_dialog)
+    await db.commit()
+
+    import app.commands.clear_max_blocks as command
+    command.AsyncSessionLocal = lambda: _FakeSessionCtx(db)
+    try:
+        assert await run(apply=True) == 1
+    finally:
+        importlib.reload(command)
+
+    await db.refresh(max_dialog)
+    await db.refresh(vk_dialog)
+    assert max_dialog.vk_blocked is False
+    assert vk_dialog.vk_blocked is True

@@ -152,7 +152,7 @@
               >{{ leadTitle(activeDialog) }}</a>
               <template v-else>{{ leadTitle(activeDialog) }}</template>
             </p>
-            <p v-if="fullName(activeDialog)" class="text-xs text-gray-400">VK ID: {{ activeDialog?.vk_user_id ?? '—' }}</p>
+            <p v-if="fullName(activeDialog)" class="text-xs text-gray-400">{{ idLabel }}: {{ activeDialog?.vk_user_id ?? '—' }}</p>
           </div>
           <div class="flex items-center gap-2 ml-4">
             <span class="text-xs text-gray-500">Статус:</span>
@@ -191,7 +191,7 @@
               :disabled="aiPauseLoading"
               class="text-xs px-2 py-1 rounded-lg border border-gray-200 text-gray-400 hover:text-gray-600 hover:bg-gray-50 disabled:opacity-50"
             >Пауза ИИ</button>
-            <span v-if="vkBlocked" class="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200 font-medium">ВК заблокировал отправку</span>
+            <span v-if="vkBlocked" class="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200 font-medium">{{ blockedLabel }}</span>
           </div>
           <div class="ml-auto flex items-center gap-2">
             <div v-if="activeDialog?.marketing_tags?.length" class="flex flex-wrap items-center gap-1">
@@ -1717,6 +1717,7 @@ async function openDialog(id) {
   const dialog = dialogs.value.find(d => d.id === id)
   aiPaused.value = dialog?.ai_paused ?? false
   vkBlocked.value = false
+  dialogPlatform.value = 'vk'
   const res = await api.get(`/chat/${id}/history`)
   if (seq !== _openSeq) return  // за время запроса открыли другой чат
   messages.value = res.data
@@ -1727,12 +1728,22 @@ async function openDialog(id) {
     pingState.value = dRes.data.ping_state
     aiPaused.value = dRes.data.ai_paused ?? false
     vkBlocked.value = dRes.data.vk_blocked ?? false
+    dialogPlatform.value = dRes.data.platform || 'vk'
     paymentConfirmed.value = Boolean(dRes.data.payment_confirmed_at)
   } catch {}
 }
 
 const aiPaused = ref(false)
 const vkBlocked = ref(false)
+// Мессенджер открытого диалога: обе надписи ниже были про ВК, и MAX-диалог
+// сообщал «ВК заблокировал отправку» о клиенте, которого в ВК нет.
+const dialogPlatform = ref('vk')
+const idLabel = computed(() => (dialogPlatform.value === 'max' ? 'MAX ID' : 'VK ID'))
+const blockedLabel = computed(() => (
+  dialogPlatform.value === 'max'
+    ? 'MAX не принимает отправку'
+    : 'ВК заблокировал отправку'
+))
 const aiPauseLoading = ref(false)
 
 // Пауза ставится автоматически, когда живой оператор отвечает из ВК; здесь куратор снимает/ставит её вручную.

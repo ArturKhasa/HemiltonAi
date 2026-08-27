@@ -73,6 +73,15 @@ class Settings(BaseSettings):
     # Потолок для загрузки из админки: фото с телефона бывает и на 8 МБ.
     MEDIA_MAX_UPLOAD_MB: int = 20
 
+    # Ответы менеджера в MAX, ушедшие мимо панели. О них не приходит вебхука
+    # (см. app.max.manager_watch), поэтому историю диалога читаем сами: фоновым
+    # проходом и проверкой перед каждой отправкой.
+    MAX_MANAGER_WATCH_ENABLED: bool = True
+    MAX_MANAGER_WATCH_INTERVAL_SECONDS: int = 60
+    # Насколько свежие диалоги проверяет фоновый проход. Переписка старше суток
+    # менеджеру уже не принадлежит, но запас берём с избытком.
+    MAX_MANAGER_WATCH_WINDOW_HOURS: int = 72
+
     PING_INTERVAL_SECONDS: int = 60
     PING_ENABLED: bool = True
     # Max due states processed per due-send pass. Bounds pass duration (each state is

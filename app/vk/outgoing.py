@@ -37,6 +37,11 @@ DELIVERED = "delivered"
 DELIVERY_FAILED = "delivery_failed"
 # Ключ метаданных: random_id всех частей, которыми ушёл этот текст.
 RANDOM_IDS = "vk_random_ids"
+# Ключ метаданных: mid ВСЕХ сообщений MAX, которыми ушёл этот текст. В
+# external_message_id помещается только одно значение, а длинный текст MAX
+# режет на куски по 4000 символов — и куски, о которых мы не помним, выглядят
+# в истории чужими (см. app.max.manager_watch).
+MAX_MIDS = "max_mids"
 
 # Насколько назад ищем свой random_id. Эхо приходит секундами позже отправки;
 # час — запас на ретраи ВК, при этом выборка остаётся короткой.
@@ -60,6 +65,8 @@ def mark_delivered(message: Message, sent) -> None:
     fields = {DELIVERED: True, DELIVERY_FAILED: None}
     if getattr(sent, "random_ids", None):
         fields[RANDOM_IDS] = list(sent.random_ids)
+    if getattr(sent, "message_ids", None):
+        fields[MAX_MIDS] = [str(mid) for mid in sent.message_ids]
     _patch(message, **fields)
     vk_id = getattr(sent, "message_id", None)
     if vk_id and not message.external_message_id:

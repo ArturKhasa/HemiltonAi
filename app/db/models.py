@@ -127,6 +127,11 @@ class Client(Base):
     source = Column(String(255), nullable=True)
     # Локальные маркетинговые теги клиента. Variant: в тестах на SQLite JSONB не рендерится.
     marketing_tags = Column(JSONB().with_variant(JSON(), "sqlite"), nullable=True)
+    # MAX: идентификатор чата бота с этим клиентом. Историю переписки MAX
+    # отдаёт только по нему (по user_id — отказ, списка личных чатов у бота
+    # нет), а читать её приходится: об исходящих бота, отправленных из другого
+    # интерфейса, вебхук не приходит вовсе (см. app.max.manager_watch).
+    max_chat_id = Column(BigInteger, nullable=True)
     created_at = Column(DateTime, default=msk_now)
     updated_at = Column(DateTime, default=msk_now, onupdate=msk_now)
     __table_args__ = (UniqueConstraint("vk_group_id", "vk_user_id", name="uq_client_vk_group_user"),)

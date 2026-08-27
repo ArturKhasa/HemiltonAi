@@ -8,7 +8,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
-    Client, Dialog, DialogPingState, DialogStatusConfig, DialogType, Message, MessageRole, PingRule,
+    Client, Dialog, DialogPingState, DialogStatusConfig, DialogType, Message, MessageRole,
+    PingRule, VkGroup,
 )
 from app.config import settings
 from app.db.session import AsyncSessionLocal
@@ -376,6 +377,20 @@ async def _process_state(db: AsyncSession, state: DialogPingState, now) -> None:
         )
         await db.commit()
         return
+
+    # MAX не сообщает о том, что менеджер ответил клиенту мимо панели, — об
+    # этом можно узнать только из истории диалога. Спрашиваем до прогона: пинг
+    # поверх живого разговора хуже, чем лишний запрос к MAX.
+    if dialog:
+        from app.max.manager_watch import pause_if_manager_replied
+
+        if await pause_if_manager_replied(dialog.id):
+            state.is_completed = True
+            logger.info(
+                "ping: диалог ведёт менеджер в MAX, stopping | dialog=%s", state.dialog_id,
+            )
+            await db.commit()
+            return
 
     # Клиент уже выбрал способ оплаты или дал контакты — общий пинг тут вредит.
     # Диалог 150: в 09:59 у клиента запросили ФИО, в 10:15 пинг спросил «что для
@@ -783,7 +798,13 @@ async def discover() -> None:
         silence_cutoff = now - timedelta(seconds=_MIN_SILENCE_SECONDS)
         max_age_cutoff = now - timedelta(hours=settings.PING_DISCOVERY_MAX_AGE_HOURS)
         dialogs_result = await db.execute(
-            select(Dialog).where(
+            select(Dialog, VkGroup.platform)
+            # Платформа нужна прямо в выборке: у MAX другое условие «клиент
+            # вообще с нами общался» (см. ниже). outerjoin — тестовый диалог из
+            # панели канала не имеет вовсе, а пинги в нём смотрят.
+            .join(Client, Dialog.client_id == Client.id)
+            .outerjoin(VkGroup, Client.vk_group_id == VkGroup.id)
+            .where(
                 # Тестовые диалоги тоже пингуем: воронку из 17 шагов иначе негде
                 # посмотреть, а уйти клиенту такой пинг не может — отправка в ВК
                 # для них пропускается (см. _deliverable).
@@ -804,7 +825,7 @@ async def discover() -> None:
             .order_by(Dialog.last_message_at.desc())
             .limit(settings.PING_DISCOVERY_LIMIT)
         )
-        for dialog in dialogs_result.scalars().all():
+        for dialog, platform in dialogs_result.all():
             _type_name = type_id_to_name.get(dialog.type_id, "default")
             _token = current_dialog_type.set(_type_name)
             try:
@@ -827,7 +848,19 @@ async def discover() -> None:
                         Message.role == MessageRole.client,
                     )
                 )
-                if client_msg_count < 1:
+                # Молчащего клиента, который нам ни разу не написал, в ВК не
+                # догоняем: диалог там заводит либо его собственное сообщение,
+                # либо рассылка, и пинговать второе — писать незнакомому
+                # человеку. В MAX так нельзя рассуждать: боту там пишут только
+                # после кнопки «Начать», её нажатие и есть согласие, а первым
+                # словом клиента может быть молчание — приветствие и цену он
+                # получает, не написав ни строчки. Такие диалоги оставались без
+                # воронки навсегда: 24 диалога MAX, ни одного с пингами
+                # (замечание ОП от 27.08: «в максе нет пингов по клиентам после
+                # вопроса о доставке, их нужно подключить»). Цену он при этом
+                # уже видел — без неё воронка всё равно не заводится
+                # (app.ping.agent.detect_funnel_with_ai).
+                if client_msg_count < 1 and platform != "max":
                     continue
                 await _init_ping_state(db, dialog, last_msg.created_at, now)
             except Exception as exc:
