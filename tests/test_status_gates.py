@@ -1,49 +1,66 @@
-"""Гейты воронки должны срабатывать на том статусе, который стоит в проде.
+"""Лестница статусов: порядок ступеней и то, что модели ставить нельзя.
 
-Три защиты в runner сравнивались с литералом «Горячий клиент». В проде статус
-называется «Горячий» (id 3), а «Горячий клиент» (id 9) — пустой дубль, который
-никто не ставит. Из-за этого гейты не сработали ни разу: статус ездил назад
-(«Горячий» → «Есть расчет» → «Горячий», диалог 142), «Ждем предоплату» не
-ставился никогда, а раз он не ставился — не переключалась и воронка пингов,
-и клиент, уже выбравший способ оплаты, получал холодный пинг «что для Вас
-важнее, качество или цена?» (диалог 150, 10:15).
+Раньше здесь проверялись три гейта в runner, каждый из которых чинил свой случай
+выдуманного моделью статуса: откат из «горячего» назад (диалог 142), «Ждем
+предоплату» на первом сообщении (клиент 8465497), «Ждем предоплату» без единой
+ссылки на оплату (клиент 8522740). Все три лечили один корень — модель угадывала
+статус вместо того, чтобы его знать.
+
+Корень убран: ступени считает код по фактам (app.sales.status_flow), модели
+остались только боковые статусы. Проверяем то, на что теперь опирается воронка.
 """
 import pytest
 
 from app.sales.status_names import (
+    AWAITING_DATA,
     AWAITING_PREPAY,
+    BLACKLIST,
     CALCULATED,
-    HOT_ALLOWED_NEXT,
+    CLARIFYING,
+    HOT,
     INTERESTED,
-    can_await_prepay,
+    LADDER,
+    MODEL_STATUSES,
+    NEEDS_CURATOR,
+    ORDER_CREATED,
+    SIDE_STATUSES,
     is_hot,
+    is_ladder,
+    rank,
 )
 
 
-class TestHot:
-    @pytest.mark.parametrize("name", ["Горячий", "Горячий клиент"])
-    def test_both_production_spellings_count_as_hot(self, name):
-        assert is_hot(name)
+class TestLadderOrder:
+    def test_rungs_go_in_the_order_the_client_walks_them(self):
+        assert LADDER == (
+            INTERESTED, CALCULATED, CLARIFYING, HOT,
+            AWAITING_DATA, AWAITING_PREPAY, ORDER_CREATED,
+        )
 
-    @pytest.mark.parametrize("name", [INTERESTED, CALCULATED, None, "Спам"])
-    def test_other_statuses_are_not_hot(self, name):
-        assert not is_hot(name)
+    @pytest.mark.parametrize("lower,higher", list(zip(LADDER, LADDER[1:])))
+    def test_each_rung_is_higher_than_the_previous(self, lower, higher):
+        assert rank(lower) < rank(higher)
 
-    def test_hot_may_only_go_to_prepayment(self):
-        assert AWAITING_PREPAY in HOT_ALLOWED_NEXT
-        # Откат назад запрещён — именно он и происходил в диалоге 142.
-        assert CALCULATED not in HOT_ALLOWED_NEXT
-        assert INTERESTED not in HOT_ALLOWED_NEXT
+    def test_old_duplicate_reads_as_the_same_rung(self):
+        """«Горячий клиент» (id 9) — пустой дубль «Горячего» из прода. Считать
+        его нулевой ступенью нельзя: диалог на нём поехал бы назад."""
+        assert rank("Горячий клиент") == rank(HOT)
+        assert is_hot("Горячий клиент") and is_hot(HOT)
+
+    @pytest.mark.parametrize("name", [None, "", "Придуманный статус"])
+    def test_unknown_status_is_below_every_rung(self, name):
+        assert rank(name) < rank(INTERESTED)
+        assert not is_ladder(name)
 
 
-class TestPrepaymentGate:
-    @pytest.mark.parametrize(
-        "name", ["Горячий", "Горячий клиент", CALCULATED, AWAITING_PREPAY, "Заказ оформлен"],
-    )
-    def test_advanced_statuses_may_reach_prepayment(self, name):
-        assert can_await_prepay(name)
+class TestSideStatuses:
+    @pytest.mark.parametrize("name", [NEEDS_CURATOR, "Спам", BLACKLIST])
+    def test_side_statuses_are_not_rungs(self, name):
+        """Из переписки они не выводятся — лестница их не трогает."""
+        assert name in SIDE_STATUSES
+        assert not is_ladder(name)
 
-    @pytest.mark.parametrize("name", [INTERESTED, None, "Нужен куратор"])
-    def test_early_statuses_may_not(self, name):
-        """Иначе предоплату просят на первом же сообщении (клиент 8465497)."""
-        assert not can_await_prepay(name)
+    def test_model_may_only_propose_side_statuses(self):
+        assert MODEL_STATUSES == SIDE_STATUSES
+        for rung in LADDER:
+            assert rung not in MODEL_STATUSES

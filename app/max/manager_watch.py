@@ -281,6 +281,12 @@ async def _record(db: AsyncSession, dialog: Dialog, foreign: list[dict], ctx: st
         dialog.ai_paused = True
         logger.info("[%s] менеджер ответил мимо панели — ИИ на паузе", ctx)
     await stop_pings(db, dialog.id, "менеджер ответил в MAX мимо панели")
+    # Реплики менеджера — такой же источник фактов для статуса, как и наши:
+    # цену и счёт дальше отправляет он (см. app.sales.status_flow).
+    from app.sales.status_flow import sync_status
+
+    await db.flush()
+    await sync_status(db, dialog, ctx=ctx)
     return len(foreign)
 
 

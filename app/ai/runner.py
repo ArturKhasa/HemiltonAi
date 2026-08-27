@@ -41,7 +41,7 @@ from app.ai.feedback import load_active_feedback_rules
 from app.ai.funnel_agent import detect_stage, format_stage_block
 from app.ai.greeting import dialog_has_outgoing, greeting_text, resolve_greeting
 from app.sales.color_palette import with_palette
-from app.sales.non_answer import is_non_answer
+from app.sales.non_answer import is_counter_question, is_non_answer
 from app.sales.offer_terms import (
     data_requested_after_payment,
     hedges_delivery_price,
@@ -56,13 +56,8 @@ from app.sales.product_photo import (
     reply_shows_photo,
 )
 from app.sales.price_placeholder import payment_link_configured, render_price_placeholders
-from app.sales.status_names import (
-    AWAITING_PREPAY,
-    HOT_ALLOWED_NEXT,
-    ORDER_CREATED,
-    can_await_prepay,
-    is_hot,
-)
+from app.sales.prices import prices_in as _prices_in
+from app.sales.status_names import MODEL_STATUSES
 from app.sales.funnel_steps import (
     delivered_outgoing_texts,
     CHECKOUT_PRESENTED_RE,
@@ -97,6 +92,7 @@ from app.sales.funnel_steps import (
     size_just_given,
 )
 from app.sales.order_slots import (
+    ASKS_INSCRIPTION_RE,
     asked_slot,
     collect_slots,
     format_slots_block,
@@ -277,10 +273,6 @@ _OBJECTION_ANSWER_RE = re.compile(
 # вместо «₽». Такие суммы шаблон не видел вовсе, и обе проверки цены ниже
 # считали, что клиенту ничего не называли: за расчётом комплекта на 8 980 ₽
 # спокойно уходило «Получается сумма заказа - 5 990 ₽».
-_MONEY_RE = re.compile(
-    r"\d[\d\s\u00a0.]{2,7}(?=\s*(?:₽|руб|р(?![а-яё])))", re.IGNORECASE
-)
-
 # Ответ без вопроса обрывает диалог: следующего хода не будет, пока клиент не
 # напишет сам, а писать ему больше не на что (диалог 51: «Фиксирую этот вариант и
 # передаю его в работу.» — и тишина на середине воронки). Регламент ОП требует
@@ -444,11 +436,6 @@ def repeats_slot_request(
     if all(asked_slot(t) == slot for t in recent):
         return slot
     return None
-
-
-def _prices_in(text: str) -> set[str]:
-    """Суммы в тексте, нормализованные: «4 990 ₽» и «4990руб» — одно и то же."""
-    return {re.sub(r"\D", "", m) for m in _MONEY_RE.findall(text or "")}
 
 
 # Вопрос-сверка: на него клиент ОБЯЗАН ответить, и до ответа воронку двигать
@@ -812,7 +799,9 @@ async def run_ai(
 
     # Load active statuses and inject them into the prompt
     active_statuses_result = await db.execute(
-        select(DialogStatusConfig).where(DialogStatusConfig.is_active == True).order_by(DialogStatusConfig.id)
+        select(DialogStatusConfig)
+        .where(DialogStatusConfig.is_active == True)
+        .order_by(DialogStatusConfig.sort_order, DialogStatusConfig.id)
     )
     active_statuses = active_statuses_result.scalars().all()
     statuses_block = format_statuses_block(active_statuses)
@@ -1604,43 +1593,22 @@ async def run_ai(
     if output.need_curator and not output.next_status:
         output = output.model_copy(update={"next_status": CURATOR_STATUS_NAME})
 
-    # Жёсткий гейт: из «горячего» единственный разрешённый переход —
-    # «Ждем предоплату». Любой другой next_status сбрасываем (статус не меняется);
-    # need_curator при этом сохраняется — уведомление куратора работает как раньше.
-    if (
-        is_hot(status_before_name)
-        and output.next_status
-        and output.next_status not in HOT_ALLOWED_NEXT
-    ):
-        output = output.model_copy(update={"next_status": None})
-
-    # «Ждем предоплату» = ссылка на оплату/реквизиты уже отправлены.
-    if (
-        output.next_status == AWAITING_PREPAY
-        and not can_await_prepay(status_before_name)
-    ):
+    # Ступени воронки модель больше не ставит: их считает код по фактам
+    # (app.sales.status_flow), и вызывается он после ДОСТАВКИ реплики. Здесь
+    # остаются только боковые статусы — «Нужен куратор», «Спам», «ЧС»: из
+    # переписки они не выводятся, их видит именно модель.
+    #
+    # Раньше на этом месте стояли три гейта, каждый из которых чинил свой случай
+    # выдуманного статуса: откат из «горячего» назад, «Ждем предоплату» на первом
+    # сообщении, «Ждем предоплату» без единой ссылки на оплату (клиент 8522740).
+    # Все три лечили один и тот же корень — модель угадывала статус вместо того,
+    # чтобы его знать. Корня больше нет, гейты не нужны.
+    if output.next_status and output.next_status not in MODEL_STATUSES:
         logger.info(
-            "[%s] blocked next_status 'Ждем предоплату' — status_before=%r too early",
-            ctx, status_before_name,
+            "[%s] next_status %r от модели игнорируется — ступени ставит лестница",
+            ctx, output.next_status,
         )
         output = output.model_copy(update={"next_status": None})
-
-    # Стадия подходящая — но статус требует РЕАЛЬНО отправленной ссылки на оплату.
-    # Модель ставит «Ждем предоплату» после собственного призыва «внесите предоплату»
-    # без всякой ссылки, даже в ответ на отказ клиента (клиент 8522740) — и диалог
-    # улетает в пинг-воронку after_payment. Ссылку ищем в текущем ответе и во всех
-    # уже отправленных сообщениях менеджера/ИИ.
-    if (
-        output.next_status == AWAITING_PREPAY
-        and status_before_name != AWAITING_PREPAY
-        and not PAYMENT_LINK_RE.search(output.reply_text or "")
-    ):
-        if not await dialog_has_payment_link(db, dialog.id):
-            logger.info(
-                "[%s] blocked next_status 'Ждем предоплату' — no payment link sent in dialog",
-                ctx,
-            )
-            output = output.model_copy(update={"next_status": None})
 
     # Вышивка и опт: и то и другое считается индивидуально, цены высокие, ошибка
     # дорого стоит — темы ведёт менеджер, не ИИ. Стоит последним, ПОСЛЕ всех гейтов
@@ -1686,11 +1654,49 @@ async def run_ai(
         })
         dialog.ai_paused = True
 
-    # «Заказ оформлен» = «Клиент внёс первую предоплату». Гейта не было вовсе, и
-    # статус ставился по решению модели — в диалоге 142 в 14:13 при нулевой оплате.
-    if output.next_status == ORDER_CREATED and not payment_confirmed:
-        logger.info("[%s] blocked next_status 'Заказ оформлен' — оплата не подтверждена", ctx)
-        output = output.model_copy(update={"next_status": None})
+    # Вопрос на вопрос: мы спросили, клиент переспросил. Лена, 26.08: «Если
+    # вопросом на вопрос, то лучше адресовать менеджеру, потому что таких
+    # диалогов почти нет, а если есть — это чет неадекватное скорее всего».
+    #
+    # Согласие без вопроса под правило не подпадает: «+» — кодовое слово из
+    # рекламы, и в ответах на вопрос про надпись их 59 из 62 за две недели.
+    # Вопрос ПО ДЕЛУ («а сколько стоит?») — тоже не переспрос: на него уходит
+    # цена (правило Лены от 21.08). По боевой базе правило срабатывает в 22
+    # диалогах из 3 225 за две недели.
+    #
+    # Реплику отпускаем, как и на темах менеджера: клиент должен получить ответ,
+    # а не тишину. Дальше диалог ведёт человек.
+    elif manager_history_texts and (
+        # Вопрос ВМЕСТО имени. Спросили «какое имя или фамилию напишем» — клиент
+        # вместо ответа спросил своё, каким бы вопрос ни был. Так решил заказчик
+        # 27.08, уточняя ответ Лены; правило от 21.08 при этом не ломается:
+        # реплику клиент получает (цену в том числе), а дальше диалог ведёт
+        # человек. По боевой базе — 71 диалог из 3 225 за две недели.
+        (
+            ASKS_INSCRIPTION_RE.search(manager_history_texts[-1])
+            and ("?" in text or is_counter_question(text))
+        )
+        # На любом другом нашем вопросе — только встречный вопрос: голое «?» или
+        # переспрос словами. Вопрос по делу в середине воронки отрабатывают
+        # скрипты, ради него человека не зовут. Ещё 22 диалога за две недели.
+        or ("?" in manager_history_texts[-1] and is_counter_question(text))
+    ):
+        _asked_name = bool(ASKS_INSCRIPTION_RE.search(manager_history_texts[-1]))
+        logger.info(
+            "[%s] %s -> статус %r + пауза ИИ | text=%r",
+            ctx,
+            "вопрос вместо имени" if _asked_name else "вопрос на вопрос",
+            CURATOR_STATUS_NAME, text[:40],
+        )
+        output = output.model_copy(update={
+            "next_status": CURATOR_STATUS_NAME,
+            "need_curator": False,
+            "curator_reason": (
+                "Клиент спросил своё вместо имени для надписи" if _asked_name
+                else "Клиент ответил на вопрос вопросом"
+            ),
+        })
+        dialog.ai_paused = True
 
     if output.next_status:
         matching = next((s for s in active_statuses if s.name == output.next_status), None)
@@ -1701,32 +1707,9 @@ async def run_ai(
                     ctx, status_before_name, output.next_status,
                 )
                 dialog.current_status_id = matching.id
-                # Статус меняется только локально — внешней системы статусов больше нет.
-                if output.next_status == AWAITING_PREPAY:
-                    # Trust the model's «Ждем предоплату» only when the dialog actually
-                    # reached the price stage. With an early client photo the FunnelAgent
-                    # can jump to contacts and the model asks for prepayment on the FIRST
-                    # message (client 8465497) — forcing the after_payment ping funnel
-                    # then nags a client who never saw a price.
-                    if can_await_prepay(status_before_name):
-                        from app.ping.worker import force_ping_funnel
-                        from app.utils.time import msk_now
-                        await force_ping_funnel(db, dialog, "after_payment", msk_now())
-                    else:
-                        logger.info(
-                            "[%s] skip force after_payment — status_before=%r too early, funnel left to detect_funnel_with_ai",
-                            ctx, status_before_name,
-                        )
-                elif output.next_status == ORDER_CREATED:
-                    from app.db.models import DialogPingState
-                    _ps_res = await db.execute(select(DialogPingState).where(DialogPingState.dialog_id == dialog.id))
-                    _ps = _ps_res.scalar_one_or_none()
-                    if _ps:
-                        _ps.is_completed = True
-                        logger.info("[%s] ping stopped — order placed", ctx)
         else:
             logger.warning(
-                "[%s] unknown next_status from AI: %r", ctx, output.next_status
+                "[%s] боковой статус %r не заведён в базе", ctx, output.next_status
             )
 
     # Эскалация снимает машину с диалога. Раньше ответ придерживался, а ИИ
@@ -2237,12 +2220,36 @@ async def build_script_parts(
         ("client" if m.role == MessageRole.client else "manager", m.text) for m in history
     ])
 
+    # Версия шага под этого клиента — та же подмена, что и на звеньях связки
+    # (_build_follow_up_part). Её тут не было, и клиент с меткой «hood141»,
+    # увидевший в приветствии жилетки, через 15 минут получал общий расчёт на
+    # свитшот — 5 990 ₽ вместо комплекта (диалог 79756, 26.08 18:01; замечание
+    # Лены в тот же вечер: «по тегу должна быть цена на комплект»).
+    #
+    # Цепочку продолжаем по ИСХОДНОМУ скрипту, если у варианта своего
+    # продолжения нет: у комплекта (519) follow_up не заполнен, и за подменённым
+    # расчётом иначе не ушла бы доставка.
+    chain_id = script.id
+    tagged = await tagged_variant(
+        db, script,
+        set(getattr(client, "marketing_tags", None) or []),
+        pair=bool(slots.get("pair")),
+    )
+    if tagged.id != script.id:
+        logger.info(
+            "[%s] шаг %s заменён на версию под клиента — %s (метка %s, парный %s)",
+            ctx, script.id, tagged.id, tagged.marketing_tag, tagged.is_pair_variant,
+        )
+        script = tagged
+        if tagged.follow_up_script_id:
+            chain_id = tagged.id
+
     parts: list[ReplyPart] = []
     first = await _render_script_part(db, dialog, script, client, slots)
     if first is not None:
         parts.append(first)
     parts.extend(
-        await _build_follow_up_parts(db, dialog, script.id, client, ctx, known_slots=slots)
+        await _build_follow_up_parts(db, dialog, chain_id, client, ctx, known_slots=slots)
     )
     return parts
 

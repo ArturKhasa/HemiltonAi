@@ -15,13 +15,19 @@ from app.auth.service import hash_password
 from app.db.models import DialogStatusConfig, DialogType, User, UserRole
 from app.db.session import AsyncSessionLocal
 
+# Лестница воронки в том порядке, в каком её проходит клиент: имена ступеней
+# зашиты в app.sales.status_names, и по ним статус ставит app.sales.status_flow.
+# Описания на чистой установке пустые — их наполняет миграция 054 и админка.
 DEFAULT_STATUSES = [
     "Поинтересовался",
     "Есть расчет",
-    "Горячий клиент",
+    "Уточняем детали",
+    "Горячий",
+    "Ждем данные",
     "Ждем предоплату",
     "Заказ оформлен",
     "Нужен куратор",
+    "Спам",
     "ЧС",
 ]
 
@@ -48,9 +54,11 @@ async def seed():
         existing = {
             name for (name,) in (await session.execute(select(DialogStatusConfig.name))).all()
         }
-        for name in DEFAULT_STATUSES:
+        for order, name in enumerate(DEFAULT_STATUSES, start=1):
             if name not in existing:
-                session.add(DialogStatusConfig(name=name, pattern="", is_active=True))
+                session.add(DialogStatusConfig(
+                    name=name, pattern="", is_active=True, sort_order=order * 10,
+                ))
                 print(f"[seed] Created status: {name}")
 
         await session.commit()

@@ -100,6 +100,12 @@ async def _send_price(db: AsyncSession, dialog: Dialog, script: Script, now) -> 
 
     dialog.funnel_stage = script.funnel_stage or dialog.funnel_stage
     dialog.last_message_at = now
+    # Догоняющая цена — такой же шаг воронки, как и связка в обычном ходе:
+    # клиент увидел расчёт, значит диалог больше не «Поинтересовался». Без этого
+    # вызова 218 диалогов и остались в стартовом статусе (замер 27.08).
+    from app.sales.status_flow import sync_status
+
+    await sync_status(db, dialog, ctx=f"молчун dialog={dialog.id}", now=now)
     logger.info(
         "цена отправлена молчуну | dialog=%s script=%s parts=%d",
         dialog.id, script.id, len(parts),

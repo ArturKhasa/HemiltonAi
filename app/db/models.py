@@ -36,6 +36,11 @@ class DialogStatusConfig(Base):
     name = Column(String(255), nullable=False, unique=True)
     pattern = Column(Text, nullable=False)
     is_active = Column(Boolean, default=True)
+    # Порядок в панели. По id сортировать нельзя: статусы заводят руками, и
+    # «Уточняем детали», добавленный последним, вставал бы в селекте после «ЧС».
+    # Новому статусу из админки достаётся 1000 — он окажется в конце, пока
+    # порядок ему не назначат.
+    sort_order = Column(Integer, nullable=False, default=1000, server_default="1000")
     created_at = Column(DateTime, default=msk_now)
 
 
@@ -58,6 +63,9 @@ class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
     email = Column(String(255), unique=True, nullable=False)
+    # Имя менеджера для панели: по нему подписан ответственный за диалог.
+    # Пусто — показываем часть адреса до «@» (миграция 055).
+    name = Column(String(128), nullable=True)
     password_hash = Column(String(255), nullable=False)
     role = Column(SAEnum(UserRole), nullable=False, default=UserRole.curator)
     created_at = Column(DateTime, default=msk_now)

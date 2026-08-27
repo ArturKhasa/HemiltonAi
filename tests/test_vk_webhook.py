@@ -275,6 +275,36 @@ async def test_message_reply_operator_pauses_ai(db, vk_group, fake_ai, fake_send
     assert curator_msg.text == "Оператор на связи"
 
 
+async def test_broadcast_reply_is_marked_in_the_message(db, vk_group, fake_ai, fake_sender):
+    """Рассылку помечаем в базе: в её тексте бывает цена, и лестница статусов
+    иначе прочитает рекламное письмо как отправленный клиенту расчёт
+    («ТОЛСТОВКА ЗА 4 990₽ + 3 ПОДАРКА» ушла в 58 238 диалогов)."""
+    from app.vk.broadcast import reset
+
+    reset()
+    await handle_message_new(db, vk_group, parse_message_event(_event()))
+    mailing = "💥ТОЛСТОВКА ЗА 4 990₽ + 3 ПОДАРКА"
+    # Тот же текст уже разлетелся по другим диалогам — с этого момента он
+    # опознаётся как рассылка (порог — 10 диалогов).
+    from app.vk.broadcast import is_broadcast
+
+    for other in range(1000, 1015):
+        is_broadcast(mailing, other)
+
+    reply = parse_message_event(_event(
+        "message_reply", from_id=-111222, text=mailing, message_id=98, random_id=777002,
+    ))
+    reply.peer_id = 555
+    await handle_message_reply(db, vk_group, reply)
+
+    dialog = (await db.execute(select(Dialog))).scalars().first()
+    # Рассылка не забирает диалог у ИИ — это проверялось и раньше.
+    assert dialog.ai_paused is False
+    msg = await db.scalar(select(Message).where(Message.role == MessageRole.curator))
+    assert msg is not None and msg.msg_metadata.get("broadcast") is True
+    reset()
+
+
 async def test_message_reply_own_api_send_ignored(db, vk_group, fake_ai, fake_sender):
     await handle_message_new(db, vk_group, parse_message_event(_event()))
     # Эхо нашей же отправки: random_id совпадает с тем, которым мы отправляли

@@ -40,6 +40,22 @@
                 <td class="px-4 py-3 text-gray-800">
                   {{ u.email }}
                   <span v-if="u.id === auth.user?.id" class="ml-1 text-xs text-brand-700">(вы)</span>
+                  <!-- Именем подписан ответственный за диалог в списке лидов.
+                       Без него там стоит «hemilton7» — своего клиента по такой
+                       подписи менеджер не найдёт. -->
+                  <div class="mt-1 flex items-center gap-1.5">
+                    <input
+                      v-model="nameDrafts[u.id]"
+                      @keyup.enter="saveName(u)"
+                      placeholder="Имя менеджера"
+                      class="border rounded-lg px-2 py-1 text-xs w-44 focus:outline-none focus:ring-2 focus:ring-brand-500"
+                    />
+                    <button
+                      v-if="(nameDrafts[u.id] || '') !== (u.name || '')"
+                      @click="saveName(u)"
+                      class="text-xs px-2 py-1 rounded-lg bg-brand-600 text-white hover:bg-brand-700"
+                    >Сохранить</button>
+                  </div>
                 </td>
                 <td class="px-4 py-3">
                   <select
@@ -100,6 +116,10 @@
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Email</label>
             <input v-model="createForm.email" type="email" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" placeholder="user@example.com" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 mb-1.5">Имя менеджера</label>
+            <input v-model="createForm.name" type="text" class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" placeholder="Как подписывать в списке диалогов" />
           </div>
           <div>
             <label class="block text-xs text-gray-500 mb-1.5">Пароль</label>
@@ -188,7 +208,7 @@ const users = ref([])
 const dialogTypes = ref([])
 
 const showCreate = ref(false)
-const createForm = ref({ email: '', password: '', role: 'curator', dialog_type_ids: [] })
+const createForm = ref({ email: '', name: '', password: '', role: 'curator', dialog_type_ids: [] })
 const createError = ref('')
 const passwordTarget = ref(null)
 const newPassword = ref('')
@@ -203,6 +223,7 @@ async function load() {
     ])
     users.value = usersRes.data
     dialogTypes.value = typesRes.data
+    for (const u of users.value) nameDrafts.value[u.id] = u.name || ''
   } finally {
     loading.value = false
   }
@@ -214,6 +235,7 @@ async function patchUser(u, payload) {
     const res = await api.patch(`/admin/users/${u.id}`, payload)
     const idx = users.value.findIndex(x => x.id === u.id)
     if (idx !== -1) users.value[idx] = res.data
+    nameDrafts.value[u.id] = res.data.name || ''
   } finally {
     savingId.value = null
   }
@@ -230,8 +252,14 @@ function changeRole(u, role) {
   patchUser(u, { role })
 }
 
+const nameDrafts = ref({})
+
+function saveName(u) {
+  patchUser(u, { name: (nameDrafts.value[u.id] || '').trim() })
+}
+
 function openCreate() {
-  createForm.value = { email: '', password: '', role: 'curator', dialog_type_ids: [] }
+  createForm.value = { email: '', name: '', password: '', role: 'curator', dialog_type_ids: [] }
   createError.value = ''
   showCreate.value = true
 }

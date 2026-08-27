@@ -20,6 +20,8 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 class UserOut(BaseModel):
     id: int
     email: str
+    # Имя менеджера: им подписан ответственный за диалог в списке лидов.
+    name: str | None = None
     role: str
     created_at: datetime
     dialog_type_ids: list[int] = []
@@ -30,11 +32,13 @@ class UserOut(BaseModel):
 class CreateUserRequest(BaseModel):
     email: EmailStr
     password: str
+    name: str | None = None
     role: str = "curator"
     dialog_type_ids: list[int] | None = None
 
 
 class UpdateUserRequest(BaseModel):
+    name: str | None = None
     role: str | None = None
     password: str | None = None
     dialog_type_ids: list[int] | None = None
@@ -109,6 +113,7 @@ def _user_out(user: User, type_ids: list[int]) -> UserOut:
     return UserOut(
         id=user.id,
         email=user.email,
+        name=user.name,
         role=user.role.value,
         created_at=user.created_at,
         dialog_type_ids=type_ids,
@@ -141,7 +146,12 @@ async def create_user(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Email already registered")
 
-    user = User(email=body.email, password_hash=hash_password(body.password), role=role)
+    user = User(
+        email=body.email,
+        password_hash=hash_password(body.password),
+        name=(body.name or "").strip() or None,
+        role=role,
+    )
     db.add(user)
     await db.flush()
     if body.dialog_type_ids:
@@ -162,6 +172,10 @@ async def update_user(
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    if body.name is not None:
+        # Пустая строка — снять имя, снова показывать адрес.
+        user.name = body.name.strip() or None
 
     if body.role is not None:
         try:

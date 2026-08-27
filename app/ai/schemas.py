@@ -6,7 +6,11 @@ class AgentOutput(BaseModel):
     reply_text: str = Field(description="Message to send to the client")
     next_status: str | None = Field(
         default=None,
-        description="Exact Russian name of the new dialog status (from the list in system prompt). null = no change.",
+        description=(
+            "Exact Russian name of a SIDE status from the list in the system prompt "
+            "(needs curator / spam / blocklist). Funnel rungs are set by the system "
+            "from delivered messages and are ignored here. null = no change."
+        ),
     )
     confidence_score: float = Field(
         ge=0.0, le=1.0,

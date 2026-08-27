@@ -16,6 +16,7 @@ from app.db.models import (
     Client, Dialog, DialogPingState, DialogStatusConfig, Message, User, VkGroup,
 )
 from app.db.session import get_db
+from app.utils.text import person_label as _person
 
 router = APIRouter(prefix="/dialogs", tags=["dialogs"])
 
@@ -48,6 +49,9 @@ class DialogOut(BaseModel):
     # заблокировал отправку» о клиенте, которого в ВК нет вовсе.
     platform: str = "vk"
     payment_confirmed_at: datetime | None = None
+    # Ответственный менеджер — им подписан диалог в шапке и в списке лидов.
+    assignee_id: int | None = None
+    assignee_name: str | None = None
     created_at: datetime
     last_message_at: datetime | None
     ping_state: PingStateOut | None = None
@@ -129,17 +133,24 @@ async def get_dialog(
     current_user: User = Depends(require_role("admin", "curator")),
 ):
     result = await db.execute(
-        select(Dialog, DialogStatusConfig.name.label("status_name"), VkGroup.platform)
+        select(
+            Dialog,
+            DialogStatusConfig.name.label("status_name"),
+            VkGroup.platform,
+            User.name.label("assignee_name"),
+            User.email.label("assignee_email"),
+        )
         .outerjoin(DialogStatusConfig, Dialog.current_status_id == DialogStatusConfig.id)
         .join(Client, Dialog.client_id == Client.id)
         # Тестовый диалог из панели канала не имеет — платформа останется 'vk'.
         .outerjoin(VkGroup, Client.vk_group_id == VkGroup.id)
+        .outerjoin(User, Dialog.assigned_curator_id == User.id)
         .where(Dialog.id == dialog_id)
     )
     row = result.one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Dialog not found")
-    d, status_name, platform = row
+    d, status_name, platform, assignee_name, assignee_email = row
     await ensure_type_access(current_user, d.type_id, db)
     ping_result = await db.execute(
         select(DialogPingState).where(DialogPingState.dialog_id == dialog_id)
@@ -156,6 +167,8 @@ async def get_dialog(
         vk_blocked=d.vk_blocked,
         platform=platform or "vk",
         payment_confirmed_at=d.payment_confirmed_at,
+        assignee_id=d.assigned_curator_id,
+        assignee_name=_person(assignee_name, assignee_email),
         created_at=d.created_at,
         last_message_at=d.last_message_at,
         ping_state=PingStateOut.model_validate(ping) if ping else None,

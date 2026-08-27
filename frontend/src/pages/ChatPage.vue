@@ -98,6 +98,34 @@
             <span v-if="d.current_status" :class="['text-[10px] font-medium px-1.5 py-0.5 rounded-full', statusColor(d.current_status)]">
               {{ d.current_status }}
             </span>
+            <!-- Мессенджер клиента. ВК и MAX в списке были неотличимы, хотя MAX
+                 ведёт себя иначе: клиент получает приветствие и цену, не написав
+                 ни строчки, а менеджер отвечает мимо панели. -->
+            <span
+              :class="[
+                'text-[10px] font-medium px-1.5 py-0.5 rounded-full',
+                d.platform === 'max' ? 'bg-violet-100 text-violet-700' : 'bg-sky-100 text-sky-700'
+              ]"
+              :title="d.platform === 'max' ? 'Клиент пишет в MAX' : 'Клиент пишет во ВКонтакте'"
+            >{{ d.platform === 'max' ? 'MAX' : 'ВК' }}</span>
+            <!-- Заливкой, а не пастелью: пастельно-красный занят статусом
+                 «Горячий», и рядом они читались бы как два статуса. Метка
+                 означает «пинги идут и будут идти дальше» — по ней видно, какие
+                 диалоги система дожимает сама. -->
+            <!-- По этому бейджу менеджер находит своих клиентов в общем списке:
+                 «у нас там выходит 500 клиентов, менеджеры же не будут каждого
+                 своего по имени искать» (Лена, 25.08). Клик — отбор по нему. -->
+            <button
+              v-if="d.assignee_name"
+              @click.stop="filterByAssignee(d.assignee_id)"
+              class="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 max-w-[8rem] truncate hover:bg-indigo-200"
+              :title="`Показать все диалоги менеджера ${d.assignee_name}`"
+            >👤 {{ d.assignee_name }}</button>
+            <span
+              v-if="d.ping_active"
+              class="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-red-500 text-white"
+              :title="d.ping_next_at ? `Следующий пинг: ${formatFullDateTime(d.ping_next_at)}` : 'По диалогу идут пинги'"
+            >● ИДЁТ ПИНГ</span>
             <!-- Метка рекламной ссылки: тем же фирменным цветом, что и в шапке
                  диалога, чтобы читалось как одно и то же. Клик — отбор списка по
                  этой кампании. Меток у клиента всегда 0 или 1, но поле списочное:
@@ -166,6 +194,21 @@
               <option v-for="s in activeStatuses" :key="s.id" :value="s.name">{{ s.name }}</option>
             </select>
             <span v-if="statusChanging" class="text-xs text-gray-400">...</span>
+          </div>
+          <!-- Ответственный менеджер. Лена просила его дважды (25.08, 26.08) и
+               просила брать из BlueSales; интеграции не будет — назначаем здесь. -->
+          <div class="flex items-center gap-2 ml-2">
+            <span class="text-xs text-gray-500">Менеджер:</span>
+            <select
+              :value="activeDialog?.assignee_id ?? ''"
+              @change="changeAssignee($event.target.value)"
+              :disabled="assigneeSaving"
+              class="text-xs border rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50"
+            >
+              <option value="">— не назначен —</option>
+              <option v-for="a in assignees" :key="a.id" :value="a.id">{{ a.label }}</option>
+            </select>
+            <span v-if="assigneeSaving" class="text-xs text-gray-400">...</span>
           </div>
           <div v-if="activeDialog?.funnel_stage" class="flex items-center gap-1 ml-2">
             <span class="text-xs text-gray-500">Стадия:</span>
@@ -247,7 +290,11 @@
         <!-- Messages -->
         <div ref="messagesEl" class="flex-1 overflow-y-auto p-6 space-y-4">
           <template v-for="msg in messages" :key="msg.id">
-            <div :class="['flex flex-col', msg.role === 'client' ? 'items-end' : 'items-start']">
+            <!-- Клиент слева, мы справа — как в любом мессенджере, откуда
+                 менеджер сюда приходит (правка ОП от 27.08). Раньше было
+                 наоборот: панель начиналась с тестового чата, где отправитель —
+                 сам тестировщик, и «своим» пузырём был клиентский. -->
+            <div :class="['flex flex-col', msg.role === 'client' ? 'items-start' : 'items-end']">
               <!-- Source label -->
               <div class="mb-0.5 px-1">
                 <span v-if="msg.role === 'curator'" class="text-xs text-purple-500 font-medium">👤 Оператор (ВК)</span>
@@ -257,12 +304,12 @@
               <div :class="[
                 'max-w-xl px-4 py-2.5 rounded-2xl text-sm shadow-sm',
                 msg.role === 'client'
-                  ? 'bg-brand-600 text-white rounded-br-sm'
+                  ? 'bg-brand-600 text-white rounded-bl-sm'
                   : msg.role === 'curator'
-                    ? 'bg-purple-50 border border-purple-200 rounded-bl-sm text-gray-800'
+                    ? 'bg-purple-50 border border-purple-200 rounded-br-sm text-gray-800'
                     : msg.is_ping
-                      ? 'bg-amber-50 border border-amber-200 rounded-bl-sm text-gray-800'
-                      : 'bg-white border rounded-bl-sm text-gray-800',
+                      ? 'bg-amber-50 border border-amber-200 rounded-br-sm text-gray-800'
+                      : 'bg-white border rounded-br-sm text-gray-800',
                 msg.need_curator ? 'border-orange-400 border-2' : '',
               ]">
                 <template v-for="(part, pi) in parseMessageParts(msg.text)" :key="pi">
@@ -361,8 +408,8 @@
               </div>
             </div>
           </template>
-          <div v-if="sending" class="flex justify-start">
-            <div class="bg-white border rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm text-gray-400 shadow-sm">
+          <div v-if="sending" class="flex justify-end">
+            <div class="bg-white border rounded-2xl rounded-br-sm px-4 py-2.5 text-sm text-gray-400 shadow-sm">
               Генерирую ответ...
             </div>
           </div>
@@ -711,6 +758,54 @@
             >
               <option :value="null">Все типы</option>
               <option v-for="t in dialogTypes" :key="t.id" :value="t.id">{{ t.display_name }}</option>
+            </select>
+          </div>
+
+          <div v-if="assignees.length">
+            <div class="flex items-center justify-between mb-2">
+              <p class="text-sm font-medium text-gray-700">Ответственный менеджер</p>
+              <button
+                v-if="filterAssignees.length"
+                @click="filterAssignees = []"
+                class="text-xs text-gray-400 hover:text-gray-600"
+              >Снять ({{ filterAssignees.length }})</button>
+            </div>
+            <div class="flex flex-col gap-2 max-h-48 overflow-y-auto pr-1">
+              <label class="flex items-center gap-2 cursor-pointer select-none">
+                <input type="checkbox" value="__none__" v-model="filterAssignees" class="rounded" />
+                <span class="text-xs font-medium px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">Без менеджера</span>
+              </label>
+              <label
+                v-for="a in assignees" :key="a.id"
+                class="flex items-center gap-2 cursor-pointer select-none"
+              >
+                <input type="checkbox" :value="String(a.id)" v-model="filterAssignees" class="rounded" />
+                <span class="text-xs font-medium px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700">{{ a.label }}</span>
+              </label>
+            </div>
+          </div>
+
+          <div>
+            <p class="text-sm font-medium text-gray-700 mb-2">Платформа</p>
+            <select
+              v-model="filterPlatform"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
+            >
+              <option :value="null">Все</option>
+              <option value="vk">ВКонтакте</option>
+              <option value="max">MAX</option>
+            </select>
+          </div>
+
+          <div>
+            <p class="text-sm font-medium text-gray-700 mb-2">Пинги</p>
+            <select
+              v-model="filterPingActive"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
+            >
+              <option :value="null">Все</option>
+              <option :value="true">Идёт пинг</option>
+              <option :value="false">Пингов нет</option>
             </select>
           </div>
 
@@ -1282,6 +1377,9 @@ function saveFiltersToStorage() {
     filterAiProviders: filterAiProviders.value,
     filterDialogTypeId: filterDialogTypeId.value,
     filterPingFunnelType: filterPingFunnelType.value,
+    filterPingActive: filterPingActive.value,
+    filterAssignees: filterAssignees.value,
+    filterPlatform: filterPlatform.value,
     filterFunnelStage: filterFunnelStage.value,
     filterMarketingTags: filterMarketingTags.value,
       filterLastMessageFrom: filterLastMessageFrom.value,
@@ -1312,6 +1410,11 @@ const filterClientDateTo = ref(_saved?.filterClientDateTo ?? '')
 const filterAiProviders = ref(_saved?.filterAiProviders ?? [])
 const filterDialogTypeId = ref(_saved?.filterDialogTypeId ?? null)
 const filterPingFunnelType = ref(_saved?.filterPingFunnelType ?? null)
+const filterPingActive = ref(_saved?.filterPingActive ?? null)
+const filterAssignees = ref(_saved?.filterAssignees ?? [])
+const assignees = ref([])
+const assigneeSaving = ref(false)
+const filterPlatform = ref(_saved?.filterPlatform ?? null)
 const filterFunnelStage = ref(_saved?.filterFunnelStage ?? null)
 // Метка рекламной ссылки клиента (sweetgold, ПАВЕЛ_ПАТРИОТ_1). Георгий, 26.08:
 // менеджеру надо видеть, с какой кампании лид, и отбирать список по ней.
@@ -1368,7 +1471,7 @@ const isCurator = computed(() => auth.user?.role === 'curator')
 // единственным пунктом «Тестовые диалоги» (Георгий, 17.08). Доступ всё равно
 // решает сервер: /chat/dialogs пускает только админа и куратора.
 const canSeeRealDialogs = computed(() => !auth.ready || !auth.user || isAdmin.value || isCurator.value)
-const hasActiveFilters = computed(() => filterShowTest.value || !filterShowReal.value || filterStatuses.value.length > 0 || filterDatePreset.value !== 'all' || filterClientId.value.trim() !== '' || filterClientName.value.trim() !== '' || filterClientDatePreset.value !== 'all' || filterAiProviders.value.length > 0 || filterDialogTypeId.value !== null || filterPingFunnelType.value !== null || filterFunnelStage.value !== null || filterMarketingTags.value.length > 0 || filterLastMessageFrom.value !== '')
+const hasActiveFilters = computed(() => filterShowTest.value || !filterShowReal.value || filterStatuses.value.length > 0 || filterDatePreset.value !== 'all' || filterClientId.value.trim() !== '' || filterClientName.value.trim() !== '' || filterClientDatePreset.value !== 'all' || filterAiProviders.value.length > 0 || filterDialogTypeId.value !== null || filterPingFunnelType.value !== null || filterPingActive.value !== null || filterPlatform.value !== null || filterAssignees.value.length > 0 || filterFunnelStage.value !== null || filterMarketingTags.value.length > 0 || filterLastMessageFrom.value !== '')
 const dialogTypeFilterValue = computed(() => {
   if (filterShowTest.value && filterShowReal.value) return 'all'
   if (filterShowReal.value) return 'real'
@@ -1387,11 +1490,16 @@ const STATUS_COLORS = {
   // а «Заказ оформлен» ниже уже зелёный — фирменный зелёный слился бы с ним.
   'Поинтересовался':  'bg-blue-100 text-blue-700',
   'Есть расчет':      'bg-purple-100 text-purple-700',
+  // Две ступени, добавленные 27.08: между расчётом и оплатой была дыра длиной
+  // в половину воронки. Цвета — по нарастанию «тепла» лида.
+  'Уточняем детали':  'bg-teal-100 text-teal-700',
   'Горячий':          'bg-red-100 text-red-700',
+  'Ждем данные':      'bg-amber-100 text-amber-800',
   'Ждем предоплату':  'bg-yellow-100 text-yellow-800',
   'Заказ оформлен':   'bg-green-100 text-green-700',
   'Нужен куратор':    'bg-orange-100 text-orange-700',
   'Спам':             'bg-gray-100 text-gray-500',
+  'ЧС':               'bg-gray-200 text-gray-600',
 }
 
 function statusColor(name) {
@@ -1406,6 +1514,9 @@ function buildDialogParams(offset = 0) {
   for (const p of filterAiProviders.value) params.append('ai_provider_filter', p)
   if (filterDialogTypeId.value !== null) params.append('dialog_type_ids', filterDialogTypeId.value)
   if (filterPingFunnelType.value !== null) params.append('ping_funnel_type', filterPingFunnelType.value)
+  if (filterPingActive.value !== null) params.append('ping_active', filterPingActive.value)
+  for (const a of filterAssignees.value) params.append('assignee', a)
+  if (filterPlatform.value !== null) params.append('platform', filterPlatform.value)
   if (filterFunnelStage.value !== null) params.append('funnel_stage', filterFunnelStage.value)
   for (const t of filterMarketingTags.value) params.append('marketing_tag', t)
   if (filterLastMessageFrom.value) params.append('last_message_from', filterLastMessageFrom.value)
@@ -1485,6 +1596,12 @@ async function applyFilters() {
 
 // Клик по метке в списке = «покажи всех с этой кампании». Именно так менеджер
 // и ориентируется: увидел метку у горячего лида — смотрит остальных оттуда же.
+function filterByAssignee(userId) {
+  if (userId === null || userId === undefined) return
+  filterAssignees.value = [String(userId)]
+  applyFilters()
+}
+
 function filterByTag(tag) {
   filterMarketingTags.value = [tag]
   marketingTagSearch.value = ''
@@ -1506,6 +1623,9 @@ function resetFilters() {
   filterAiProviders.value = []
   filterDialogTypeId.value = null
   filterPingFunnelType.value = null
+  filterPingActive.value = null
+  filterPlatform.value = null
+  filterAssignees.value = []
   filterFunnelStage.value = null
   filterMarketingTags.value = []
   marketingTagSearch.value = ''
@@ -1521,6 +1641,9 @@ function buildExportParams() {
   for (const p of filterAiProviders.value) params.append('ai_provider_filter', p)
   if (filterDialogTypeId.value !== null) params.append('dialog_type_ids', filterDialogTypeId.value)
   if (filterPingFunnelType.value !== null) params.append('ping_funnel_type', filterPingFunnelType.value)
+  if (filterPingActive.value !== null) params.append('ping_active', filterPingActive.value)
+  for (const a of filterAssignees.value) params.append('assignee', a)
+  if (filterPlatform.value !== null) params.append('platform', filterPlatform.value)
   if (filterFunnelStage.value !== null) params.append('funnel_stage', filterFunnelStage.value)
   for (const t of filterMarketingTags.value) params.append('marketing_tag', t)
   if (filterLastMessageFrom.value) params.append('last_message_from', filterLastMessageFrom.value)
@@ -1590,7 +1713,7 @@ function exportDialogHtml() {
   const title = `Диалог ${d.vk_user_id || activeDialogId.value}`
 
   const rows = messages.value.map(msg => {
-    const side = msg.role === 'client' ? 'right' : 'left'
+    const side = msg.role === 'client' ? 'left' : 'right'
     const cls = msg.role === 'client' ? 'client' : (msg.role === 'curator' ? 'curator' : (msg.is_ping ? 'ping' : 'ai'))
     const meta = []
     if (msg.confidence_score !== null && msg.confidence_score !== undefined && msg.role !== 'client') {
@@ -1693,6 +1816,37 @@ async function loadMarketingTags() {
     const res = await api.get('/chat/marketing-tags')
     marketingTags.value = res.data
   } catch {}
+}
+
+async function loadAssignees() {
+  try {
+    const res = await api.get('/chat/assignees')
+    assignees.value = res.data
+  } catch {}
+}
+
+async function changeAssignee(value) {
+  if (!activeDialogId.value) return
+  const userId = value === '' ? null : Number(value)
+  assigneeSaving.value = true
+  try {
+    const res = await api.post(`/chat/dialogs/${activeDialogId.value}/assignee`, {
+      user_id: userId,
+    })
+    if (activeDialog.value) {
+      activeDialog.value.assignee_id = res.data.assignee_id
+      activeDialog.value.assignee_name = res.data.assignee_name
+    }
+    // Строка списка подписана тем же менеджером — обновляем, не перезагружая
+    // весь список: он бывает на сотни диалогов и прокручен далеко вниз.
+    const row = dialogs.value.find(d => d.id === activeDialogId.value)
+    if (row) {
+      row.assignee_id = res.data.assignee_id
+      row.assignee_name = res.data.assignee_name
+    }
+  } finally {
+    assigneeSaving.value = false
+  }
 }
 
 async function loadStatuses() {
@@ -2160,6 +2314,9 @@ async function openByVkUserId(vkId) {
   filterAiProviders.value = []
   filterDialogTypeId.value = null
   filterPingFunnelType.value = null
+  filterPingActive.value = null
+  filterPlatform.value = null
+  filterAssignees.value = []
   filterFunnelStage.value = null
   filterMarketingTags.value = []
   filterLastMessageFrom.value = ''
@@ -2174,7 +2331,10 @@ async function openByVkUserId(vkId) {
 
 onMounted(async () => {
   const vkId = (route.query.vk_user_id || '').toString().trim()
-  await Promise.all([loadDialogTypes(), loadStatuses(), loadPingFunnelTypes(), loadMarketingTags()])
+  await Promise.all([
+    loadDialogTypes(), loadStatuses(), loadPingFunnelTypes(), loadMarketingTags(),
+    loadAssignees(),
+  ])
   if (vkId) {
     await openByVkUserId(vkId)
   } else {

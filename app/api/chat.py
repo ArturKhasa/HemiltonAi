@@ -17,7 +17,8 @@ from app.auth.dependencies import ensure_type_access, get_allowed_type_ids, requ
 from app.storage.local import safe_extension, save_file
 from app.config import settings
 from app.utils.media import attachment_token
-from app.db.models import AIRun, Client, Dialog, DialogPingState, DialogStatusConfig, DialogType, Message, MessageFeedback, MessageRole, User
+from app.utils.text import person_label as _person
+from app.db.models import AIRun, Client, Dialog, DialogPingState, DialogStatusConfig, DialogType, Message, MessageFeedback, MessageRole, User, UserDialogType, UserRole, VkGroup
 from app.db.session import get_db
 
 logger = logging.getLogger(__name__)
@@ -78,8 +79,38 @@ class DialogListItem(BaseModel):
     ai_provider: str = "openai"
     is_test: bool = True
     ai_paused: bool = False
+    # Мессенджер клиента. В списке ВК и MAX были неотличимы, хотя ведут себя
+    # по-разному: в MAX клиент получает приветствие и цену, не написав ни строчки,
+    # а менеджер отвечает мимо панели. MAX-лид в общем списке терялся полностью —
+    # 428 диалогов против 79 446 за две недели.
+    platform: str = "vk"
+    # По диалогу идут пинги и будут идти дальше. Воронка, once completed, заново
+    # не заводится (см. ping.worker.discover), поэтому признак честный: красная
+    # метка не обещает пинга, которого не будет.
+    ping_active: bool = False
+    ping_next_at: datetime | None = None
+    # Ответственный менеджер. Лена просила его дважды (25.08, 26.08) и просила
+    # брать из BlueSales; интеграции не будет, поэтому назначаем в панели руками.
+    # Колонка dialogs.assigned_curator_id лежала в базе с первой миграции и
+    # никем не использовалась.
+    assignee_id: int | None = None
+    assignee_name: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+def _ping_active(dialog: Dialog, ping_completed: bool | None) -> bool:
+    """Пинги по диалогу идут и будут идти дальше.
+
+    Воронки нет (`ping_completed is None`) или она закрыта — пингов не будет:
+    заново воронка не заводится, `discover()` пропускает диалоги, у которых
+    запись уже есть. Пауза ИИ и блокировка отправки закроют воронку на ближайшем
+    проходе воркера, поэтому метку снимаем сразу — иначе она обещала бы пинг,
+    которого не будет.
+    """
+    if ping_completed is None or ping_completed:
+        return False
+    return not dialog.ai_paused and not dialog.vk_blocked
 
 
 async def _apply_dialog_filters(
@@ -100,6 +131,9 @@ async def _apply_dialog_filters(
     ping_funnel_type: str | None = None,
     funnel_stage: str | None = None,
     marketing_tag: list[str] | None = None,
+    ping_active: bool | None = None,
+    platform: list[str] | None = None,
+    assignee: list[str] | None = None,
     allowed_type_ids: list[int] | None = None,
 ):
     """Apply dialog list filters to a query that has Dialog and Client in scope.
@@ -187,6 +221,49 @@ async def _apply_dialog_filters(
             conds.append(Client.marketing_tags[0].as_string().is_(None))
         if conds:
             q = q.where(or_(*conds))
+    if ping_active is not None:
+        # «Пинги идут» = воронка заведена и не закрыта, И диалог не забрал живой
+        # оператор, И отправка не заблокирована. Последние два условия — те же,
+        # по которым воронку закроет воркер (ping.worker._process_state), но
+        # узнает он об этом только на своём ближайшем проходе. Без них метка
+        # висела бы на диалогах, где пинга уже не будет.
+        active_ping = (
+            select(DialogPingState.id)
+            .where(
+                DialogPingState.dialog_id == Dialog.id,
+                DialogPingState.is_completed == False,
+            )
+            # correlate(Dialog) обязателен: список диалогов сам джойнит
+            # dialog_ping_states ради колонок метки, и без явного указания
+            # SQLAlchemy соотносит с внешним запросом ОБЕ таблицы — подзапрос
+            # остаётся без FROM и падает.
+            .correlate(Dialog)
+            .exists()
+        )
+        alive = Dialog.ai_paused == False
+        condition = active_ping & alive & (Dialog.vk_blocked == False)
+        q = q.where(condition if ping_active else ~condition)
+    if platform:
+        # Платформа лежит на канале клиента. Тестовый диалог из панели канала не
+        # имеет вовсе — считаем его ВК, как и везде (messaging.platform_of).
+        conds = []
+        if "vk" in platform:
+            conds.append(or_(VkGroup.platform == "vk", VkGroup.platform.is_(None)))
+        for name in platform:
+            if name != "vk":
+                conds.append(VkGroup.platform == name)
+        if conds:
+            q = q.where(or_(*conds))
+    if assignee:
+        want_nobody = "__none__" in assignee
+        ids = [int(a) for a in assignee if a != "__none__" and a.lstrip("-").isdigit()]
+        conds = []
+        if ids:
+            conds.append(Dialog.assigned_curator_id.in_(ids))
+        if want_nobody:
+            conds.append(Dialog.assigned_curator_id.is_(None))
+        if conds:
+            q = q.where(or_(*conds))
     if last_message_from:
         last_role_subq = (
             select(Message.role)
@@ -225,6 +302,77 @@ async def list_ping_funnel_types(
         select(DialogPingState.funnel_type).distinct().order_by(DialogPingState.funnel_type)
     )
     return result.scalars().all()
+
+
+class AssigneeOut(BaseModel):
+    id: int
+    label: str
+    role: str
+
+
+class AssigneeRequest(BaseModel):
+    # None — снять ответственного.
+    user_id: int | None = None
+
+
+@router.get("/assignees", response_model=list[AssigneeOut])
+async def list_assignees(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "curator")),
+):
+    """Кого можно назначить ответственным за диалог.
+
+    Куратора показываем только вместе с его направлениями: назначать человека на
+    диалог, которого он не увидит, смысла нет. Админ виден всегда — он видит всё.
+    """
+    allowed = await get_allowed_type_ids(current_user, db)
+    rows = (await db.execute(select(User).order_by(User.id))).scalars().all()
+    by_user = {}
+    if allowed is not None:
+        links = await db.execute(
+            select(UserDialogType.user_id, UserDialogType.type_id)
+        )
+        for user_id, type_id in links.all():
+            by_user.setdefault(user_id, set()).add(type_id)
+
+    out = []
+    for u in rows:
+        if allowed is not None and u.role != UserRole.admin:
+            if not (by_user.get(u.id) or set()) & set(allowed):
+                continue
+        out.append(AssigneeOut(
+            id=u.id, label=_person(u.name, u.email) or str(u.id), role=u.role.value,
+        ))
+    return out
+
+
+@router.post("/dialogs/{dialog_id}/assignee")
+async def set_assignee(
+    dialog_id: int,
+    body: AssigneeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "curator")),
+):
+    """Назначить ответственного менеджера или снять его (`user_id: null`)."""
+    dialog = await db.get(Dialog, dialog_id)
+    if not dialog:
+        raise HTTPException(status_code=404, detail="Dialog not found")
+    await ensure_type_access(current_user, dialog.type_id, db)
+
+    label = None
+    if body.user_id is not None:
+        user = await db.get(User, body.user_id)
+        if not user:
+            raise HTTPException(status_code=400, detail="Unknown user")
+        label = _person(user.name, user.email)
+    dialog.assigned_curator_id = body.user_id
+    dialog.updated_at = msk_now()
+    await db.commit()
+    logger.info(
+        "[dialog=%s] ответственный: %s | назначил user=%s",
+        dialog_id, label or "снят", current_user.id,
+    )
+    return {"ok": True, "assignee_id": body.user_id, "assignee_name": label}
 
 
 @router.get("/marketing-tags")
@@ -271,9 +419,19 @@ async def count_chat_dialogs(
     ping_funnel_type: str | None = Query(default=None),
     funnel_stage: str | None = Query(default=None),
     marketing_tag: list[str] = Query(default=[]),
+    ping_active: bool | None = Query(default=None),
+    platform: list[str] = Query(default=[]),
+    assignee: list[str] = Query(default=[]),
 ):
     """Count dialogs matching the given filters."""
-    q = select(func.count()).select_from(Dialog).join(Client, Dialog.client_id == Client.id)
+    q = (
+        select(func.count())
+        .select_from(Dialog)
+        .join(Client, Dialog.client_id == Client.id)
+        # Канал — ради фильтра по платформе. outerjoin: у тестового диалога из
+        # панели канала нет вовсе.
+        .outerjoin(VkGroup, Client.vk_group_id == VkGroup.id)
+    )
     q = await _apply_dialog_filters(
         q, db,
         is_test=is_test, status_filter=status_filter, ai_provider_filter=ai_provider_filter,
@@ -283,6 +441,9 @@ async def count_chat_dialogs(
         client_date_to=client_date_to, last_message_from=last_message_from,
         ping_funnel_type=ping_funnel_type, funnel_stage=funnel_stage,
         marketing_tag=marketing_tag,
+        ping_active=ping_active,
+        platform=platform,
+        assignee=assignee,
         allowed_type_ids=await get_allowed_type_ids(current_user, db),
     )
     total = (await db.execute(q)).scalar_one()
@@ -307,14 +468,31 @@ async def list_chat_dialogs(
     ping_funnel_type: str | None = Query(default=None),
     funnel_stage: str | None = Query(default=None),
     marketing_tag: list[str] = Query(default=[]),
+    ping_active: bool | None = Query(default=None),
+    platform: list[str] = Query(default=[]),
+    assignee: list[str] = Query(default=[]),
     limit: int = 50,
     offset: int = 0,
 ):
     """List dialogs with client info, newest first."""
     q = (
-        select(Dialog, Client, DialogStatusConfig.name.label("status_name"))
+        select(
+            Dialog,
+            Client,
+            DialogStatusConfig.name.label("status_name"),
+            VkGroup.platform,
+            DialogPingState.is_completed,
+            DialogPingState.next_ping_due_at,
+            User.name.label("assignee_name"),
+            User.email.label("assignee_email"),
+        )
         .join(Client, Dialog.client_id == Client.id)
         .outerjoin(DialogStatusConfig, Dialog.current_status_id == DialogStatusConfig.id)
+        .outerjoin(VkGroup, Client.vk_group_id == VkGroup.id)
+        # Воронка пингов — одна на диалог (уникальный dialog_id), лишних строк
+        # join не даст.
+        .outerjoin(DialogPingState, DialogPingState.dialog_id == Dialog.id)
+        .outerjoin(User, Dialog.assigned_curator_id == User.id)
         .order_by(Dialog.last_message_at.desc().nullslast(), Dialog.created_at.desc())
     )
     q = await _apply_dialog_filters(
@@ -326,6 +504,9 @@ async def list_chat_dialogs(
         client_date_to=client_date_to, last_message_from=last_message_from,
         ping_funnel_type=ping_funnel_type, funnel_stage=funnel_stage,
         marketing_tag=marketing_tag,
+        ping_active=ping_active,
+        platform=platform,
+        assignee=assignee,
         allowed_type_ids=await get_allowed_type_ids(current_user, db),
     )
     q = q.limit(limit).offset(offset)
@@ -346,8 +527,16 @@ async def list_chat_dialogs(
             ai_provider=dialog.ai_provider or "openai",
             is_test=dialog.is_test,
             ai_paused=dialog.ai_paused,
+            platform=platform or "vk",
+            ping_active=_ping_active(dialog, ping_completed),
+            ping_next_at=next_ping_at,
+            assignee_id=dialog.assigned_curator_id,
+            assignee_name=_person(assignee_name, assignee_email),
         )
-        for dialog, client, status_name in rows
+        for (
+            dialog, client, status_name, platform, ping_completed, next_ping_at,
+            assignee_name, assignee_email,
+        ) in rows
     ]
 
 
@@ -369,6 +558,9 @@ async def export_chat_dialogs_csv(
     ping_funnel_type: str | None = Query(default=None),
     funnel_stage: str | None = Query(default=None),
     marketing_tag: list[str] = Query(default=[]),
+    ping_active: bool | None = Query(default=None),
+    platform: list[str] = Query(default=[]),
+    assignee: list[str] = Query(default=[]),
 ):
     """Export filtered dialogs as CSV.
 
@@ -377,9 +569,21 @@ async def export_chat_dialogs_csv(
     ai_reply/ai_ping), а каждый новый фильтр приходилось дописывать дважды.
     """
     q = (
-        select(Dialog, Client, DialogStatusConfig.name.label("status_name"), Message)
+        select(
+            Dialog,
+            Client,
+            DialogStatusConfig.name.label("status_name"),
+            Message,
+            VkGroup.platform,
+            DialogPingState.is_completed,
+            User.name.label("assignee_name"),
+            User.email.label("assignee_email"),
+        )
         .join(Client, Dialog.client_id == Client.id)
         .outerjoin(DialogStatusConfig, Dialog.current_status_id == DialogStatusConfig.id)
+        .outerjoin(VkGroup, Client.vk_group_id == VkGroup.id)
+        .outerjoin(DialogPingState, DialogPingState.dialog_id == Dialog.id)
+        .outerjoin(User, Dialog.assigned_curator_id == User.id)
         .outerjoin(Message, Message.dialog_id == Dialog.id)
         .order_by(Dialog.last_message_at.desc().nullslast(), Dialog.created_at.desc(), Message.created_at.asc())
     )
@@ -392,6 +596,9 @@ async def export_chat_dialogs_csv(
         client_date_to=client_date_to, last_message_from=last_message_from,
         ping_funnel_type=ping_funnel_type, funnel_stage=funnel_stage,
         marketing_tag=marketing_tag,
+        ping_active=ping_active,
+        platform=platform,
+        assignee=assignee,
         allowed_type_ids=await get_allowed_type_ids(current_user, db),
     )
 
@@ -401,17 +608,24 @@ async def export_chat_dialogs_csv(
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "dialog_id", "vk_user_id", "client_name", "client_last_name", "marketing_tag", "type_id", "current_status",
+        "dialog_id", "vk_user_id", "client_name", "client_last_name", "marketing_tag",
+        "platform", "ping_active", "assignee", "type_id", "current_status",
         "dialog_created_at", "last_message_at", "ai_provider", "is_test",
         "message_id", "message_role", "message_text", "message_created_at",
     ])
-    for dialog, client, status_name, message in rows:
+    for (
+        dialog, client, status_name, message, platform, ping_completed,
+        assignee_name, assignee_email,
+    ) in rows:
         writer.writerow([
             dialog.id,
             client.vk_user_id,
             client.name,
             client.last_name,
             (client.marketing_tags or [""])[0],
+            platform or "vk",
+            _ping_active(dialog, ping_completed),
+            _person(assignee_name, assignee_email) or "",
             dialog.type_id,
             status_name or "",
             dialog.created_at.isoformat(),
@@ -451,12 +665,16 @@ async def export_chat_client_ids(
     ping_funnel_type: str | None = Query(default=None),
     funnel_stage: str | None = Query(default=None),
     marketing_tag: list[str] = Query(default=[]),
+    ping_active: bool | None = Query(default=None),
+    platform: list[str] = Query(default=[]),
+    assignee: list[str] = Query(default=[]),
 ):
     """Export distinct vk_user_ids of filtered dialogs, joined by ';'."""
     q = (
         select(Client.vk_user_id)
         .select_from(Dialog)
         .join(Client, Dialog.client_id == Client.id)
+        .outerjoin(VkGroup, Client.vk_group_id == VkGroup.id)
         .distinct()
     )
     q = await _apply_dialog_filters(
@@ -468,6 +686,9 @@ async def export_chat_client_ids(
         client_date_to=client_date_to, last_message_from=last_message_from,
         ping_funnel_type=ping_funnel_type, funnel_stage=funnel_stage,
         marketing_tag=marketing_tag,
+        ping_active=ping_active,
+        platform=platform,
+        assignee=assignee,
         allowed_type_ids=await get_allowed_type_ids(current_user, db),
     )
     result = await db.execute(q)
@@ -622,6 +843,13 @@ async def send_message(
             from app.ai.runner import run_ai
             output, ai_run, parts = await run_ai(db, dialog, client_message)
             n_parts = len(parts)
+            # В тестовом диалоге отправки в мессенджер нет, поэтому лестницу
+            # двигаем сразу: иначе статусы в панели вели бы себя не так, как на
+            # живом трафике, и проверить воронку было бы негде.
+            from app.sales.status_flow import sync_status
+
+            await sync_status(db, dialog, ctx=f"test dialog={dialog.id}")
+            await db.commit()
 
     # Реплика клиента + все реплики хода: связка скриптов даёт больше одной
     # (приветствие, следом вопрос про имя/фамилию), и тестировщик должен увидеть
@@ -736,6 +964,12 @@ async def reply_as_manager(
         mark_delivered(message, result)
 
     dialog.last_message_at = msk_now()
+    # Менеджер тоже двигает воронку: цену, способы оплаты и счёт он отправляет
+    # руками, и статус должен это видеть — 665 диалогов ведёт живой оператор при
+    # выключенном ИИ, и ступени им нужны ровно так же.
+    from app.sales.status_flow import sync_status
+
+    await sync_status(db, dialog, ctx=f"manager dialog={dialog.id}")
     await db.commit()
     await db.refresh(message)
 

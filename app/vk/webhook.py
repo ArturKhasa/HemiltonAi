@@ -629,6 +629,13 @@ async def deliver_parts(
 
     if sent:
         dialog.last_message_at = msk_now()
+        # Ступень воронки считаем ЗДЕСЬ, а не в run_ai: статус обязан опираться
+        # на то, что клиент увидел. В диалоге 78880 связка с ценой не доехала,
+        # а сумму за диалогом уже закрепили — и следующий ход решил, что цена
+        # отправлена. Тут же отработала бы и лестница.
+        from app.sales.status_flow import sync_status
+
+        await sync_status(db, dialog, ctx=ctx)
     await db.commit()
     return sent
 
@@ -676,6 +683,10 @@ async def handle_message_reply(db: AsyncSession, group: VkGroup, msg: VkIncoming
     # заглушила именно рассылка, а не менеджер (ОП, 21.08: «ИИ здесь
     # остановилась, ничего не отвечает клиенту больше»).
     if is_broadcast(msg.text, dialog.id):
+        # Помечаем в базе: рассылка — не шаг воронки. В её тексте бывает цена
+        # («ТОЛСТОВКА ЗА 4 990₽ + 3 ПОДАРКА» ушла в 58 238 диалогов), и без
+        # пометки лестница статусов прочитала бы её как отправленный расчёт.
+        message.msg_metadata = {**(message.msg_metadata or {}), "broadcast": True}
         try:
             await db.commit()
         except IntegrityError:
@@ -688,6 +699,13 @@ async def handle_message_reply(db: AsyncSession, group: VkGroup, msg: VkIncoming
             ctx, msg.random_id,
         )
     await stop_pings(db, dialog.id, "диалог перехвачен из ВК")
+    # Менеджер, забравший диалог из ВК, ведёт его дальше сам — и цену, способы
+    # оплаты и счёт отправляет тоже он. Диалогов, которые ведёт человек при
+    # выключенном ИИ, 665, и без этого вызова все они навсегда остались бы в
+    # стартовом статусе.
+    from app.sales.status_flow import sync_status
+
+    await sync_status(db, dialog, ctx=ctx)
     try:
         await db.commit()
     except IntegrityError:

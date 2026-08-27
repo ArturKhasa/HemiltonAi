@@ -19,6 +19,7 @@ class DialogStatusOut(BaseModel):
     name: str
     pattern: str
     is_active: bool
+    sort_order: int = 1000
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -41,7 +42,11 @@ async def list_statuses(
     _: User = Depends(require_role("admin", "curator")),
 ):
     result = await db.execute(
-        select(DialogStatusConfig).order_by(DialogStatusConfig.id)
+        # Лестницей воронки, а не по id: id отражает порядок, в котором статусы
+        # заводили в админке, и «Уточняем детали» вставал бы после «ЧС».
+        select(DialogStatusConfig).order_by(
+            DialogStatusConfig.sort_order, DialogStatusConfig.id,
+        )
     )
     return result.scalars().all()
 

@@ -148,3 +148,59 @@ class TestSending:
 
         assert await _send_price(funnel, dialog, script, msk_now()) is False
         assert dialog.funnel_stage == "greeting"
+
+
+class TestSilentPriceRespectsTheClientTag:
+    """Метка клиента должна менять и догоняющую цену, а не только связку.
+
+    Диалог 79756 на проде (26.08): клиент с меткой «hood141» увидел в
+    приветствии жилетки, а через 15 минут получил общий расчёт на свитшот —
+    5 990 ₽ вместо комплекта. Лена в тот же вечер: «ИИ неправильно отправила
+    цену, хотя приветствие правильно, по тегу должна быть цена на комплект».
+
+    Подмена шага на версию под клиента работала только на звеньях связки, а
+    молчуну цену отправляет `build_script_parts` — входным скриптом, мимо неё.
+    """
+
+    @pytest.fixture
+    async def tagged_price(self, funnel):
+        funnel.add(Script(
+            id=519, is_active=True, type_id=1,
+            condition="2.2 Стоимость — комплект", variant_of_script_id=367,
+            marketing_tag="hood141",
+            phrase_text="Комплект из двух изделий со скидкой - 8 980 ₽",
+        ))
+        await funnel.flush()
+        return funnel
+
+    async def _price_texts(self, db, tags):
+        from app.ai.runner import build_script_parts
+
+        group = VkGroup(group_id=777, name="Магазин", access_token="t", confirmation_code="c")
+        db.add(group)
+        await db.flush()
+        client = Client(vk_user_id=79793, vk_group_id=group.id, marketing_tags=tags)
+        db.add(client)
+        await db.flush()
+        dialog = Dialog(client_id=client.id, type_id=1, funnel_stage="greeting")
+        db.add(dialog)
+        await db.flush()
+        db.add(Message(dialog_id=dialog.id, role=MessageRole.ai, text=NAME_QUESTION))
+        await db.flush()
+        price = await db.get(Script, 367)
+        return [p.text for p in await build_script_parts(db, dialog, price, client)]
+
+    async def test_tagged_client_gets_the_bundle_price(self, tagged_price):
+        texts = await self._price_texts(tagged_price, ["hood141"])
+        assert "8 980 ₽" in texts[0]
+        assert "5 990 ₽" not in texts[0]
+
+    async def test_delivery_still_follows_the_bundle(self, tagged_price):
+        """У комплекта своего продолжения нет — цепочка идёт по исходному
+        расчёту, иначе за подменённой ценой не ушла бы доставка."""
+        texts = await self._price_texts(tagged_price, ["hood141"])
+        assert texts[-1] == "В какой город нужна доставка?"
+
+    async def test_client_without_the_tag_gets_the_usual_price(self, tagged_price):
+        texts = await self._price_texts(tagged_price, None)
+        assert "5 990 ₽" in texts[0]

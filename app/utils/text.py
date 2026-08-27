@@ -318,3 +318,17 @@ def vary_repeated_opening(text: str, previous_texts: list[str]) -> str:
         if alt.split()[0].lower() not in recent:
             return text[: m.start(1)] + alt + tail
     return text
+
+
+def person_label(name: str | None, email: str | None) -> str | None:
+    """Как подписывать сотрудника в панели.
+
+    Имя не заполнено — берём часть адреса до «@». ОП завела кураторов адресами
+    hemilton1@mail.ru … hemilton10@mail.ru: «hemilton7» читается хуже живого
+    имени, но лучше пустоты, а имя в карточке пользователя необязательное.
+    """
+    if name and name.strip():
+        return name.strip()
+    if email:
+        return email.split("@")[0]
+    return None

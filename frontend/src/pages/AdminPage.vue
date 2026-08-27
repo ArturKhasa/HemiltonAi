@@ -275,6 +275,17 @@
                     <div class="mt-2">
                       <label class="block text-xs text-gray-500 mb-1">Картинки</label>
                       <GreetingImages v-model="greetingDrafts[r.id].tokens" />
+                      <!-- Приветствие под метку заводят ради картинки из
+                           рекламы: клиент должен увидеть то, на что нажал.
+                           Метка pashapatriot1 (27.08) получила свой текст и ни
+                           одной картинки — и клиенты видели голое приветствие,
+                           пока Лена не заметила это в диалоге. Общее приветствие
+                           за метку не подставляется: показать не тот товар хуже,
+                           чем не показать никакого. -->
+                      <p
+                        v-if="greetingNeedsImages(r)"
+                        class="text-xs text-amber-600 mt-1"
+                      >⚠ У этой метки свой текст, но ни одной картинки — клиент не увидит товар из рекламы</p>
                     </div>
                     <div class="flex items-center gap-2 mt-2">
                       <button
@@ -1097,6 +1108,14 @@ const defaultGreetingLoading = ref(false)
 const defaultGreetingSaving = ref(false)
 const defaultGreetingSaved = ref(false)
 const defaultGreetingError = ref('')
+
+// Метка написала своё приветствие, но картинок не приложила. Проверяем черновик,
+// а не сохранённое: предупреждение должно гаснуть сразу, как их добавили.
+function greetingNeedsImages(r) {
+  const draft = greetingDrafts.value[r.id]
+  if (!draft) return false
+  return Boolean((draft.body || '').trim()) && !(draft.tokens || []).length
+}
 
 const splitGreeting = splitAttachments
 const joinGreeting = joinAttachments
