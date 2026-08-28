@@ -167,7 +167,35 @@ async def sync_status(
     logger.info("[%s] статус по фактам | %s -> %s | dialog=%s", ctx, current, target, dialog.id)
 
     await _apply_side_effects(db, dialog, target, now)
+    if target == HOT:
+        await _announce_hot(db, dialog)
     return target
+
+
+async def _announce_hot(db: AsyncSession, dialog: Dialog) -> None:
+    """Позвать людей в телеграм: клиенту показаны способы оплаты.
+
+    Просьба Артура с созвона 27.08. Ровно один раз за диалог — лестница вниз не
+    ходит, второй раз «Горячий» не наступит.
+    """
+    from app.db.models import Client, VkGroup
+    from app.messaging import platform_of
+    from app.notify import notify_hot
+
+    client = await db.get(Client, dialog.client_id)
+    channel = (
+        await db.get(VkGroup, client.vk_group_id)
+        if client and client.vk_group_id else None
+    )
+    tags = list(getattr(client, "marketing_tags", None) or [])
+    await notify_hot(
+        dialog.id,
+        client_name=" ".join(x for x in (getattr(client, "name", None),
+                                         getattr(client, "last_name", None)) if x) or None,
+        vk_user_id=getattr(client, "vk_user_id", None),
+        platform=platform_of(channel),
+        marketing_tag=tags[0] if tags else None,
+    )
 
 
 async def _apply_side_effects(db: AsyncSession, dialog: Dialog, target: str, now) -> None:

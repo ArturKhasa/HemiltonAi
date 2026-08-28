@@ -452,6 +452,20 @@
                 </div>
               </div>
             </div>
+            <!-- Быстрые скрипты: шаги ТЕКУЩЕЙ стадии воронки, в один клик и без
+                 модалки. Менеджер на стадии «цена» видит рядом «2.2 Стоимость» и
+                 «2.3 Доставка» — за остальными идёт в полный список по 📄. -->
+            <div v-if="quickScripts.length" class="flex flex-wrap items-center gap-1.5 mb-2">
+              <span class="text-[10px] uppercase tracking-wide text-gray-400">Быстрые</span>
+              <button
+                v-for="sc in quickScripts" :key="sc.id"
+                type="button"
+                :disabled="sendingManager || scriptInserting === sc.id"
+                @click="insertScript(sc)"
+                :title="sc.preview"
+                class="text-xs px-2 py-1 rounded-lg border border-brand-200 bg-brand-50 text-brand-700 hover:bg-brand-100 disabled:opacity-50 max-w-[16rem] truncate"
+              >{{ sc.label }}</button>
+            </div>
             <input ref="managerFileInput" type="file" accept="image/*,video/*" multiple class="hidden" @change="onManagerFilesSelected" />
             <form @submit.prevent="sendAsManager" class="flex gap-3">
               <button
@@ -1924,6 +1938,9 @@ async function openDialog(id) {
   activeDialogId.value = id
   pingState.value = null
   messages.value = []
+  // Набор скриптов зависит только от направления, но чипы быстрых скриптов
+  // должны быть видны сразу при открытии — грузим фоном, ответа не ждём.
+  loadDialogScripts(id)
   const dialog = dialogs.value.find(d => d.id === id)
   aiPaused.value = dialog?.ai_paused ?? false
   vkBlocked.value = false
@@ -2144,6 +2161,17 @@ const scriptSearch = ref('')
 const scriptInserting = ref(null)
 const scriptSearchInput = ref(null)
 
+// Быстрые скрипты — те, что относятся к стадии, на которой диалог стоит сейчас.
+// Их видно сразу, без модалки: на стадии «цена» менеджеру нужны «2.2 Стоимость»
+// и «2.3 Доставка», а не весь список из 143 штук. Стадии нет — чипов нет,
+// угадывать не за что.
+const QUICK_LIMIT = 4
+const quickScripts = computed(() => {
+  const stage = activeDialog.value?.funnel_stage
+  if (!stage) return []
+  return dialogScripts.value.filter(sc => sc.funnel_stage === stage).slice(0, QUICK_LIMIT)
+})
+
 // Активных скриптов 143 — списком их не перелистывают, ищут. Совпадение по
 // названию («2.2 Стоимость») и по тексту фразы: менеджер помнит и то, и другое.
 const filteredScripts = computed(() => {
@@ -2156,23 +2184,33 @@ const filteredScripts = computed(() => {
   )
 })
 
+async function loadDialogScripts(dialogId) {
+  if (!dialogId || scriptsDialogId === dialogId) return
+  scriptsLoading.value = true
+  try {
+    const res = await api.get(`/chat/dialogs/${dialogId}/scripts`)
+    if (activeDialogId.value !== dialogId) return
+    dialogScripts.value = res.data
+    scriptsDialogId = dialogId
+  } catch {
+    // Молча: без скриптов окно ответа работает как раньше, ошибку показываем
+    // только когда менеджер сам открыл список.
+    dialogScripts.value = []
+  } finally {
+    scriptsLoading.value = false
+  }
+}
+
 async function openScriptPicker() {
   if (!activeDialogId.value) return
   showScriptPicker.value = true
   scriptSearch.value = ''
   await nextTick()
   scriptSearchInput.value?.focus()
-  if (dialogScripts.value.length && scriptsDialogId === activeDialogId.value) return
-  scriptsLoading.value = true
-  try {
-    const res = await api.get(`/chat/dialogs/${activeDialogId.value}/scripts`)
-    dialogScripts.value = res.data
-    scriptsDialogId = activeDialogId.value
-  } catch (e) {
-    managerError.value = e.response?.data?.detail || e.message
+  await loadDialogScripts(activeDialogId.value)
+  if (!dialogScripts.value.length && !scriptsLoading.value) {
+    managerError.value = 'Скрипты не загрузились'
     showScriptPicker.value = false
-  } finally {
-    scriptsLoading.value = false
   }
 }
 
