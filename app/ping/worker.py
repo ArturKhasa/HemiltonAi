@@ -14,6 +14,7 @@ from app.db.models import (
 from app.config import settings
 from app.db.session import AsyncSessionLocal
 from app.logging_context import current_dialog_type
+from app.ping.eligibility import is_non_broadcast_curator_message, is_pingable_outbound
 from app.sales.color_palette import with_palette
 from app.sales.order_slots import collect_slots
 from app.utils.media import carry_over_attachments
@@ -585,14 +586,23 @@ async def _resolve_marketing_tag(db: AsyncSession, client: Client | None, type_i
 async def _init_ping_state(
     db: AsyncSession,
     dialog: Dialog,
-    last_ai_at,
+    last_outbound_at,
     now,
+    *,
+    restart_completed: bool = False,
 ) -> None:
-    existing = await db.execute(
+    existing_result = await db.execute(
         select(DialogPingState).where(DialogPingState.dialog_id == dialog.id)
     )
-    if existing.scalar_one_or_none():
-        return
+    existing = existing_result.scalar_one_or_none()
+    if existing is not None:
+        if not restart_completed or not existing.is_completed:
+            return
+        # Менеджер остановил воронку, затем диалог передали обратно ИИ. Старое
+        # завершённое состояние уникально по dialog_id и иначе навсегда мешает
+        # завести новую последовательность пингов.
+        await db.delete(existing)
+        await db.flush()
 
     from app.ping.agent import detect_funnel_with_ai
     funnel, funnel_reason = await detect_funnel_with_ai(db, dialog)
@@ -608,7 +618,7 @@ async def _init_ping_state(
     if not first_rule:
         return
 
-    next_due = last_ai_at + timedelta(seconds=first_rule.delay_seconds)
+    next_due = last_outbound_at + timedelta(seconds=first_rule.delay_seconds)
     state = DialogPingState(
         dialog_id=dialog.id,
         funnel_type=funnel,
@@ -793,7 +803,24 @@ async def discover() -> None:
 
         type_id_to_name = await _load_type_names(db)
 
-        existing_ids_subq = select(DialogPingState.dialog_id)
+        # Активная воронка всегда исключает диалог. Завершённую обычно тоже
+        # сохраняем, чтобы исчерпанная цепочка не начиналась заново. Единственное
+        # исключение ниже — последнее слово менеджера в уже снятой паузе: это
+        # ручная передача диалога обратно автоматике.
+        latest_role_subq = (
+            select(Message.role)
+            .where(Message.dialog_id == Dialog.id)
+            .order_by(Message.created_at.desc())
+            .limit(1)
+            .correlate(Dialog)
+            .scalar_subquery()
+        )
+        existing_ids_subq = select(DialogPingState.dialog_id).where(
+            or_(
+                DialogPingState.is_completed == False,
+                latest_role_subq != MessageRole.curator,
+            )
+        )
         blacklist_ids_subq = select(DialogStatusConfig.id).where(DialogStatusConfig.name == "ЧС")
         silence_cutoff = now - timedelta(seconds=_MIN_SILENCE_SECONDS)
         max_age_cutoff = now - timedelta(hours=settings.PING_DISCOVERY_MAX_AGE_HOURS)
@@ -838,7 +865,7 @@ async def discover() -> None:
                 last_msg = last_msg_result.scalar_one_or_none()
                 if not last_msg:
                     continue
-                if last_msg.role != MessageRole.ai:
+                if not is_pingable_outbound(last_msg):
                     continue
                 if last_msg.created_at > now - timedelta(seconds=_MIN_SILENCE_SECONDS):
                     continue
@@ -862,7 +889,13 @@ async def discover() -> None:
                 # (app.ping.agent.detect_funnel_with_ai).
                 if client_msg_count < 1 and platform != "max":
                     continue
-                await _init_ping_state(db, dialog, last_msg.created_at, now)
+                await _init_ping_state(
+                    db,
+                    dialog,
+                    last_msg.created_at,
+                    now,
+                    restart_completed=is_non_broadcast_curator_message(last_msg),
+                )
             except Exception as exc:
                 logger.error("ping: _init_ping_state error | dialog=%s: %s", dialog.id, exc, exc_info=True)
             finally:

@@ -1,4 +1,4 @@
-"""Клиент молчит после вопроса про имя — через 15 минут уходит цена.
+"""Клиент молчит после вопроса про имя — через 20 минут уходит цена.
 
 Правило Лены от 17.08. Диалог 346: клиент нажал «Начать» в 11:41, получил
 приветствие и вопрос про надпись и замолчал — за пять часов ему не ушло ничего,
@@ -44,7 +44,7 @@ async def funnel(db):
 
 
 async def _dialog_with_greeting(db, *, minutes_ago: int, last_role=MessageRole.ai,
-                                last_text=NAME_QUESTION):
+                                last_text=NAME_QUESTION, metadata=None):
     group = VkGroup(group_id=111222, name="Магазин", access_token="t", confirmation_code="c")
     db.add(group)
     await db.flush()
@@ -58,6 +58,7 @@ async def _dialog_with_greeting(db, *, minutes_ago: int, last_role=MessageRole.a
     await db.flush()
     db.add(Message(
         dialog_id=dialog.id, role=last_role, text=last_text, created_at=sent_at,
+        msg_metadata=metadata,
     ))
     await db.flush()
     return dialog
@@ -80,12 +81,30 @@ class TestPriceScriptLookup:
 
 
 class TestSilenceCheck:
-    async def test_fifteen_minutes_of_silence_qualifies(self, funnel):
-        dialog = await _dialog_with_greeting(funnel, minutes_ago=16)
+    async def test_twenty_minutes_of_silence_qualifies(self, funnel):
+        dialog = await _dialog_with_greeting(funnel, minutes_ago=21)
         assert await _greeting_unanswered(funnel, dialog, msk_now()) is True
 
-    async def test_fresh_question_waits(self, funnel):
-        dialog = await _dialog_with_greeting(funnel, minutes_ago=5)
+    async def test_fifteen_minutes_still_waits(self, funnel):
+        dialog = await _dialog_with_greeting(funnel, minutes_ago=15)
+        assert await _greeting_unanswered(funnel, dialog, msk_now()) is False
+
+    async def test_resumed_manager_question_qualifies(self, funnel):
+        dialog = await _dialog_with_greeting(
+            funnel,
+            minutes_ago=21,
+            last_role=MessageRole.curator,
+            metadata={"sent_by_user_id": 2},
+        )
+        assert await _greeting_unanswered(funnel, dialog, msk_now()) is True
+
+    async def test_broadcast_question_is_not_a_hand_back(self, funnel):
+        dialog = await _dialog_with_greeting(
+            funnel,
+            minutes_ago=21,
+            last_role=MessageRole.curator,
+            metadata={"broadcast": True},
+        )
         assert await _greeting_unanswered(funnel, dialog, msk_now()) is False
 
     async def test_client_answered_nothing_to_do(self, funnel):
@@ -100,8 +119,8 @@ class TestSilenceCheck:
         )
         assert await _greeting_unanswered(funnel, dialog, msk_now()) is False
 
-    def test_wait_is_the_agreed_fifteen_minutes(self):
-        assert SILENCE_SECONDS == 15 * 60
+    def test_wait_is_the_agreed_twenty_minutes(self):
+        assert SILENCE_SECONDS == 20 * 60
 
 
 class TestSending:

@@ -1,8 +1,8 @@
-"""Клиент не ответил на вопрос про имя — через 15 минут отправляем цену.
+"""Клиент не ответил на вопрос про имя — через 20 минут отправляем цену.
 
 Правило Лены от 17.08: «если клиент ничего не отвечает на вопрос про
 имя/фамилию, то ИИ отправляем стандартную цену 5990 ₽», время ожидания —
-15 минут.
+20 минут.
 
 До этого такой диалог замолкал навсегда: пинги ему не полагались вовсе. Воронка
 пингов в базе одна, `knows_price`, и до отправки цены она заблокирована — иначе
@@ -22,9 +22,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.db.models import Client, Dialog, DialogStatusConfig, Message, MessageRole, Script
+from app.db.models import Client, Dialog, DialogStatusConfig, Message, Script
 from app.db.session import AsyncSessionLocal
 from app.logging_context import current_dialog_type
+from app.ping.eligibility import is_pingable_outbound
 from app.sales.order_slots import ASKS_INSCRIPTION_RE
 from app.utils.time import msk_now
 from app.vk.outgoing import mark_delivered, mark_failed
@@ -32,8 +33,8 @@ from app.messaging import MessagesForbiddenError, dialogs_on_inactive_channels, 
 
 logger = logging.getLogger(__name__)
 
-# Сколько ждём ответа на вопрос про надпись. Названо Леной: 15 минут.
-SILENCE_SECONDS = 15 * 60
+# Сколько ждём ответа на вопрос про надпись. В актуальных замечаниях ОП: 20 минут.
+SILENCE_SECONDS = 20 * 60
 # Дальше суток догонять смысла нет — клиент уже забыл, о чём речь.
 _MAX_AGE_HOURS = 24
 _BATCH = 20
@@ -68,7 +69,9 @@ async def _greeting_unanswered(db: AsyncSession, dialog: Dialog, now) -> bool:
         .order_by(Message.created_at.desc())
         .limit(1)
     )
-    if last is None or last.role != MessageRole.ai:
+    # Ответ менеджера обычно ставит AI на паузу. Если паузу затем явно сняли,
+    # вопрос снова принадлежит автоматике и не должен блокировать цену навсегда.
+    if last is None or not is_pingable_outbound(last):
         return False
     if not ASKS_INSCRIPTION_RE.search(last.text or ""):
         return False

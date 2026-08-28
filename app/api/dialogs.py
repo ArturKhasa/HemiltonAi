@@ -304,6 +304,16 @@ async def set_ai_pause(
         # забрал человек, должен замолкать в тот же момент.
         from app.ping.worker import stop_pings
         await stop_pings(db, dialog.id, f"пауза выставлена вручную (user={current_user.id})")
+    else:
+        # При подключении менеджера активная воронка была завершена немедленно,
+        # чтобы исключить двойную отправку. Снятие паузы — явная передача обратно
+        # ИИ, поэтому старое состояние нужно убрать: discovery создаст свежую
+        # воронку от последнего исходящего сообщения.
+        state = await db.scalar(
+            select(DialogPingState).where(DialogPingState.dialog_id == dialog.id)
+        )
+        if state is not None and state.is_completed:
+            await db.delete(state)
     await db.commit()
     logger.info("[dialog=%s] ai_paused=%s set by user=%s", dialog_id, body.paused, current_user.id)
     return {"ok": True, "ai_paused": dialog.ai_paused}

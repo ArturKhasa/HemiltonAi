@@ -128,9 +128,13 @@ class FunnelOutput(BaseModel):
     reason: str = Field(description="Brief reason for this classification")
 
 
-# Product prices are always 4-5 digits, optionally space-grouped («12 900₽», «12900 руб»).
+# Product prices are always at least 4 digits, optionally grouped with a space
+# or dot («12 900₽», «8.980р», «12900 руб»).
 # 3-digit amounts (delivery «от 890₽», first payment «800 руб») are NOT a price quote.
-_PRICE_RE = re.compile(r"\d{1,3}[  ]?\d{3}\s*(?:₽|руб)", re.IGNORECASE)
+_PRICE_RE = re.compile(
+    r"\d{1,3}[ .\u00a0]?\d{3}\s*(?:₽|р(?:\.|уб(?:\.|ля|лей)?)?)(?![а-яё])",
+    re.IGNORECASE,
+)
 
 
 def _manager_sent_price(history_text: str) -> bool:

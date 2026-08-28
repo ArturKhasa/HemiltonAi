@@ -92,6 +92,30 @@ async def test_manager_reply_takes_the_dialog_from_ai(client, db, curator_header
     assert state.is_completed is True
 
 
+async def test_resuming_ai_removes_the_stopped_ping_state(
+    client, db, curator_headers, live_dialog, fake_send,
+):
+    await client.post(
+        f"/api/chat/{live_dialog.id}/reply",
+        headers=curator_headers,
+        json={"text": "Здравствуйте, я подключилась"},
+    )
+
+    resp = await client.post(
+        f"/api/dialogs/{live_dialog.id}/ai-pause",
+        headers=curator_headers,
+        json={"paused": False},
+    )
+
+    assert resp.status_code == 200
+    await db.refresh(live_dialog)
+    assert live_dialog.ai_paused is False
+    state = await db.scalar(
+        select(DialogPingState).where(DialogPingState.dialog_id == live_dialog.id)
+    )
+    assert state is None
+
+
 async def test_empty_reply_rejected(client, curator_headers, live_dialog, fake_send):
     resp = await client.post(
         f"/api/chat/{live_dialog.id}/reply", headers=curator_headers, json={"text": "   "},
