@@ -461,6 +461,17 @@
                 class="px-3 py-2.5 border rounded-xl text-gray-500 hover:text-gray-700 hover:bg-gray-50 disabled:opacity-50"
                 title="Прикрепить фото или видео"
               >📎</button>
+              <!-- Менеджеры работают в BlueSales, интеграции не будет — значит
+                   отвечать надо отсюда, и теми же фразами, что у ИИ, а не по
+                   памяти. Скрипт подставляется в поле, а не уходит сразу:
+                   текст почти всегда правят под клиента. -->
+              <button
+                type="button"
+                :disabled="sendingManager"
+                @click="openScriptPicker"
+                class="px-3 py-2.5 border rounded-xl text-gray-500 hover:text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                title="Вставить скрипт"
+              >📄</button>
               <textarea
                 v-model="managerInput"
                 :disabled="sendingManager"
@@ -1109,6 +1120,51 @@
             </button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <!-- Выбор скрипта для ответа менеджера -->
+    <div v-if="showScriptPicker" class="fixed inset-0 bg-black/40 flex items-center justify-center z-40 p-4" @click.self="showScriptPicker = false">
+      <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+        <div class="px-5 py-3 border-b flex items-center gap-3">
+          <h2 class="font-semibold text-gray-800">Скрипт для ответа</h2>
+          <span class="text-xs text-gray-400">{{ filteredScripts.length }} из {{ dialogScripts.length }}</span>
+          <button @click="showScriptPicker = false" class="ml-auto text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
+        </div>
+        <div class="px-5 py-3 border-b">
+          <input
+            ref="scriptSearchInput"
+            v-model="scriptSearch"
+            type="text"
+            placeholder="Поиск по названию или тексту"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+          />
+        </div>
+        <div class="flex-1 overflow-y-auto">
+          <p v-if="scriptsLoading" class="p-6 text-sm text-gray-400 text-center">Загрузка...</p>
+          <p v-else-if="!filteredScripts.length" class="p-6 text-sm text-gray-400 text-center">Ничего не нашлось</p>
+          <button
+            v-for="sc in filteredScripts" :key="sc.id"
+            @click="insertScript(sc)"
+            :disabled="scriptInserting === sc.id"
+            class="w-full text-left px-5 py-3 border-b hover:bg-gray-50 disabled:opacity-50"
+          >
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-sm font-medium text-gray-800">{{ sc.label }}</span>
+              <span v-if="sc.funnel_stage" class="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 border border-violet-200">
+                {{ funnelStageLabel(sc.funnel_stage) }}
+              </span>
+              <span v-if="sc.marketing_tag" class="text-[10px] px-1.5 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200">
+                {{ sc.marketing_tag }}
+              </span>
+              <span v-if="scriptInserting === sc.id" class="text-[10px] text-gray-400 ml-auto">вставляю...</span>
+            </div>
+            <p class="text-xs text-gray-500 mt-1 line-clamp-2">{{ sc.preview }}</p>
+          </button>
+        </div>
+        <div class="px-5 py-3 border-t text-xs text-gray-400">
+          Текст подставится в поле ответа с ценами и именем клиента — перед отправкой его можно править.
+        </div>
       </div>
     </div>
   </div>
@@ -2081,6 +2137,74 @@ const managerError = ref('')
 // превратит их в токены, а отправка перезальёт во ВК (просьба ОП от 18.08:
 // «отправку фото и видео из панельки тоже добавить»).
 const managerFiles = ref([])
+const showScriptPicker = ref(false)
+const dialogScripts = ref([])
+const scriptsLoading = ref(false)
+const scriptSearch = ref('')
+const scriptInserting = ref(null)
+const scriptSearchInput = ref(null)
+
+// Активных скриптов 143 — списком их не перелистывают, ищут. Совпадение по
+// названию («2.2 Стоимость») и по тексту фразы: менеджер помнит и то, и другое.
+const filteredScripts = computed(() => {
+  const q = scriptSearch.value.trim().toLowerCase()
+  if (!q) return dialogScripts.value
+  return dialogScripts.value.filter(sc =>
+    (sc.label || '').toLowerCase().includes(q)
+    || (sc.preview || '').toLowerCase().includes(q)
+    || (sc.marketing_tag || '').toLowerCase().includes(q)
+  )
+})
+
+async function openScriptPicker() {
+  if (!activeDialogId.value) return
+  showScriptPicker.value = true
+  scriptSearch.value = ''
+  await nextTick()
+  scriptSearchInput.value?.focus()
+  if (dialogScripts.value.length && scriptsDialogId === activeDialogId.value) return
+  scriptsLoading.value = true
+  try {
+    const res = await api.get(`/chat/dialogs/${activeDialogId.value}/scripts`)
+    dialogScripts.value = res.data
+    scriptsDialogId = activeDialogId.value
+  } catch (e) {
+    managerError.value = e.response?.data?.detail || e.message
+    showScriptPicker.value = false
+  } finally {
+    scriptsLoading.value = false
+  }
+}
+
+// Для какого диалога загружен список: подстановки в тексте зависят от диалога,
+// но сам НАБОР скриптов — только от направления, поэтому перезагружаем список
+// лишь при смене диалога, а текст берём всегда свежий.
+let scriptsDialogId = null
+
+async function insertScript(sc) {
+  if (!activeDialogId.value || scriptInserting.value) return
+  scriptInserting.value = sc.id
+  try {
+    const res = await api.get(`/chat/dialogs/${activeDialogId.value}/scripts/${sc.id}`)
+    const { text, files } = res.data
+    // Дописываем к тому, что менеджер уже начал печатать, а не затираем.
+    managerInput.value = managerInput.value.trim()
+      ? `${managerInput.value.trim()}\n\n${text}`
+      : text
+    // Картинки скрипта уходят вложением, как и у ИИ: ссылка текстом читается
+    // клиентом как набор символов.
+    for (const url of files || []) {
+      if (!managerFiles.value.some(f => f.url === url)) {
+        managerFiles.value.push({ url, preview: url, name: url.split('/').pop() })
+      }
+    }
+    showScriptPicker.value = false
+  } catch (e) {
+    managerError.value = e.response?.data?.detail || e.message
+  } finally {
+    scriptInserting.value = null
+  }
+}
 const managerFileInput = ref(null)
 
 function removeManagerFile(index) {

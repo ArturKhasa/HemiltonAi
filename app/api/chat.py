@@ -16,9 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import ensure_type_access, get_allowed_type_ids, require_role
 from app.storage.local import safe_extension, save_file
 from app.config import settings
-from app.utils.media import attachment_token
+from app.utils.media import _TOKEN_URL_RE, attachment_token
 from app.utils.text import person_label as _person
-from app.db.models import AIRun, Client, Dialog, DialogPingState, DialogStatusConfig, DialogType, Message, MessageFeedback, MessageRole, User, UserDialogType, UserRole, VkGroup
+from app.db.models import AIRun, Client, Dialog, DialogPingState, DialogStatusConfig, DialogType, Message, MessageFeedback, MessageRole, Script, User, UserDialogType, UserRole, VkGroup
 from app.db.session import get_db
 
 logger = logging.getLogger(__name__)
@@ -373,6 +373,131 @@ async def set_assignee(
         dialog_id, label or "снят", current_user.id,
     )
     return {"ok": True, "assignee_id": body.user_id, "assignee_name": label}
+
+
+class DialogScriptOut(BaseModel):
+    """Скрипт в списке выбора у менеджера."""
+    id: int
+    label: str
+    funnel_stage: str | None = None
+    marketing_tag: str | None = None
+    manual_only: bool = False
+    preview: str = ""
+
+
+class RenderedScriptOut(BaseModel):
+    id: int
+    text: str
+    files: list[str] = []
+
+
+# Порядок стадий в списке — тот же, что проходит клиент. Скрипт без стадии
+# (отработка возражений, дожимы) уходит в конец: их выбирают поиском, а не
+# перелистыванием.
+_STAGE_ORDER = {
+    stage: i for i, stage in enumerate(
+        ["greeting", "pricing", "options", "sizing", "design",
+         "checkout", "payment_link", "post_payment", "paid"]
+    )
+}
+
+
+def _script_label(script: Script) -> str:
+    """Первая строка условия — то, как скрипт называют в выгрузке ОП
+    («2.2 Стоимость (свитшот). Уходит связкой…»). Условие бывает на абзац,
+    в списке нужна только шапка."""
+    head = (script.condition or "").strip().split("\n")[0].strip()
+    return head[:120] or f"Скрипт #{script.id}"
+
+
+@router.get("/dialogs/{dialog_id}/scripts", response_model=list[DialogScriptOut])
+async def list_dialog_scripts(
+    dialog_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "curator")),
+):
+    """Скрипты, которыми менеджер может ответить в этом диалоге.
+
+    Менеджеры работают в BlueSales, а панель для них витрина: интеграции не
+    будет (решение 27.08), значит отвечать надо отсюда — и теми же фразами, что
+    у ИИ, а не по памяти. Отдаём только список; текст с подстановками считается
+    отдельным запросом, когда скрипт выбран: активных скриптов 143, рендерить
+    все разом незачем.
+    """
+    dialog = await db.get(Dialog, dialog_id)
+    if not dialog:
+        raise HTTPException(status_code=404, detail="Dialog not found")
+    await ensure_type_access(current_user, dialog.type_id, db)
+
+    q = select(Script).where(Script.is_active == True)
+    if dialog.type_id is not None:
+        q = q.where(Script.type_id == dialog.type_id)
+    scripts = list((await db.execute(q)).scalars().all())
+    scripts.sort(key=lambda s: (_STAGE_ORDER.get(s.funnel_stage or "", 99), s.id))
+
+    from app.utils.media import strip_attachment_tokens
+
+    return [
+        DialogScriptOut(
+            id=s.id,
+            label=_script_label(s),
+            funnel_stage=s.funnel_stage,
+            marketing_tag=s.marketing_tag,
+            manual_only=bool(s.manual_only),
+            preview=" ".join(strip_attachment_tokens(s.phrase_text).split())[:160],
+        )
+        for s in scripts
+    ]
+
+
+@router.get("/dialogs/{dialog_id}/scripts/{script_id}", response_model=RenderedScriptOut)
+async def render_dialog_script(
+    dialog_id: int,
+    script_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "curator")),
+):
+    """Текст скрипта под этот диалог: имя, цены, данные заказа подставлены,
+    картинки вынесены во вложения.
+
+    Подстановки те же, что у автоматической отправки (`_finalize_outgoing`), —
+    иначе менеджер вставил бы клиенту «[цена:свитшот]» и «[Заказ.Рост]».
+
+    Ничего не сохраняем: сессию не коммитим, и закрепление цены за диалогом
+    (`_pin_price`) остаётся в памяти запроса. Менеджер мог открыть скрипт и
+    передумать — цена диалога от одного просмотра меняться не должна.
+    """
+    dialog = await db.get(Dialog, dialog_id)
+    if not dialog:
+        raise HTTPException(status_code=404, detail="Dialog not found")
+    await ensure_type_access(current_user, dialog.type_id, db)
+
+    script = await db.get(Script, script_id)
+    if not script or not script.is_active:
+        raise HTTPException(status_code=404, detail="Script not found")
+
+    from app.ai.runner import _finalize_outgoing
+    from app.sales.order_slots import collect_slots
+    from app.utils.media import attachment_tokens, strip_attachment_tokens
+
+    history = (await db.execute(
+        select(Message).where(Message.dialog_id == dialog_id).order_by(Message.created_at)
+    )).scalars().all()
+    slots = collect_slots([
+        ("client" if m.role == MessageRole.client else "manager", m.text) for m in history
+    ])
+    client = await db.get(Client, dialog.client_id)
+
+    text = await _finalize_outgoing(db, dialog, script.phrase_text, client, slots)
+    # Токены «[photo-…]» вынимаем из текста в отдельный список: менеджеру в поле
+    # ответа нужен чистый текст, а картинки он видит миниатюрами и может убрать
+    # лишнюю. Обратно в токены их завернёт отправка (reply_as_manager), поэтому
+    # клиент получит вложение, а не ссылку строкой.
+    urls = [
+        m.group(2) for m in (_TOKEN_URL_RE.match(t) for t in attachment_tokens(text))
+        if m is not None
+    ]
+    return RenderedScriptOut(id=script.id, text=strip_attachment_tokens(text), files=urls)
 
 
 @router.get("/marketing-tags")
