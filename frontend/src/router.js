@@ -4,7 +4,9 @@ import { useAuthStore } from './stores/auth'
 const routes = [
   { path: '/login', component: () => import('./pages/LoginPage.vue'), meta: { public: true } },
   { path: '/register', component: () => import('./pages/RegisterPage.vue'), meta: { public: true } },
-  { path: '/', component: () => import('./pages/ChatPage.vue') },
+  // Ссылки из Telegram-уведомлений ведут на /chat?dialog=... . Alias нужен,
+  // чтобы catch-all redirect не потерял query до того, как его прочитает чат.
+  { path: '/', alias: '/chat', component: () => import('./pages/ChatPage.vue') },
   { path: '/admin', component: () => import('./pages/AdminPage.vue'), meta: { roles: ['admin'] } },
   { path: '/admin/ping-rules', component: () => import('./pages/PingRulesPage.vue'), meta: { roles: ['admin'] } },
   { path: '/admin/spending', component: () => import('./pages/SpendingPage.vue'), meta: { roles: ['admin'] } },

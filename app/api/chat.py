@@ -579,6 +579,7 @@ async def count_chat_dialogs(
 async def list_chat_dialogs(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role("admin", "curator")),
+    dialog_id: int | None = Query(default=None),
     is_test: bool | None = Query(default=None),
     status_filter: list[str] = Query(default=[]),
     ai_provider_filter: list[str] = Query(default=[]),
@@ -620,6 +621,11 @@ async def list_chat_dialogs(
         .outerjoin(User, Dialog.assigned_curator_id == User.id)
         .order_by(Dialog.last_message_at.desc().nullslast(), Dialog.created_at.desc())
     )
+    # Deep link из уведомления должен находить точный диалог независимо от его
+    # позиции в общем списке. Проверка доступных направлений ниже по-прежнему
+    # применяется, поэтому параметр не открывает чужие диалоги куратору.
+    if dialog_id is not None:
+        q = q.where(Dialog.id == dialog_id)
     q = await _apply_dialog_filters(
         q, db,
         is_test=is_test, status_filter=status_filter, ai_provider_filter=ai_provider_filter,

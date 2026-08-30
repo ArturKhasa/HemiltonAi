@@ -28,6 +28,7 @@ async def headers(client, db):
 async def leads(db):
     db.add(DialogType(id=1, name="default", display_name="Основное"))
     await db.flush()
+    dialog_ids = []
     for vk_id, name, last_name in [
         (709008956, "Денис", "Аксёнов"),
         (465349448, "Илья", "Иноземцев"),
@@ -38,8 +39,12 @@ async def leads(db):
         c = Client(vk_user_id=vk_id, name=name, last_name=last_name)
         db.add(c)
         await db.flush()
-        db.add(Dialog(client_id=c.id, type_id=1, is_test=False))
+        dialog = Dialog(client_id=c.id, type_id=1, is_test=False)
+        db.add(dialog)
+        await db.flush()
+        dialog_ids.append(dialog.id)
     await db.commit()
+    return dialog_ids
 
 
 async def _names(client, headers, query):
@@ -81,6 +86,18 @@ async def test_unknown_name_finds_nothing(client, headers, leads):
 async def test_empty_filter_returns_everyone(client, headers, leads):
     resp = await client.get("/api/chat/dialogs", headers=headers)
     assert len(resp.json()) == 5
+
+
+async def test_finds_exact_dialog_by_id_before_pagination(client, headers, leads):
+    """Deep link получает нужную строку, даже если общий лимит равен единице."""
+    target = leads[-1]
+    resp = await client.get(
+        "/api/chat/dialogs",
+        headers=headers,
+        params={"dialog_id": target, "limit": 1},
+    )
+    assert resp.status_code == 200
+    assert [row["id"] for row in resp.json()] == [target]
 
 
 async def test_counter_matches_the_filtered_list(client, headers, leads):

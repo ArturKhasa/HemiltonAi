@@ -1204,6 +1204,10 @@ const dialogsError = ref('')
 const dialogsCount = ref(0)
 const dialogListEl = ref(null)
 const activeDialogId = ref(null)
+// Диалог, открытый по deep link, может не входить в первые 50 строк или не
+// подходить под сохранённые фильтры. Храним его отдельно, чтобы автообновление
+// списка не лишало шапку данных выбранного клиента.
+const linkedDialog = ref(null)
 const messages = ref([])
 const pingState = ref(null)
 const input = ref('')
@@ -1508,7 +1512,10 @@ const csvExporting = ref(false)
 const idsExporting = ref(false)
 const idsCopied = ref(false)
 
-const activeDialog = computed(() => dialogs.value.find(d => d.id === activeDialogId.value))
+const activeDialog = computed(() =>
+  dialogs.value.find(d => d.id === activeDialogId.value)
+  || (linkedDialog.value?.id === activeDialogId.value ? linkedDialog.value : undefined)
+)
 const activeStatuses = computed(() => statuses.value.filter(s => s.is_active))
 
 // Все статусы + вариант «Без статуса»
@@ -1616,7 +1623,15 @@ async function loadDialogs() {
   dialogsError.value = ''
   try {
     const res = await api.get('/chat/dialogs', { params: buildDialogParams(0) })
-    dialogs.value = res.data
+    const loaded = res.data
+    if (
+      linkedDialog.value?.id === activeDialogId.value
+      && !loaded.some(d => d.id === linkedDialog.value.id)
+    ) {
+      dialogs.value = [linkedDialog.value, ...loaded]
+    } else {
+      dialogs.value = loaded
+    }
     dialogsHasMore.value = res.data.length === 50
     dialogsOffset.value = res.data.length
     api.get('/chat/dialogs/count', { params: buildDialogParams(0) })
@@ -1639,7 +1654,11 @@ async function loadMoreDialogs() {
   dialogsLoading.value = true
   try {
     const res = await api.get('/chat/dialogs', { params: buildDialogParams(dialogsOffset.value) })
-    dialogs.value = [...dialogs.value, ...res.data]
+    const knownIds = new Set(dialogs.value.map(d => d.id))
+    dialogs.value = [
+      ...dialogs.value,
+      ...res.data.filter(d => !knownIds.has(d.id)),
+    ]
     dialogsHasMore.value = res.data.length === 50
     dialogsOffset.value += res.data.length
   } finally {
@@ -1655,6 +1674,8 @@ function onDialogListScroll(e) {
 }
 
 async function applyFilters() {
+  // После явного применения фильтров список снова полностью подчиняется им.
+  linkedDialog.value = null
   saveFiltersToStorage()
   showFilters.value = false
   await loadDialogs()
@@ -1934,6 +1955,7 @@ async function loadStatuses() {
 let _openSeq = 0
 
 async function openDialog(id) {
+  if (linkedDialog.value?.id !== id) linkedDialog.value = null
   const seq = ++_openSeq
   activeDialogId.value = id
   pingState.value = null
@@ -2491,13 +2513,49 @@ async function openByVkUserId(vkId) {
   router.replace({ path: '/' })
 }
 
+// Глубокая ссылка из Telegram: /chat?dialog=80973. Сначала загружаем обычный
+// список, затем при необходимости запрашиваем одну точную строку — сохранённые
+// фильтры и лимит в 50 диалогов не должны мешать открыть горячего лида.
+async function openByDialogId(dialogId) {
+  try {
+    await loadDialogs()
+    let dialog = dialogs.value.find(d => d.id === dialogId)
+    if (!dialog) {
+      const res = await api.get('/chat/dialogs', { params: { dialog_id: dialogId } })
+      dialog = res.data[0]
+    }
+    if (!dialog) {
+      dialogsError.value = `Диалог #${dialogId} не найден или недоступен.`
+      return
+    }
+    linkedDialog.value = dialog
+    if (!dialogs.value.some(d => d.id === dialog.id)) {
+      dialogs.value = [dialog, ...dialogs.value]
+    }
+    await openDialog(dialog.id)
+  } catch (e) {
+    dialogsError.value = e.response?.status === 403
+      ? 'Нет доступа к диалогу из ссылки.'
+      : `Не удалось открыть диалог #${dialogId}.`
+  } finally {
+    // Повторное открытие страницы не должно заново навязывать deep link.
+    router.replace({ path: '/' })
+  }
+}
+
 onMounted(async () => {
   const vkId = (route.query.vk_user_id || '').toString().trim()
+  const dialogParam = (route.query.dialog || '').toString().trim()
+  const dialogId = /^\d+$/.test(dialogParam) && Number(dialogParam) > 0
+    ? Number(dialogParam)
+    : null
   await Promise.all([
     loadDialogTypes(), loadStatuses(), loadPingFunnelTypes(), loadMarketingTags(),
     loadAssignees(),
   ])
-  if (vkId) {
+  if (dialogId) {
+    await openByDialogId(dialogId)
+  } else if (vkId) {
     await openByVkUserId(vkId)
   } else {
     await loadDialogs()
