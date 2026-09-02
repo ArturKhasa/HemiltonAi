@@ -776,7 +776,15 @@ async def resume_after_handoff(db: AsyncSession, dialog: Dialog, now=None) -> st
         await _init_ping_state(
             db, dialog, last_out.created_at, now, resumed_by_manager=True,
         )
-        return "воронка заведена заново"
+        # Завестись могло и не получиться: без отправленной цены платные воронки
+        # недоступны, а другой в базе нет. Отчёт об этом обязан быть честным —
+        # по нему решают, уйдёт клиенту сообщение или нет.
+        created = await db.scalar(
+            select(DialogPingState).where(DialogPingState.dialog_id == dialog.id)
+        )
+        if created is None:
+            return "воронка не заведена — цену клиенту не отправляли"
+        return f"воронка «{created.funnel_type}» заведена с шага {created.current_step}"
 
     sent_step = await _last_sent_ping_step(db, dialog.id)
     if sent_step is None:

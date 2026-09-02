@@ -157,10 +157,26 @@ class TestFunnelIsCreatedWhenThereIsNone:
         what = await worker.resume_after_handoff(db, dialog, NOW)
 
         state = await db.scalar(select(DialogPingState))
-        assert state is not None and "заведена заново" in what
+        assert state is not None and "заведена с шага 1" in what
         assert state.current_step == 1
         assert state.resumed_by_manager is True
         assert state.next_ping_due_at == manager.created_at + timedelta(seconds=900)
+
+    async def test_no_price_means_no_funnel_and_an_honest_report(
+        self, db, dialog, rules, monkeypatch,
+    ):
+        """Без отправленной цены воронки нет — и отчёт обязан это говорить, по
+        нему решают, уйдёт клиенту сообщение или нет."""
+        async def _no_funnel(db_, dialog_):
+            return None, None
+
+        monkeypatch.setattr("app.ping.agent.detect_funnel_with_ai", _no_funnel)
+        await _say(db, dialog, MessageRole.curator, "Какое имя напишем?", minutes_ago=300)
+
+        what = await worker.resume_after_handoff(db, dialog, NOW)
+
+        assert await db.scalar(select(DialogPingState)) is None
+        assert "цену клиенту не отправляли" in what
 
     async def test_broadcast_is_not_a_handoff_point(self, db, dialog, rules):
         """Последним словом рассылка — это не разговор, продолжать нечего."""

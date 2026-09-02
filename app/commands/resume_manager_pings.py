@@ -18,15 +18,32 @@
 сообщения, а канал активен, — то есть ровно те, где автоматика и так имеет право
 писать. Рассылка последним словом воронку не заводит: она приходит в диалог сама
 по себе и продолжением разговора не является.
+
+Две оговорки именно для разового прогона по истории:
+
+* диалоги в статусе «Нужен куратор» пропускаем. На живом пути правило Лены
+  прямое — сняли паузу, пинги идут вне зависимости от статуса, — но там снятие
+  паузы и есть осознанное действие человека. В истории отличить «менеджер вернул
+  диалог ИИ» от «эскалацию кто-то снял мимоходом» нечем, а цена ошибки высокая:
+  диалог 82014 — клиент просит вышивку, менеджер считает цену руками и шлёт
+  голосовое, и общий пинг «Я Вам стоимость отправила, а вы мне что-то не
+  отвечаете))» встал бы прямо поверх этого. Нужно и их — флаг `--include-curator`;
+* в ВК не трогаем тех, кто нам не написал ни слова: такой диалог завела рассылка,
+  и пинг в нём — сообщение незнакомому человеку. То же правило стоит в
+  `discover()`. В MAX оно не действует: там боту пишут только после кнопки
+  «Начать», её нажатие и есть согласие.
 """
 import argparse
 import asyncio
 import logging
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from app.db.models import Dialog, DialogPingState, DialogStatusConfig, Message, MessageRole
+from app.ai.triggers import CURATOR_STATUS_NAME
+from app.db.models import (
+    Client, Dialog, DialogPingState, DialogStatusConfig, Message, MessageRole, VkGroup,
+)
 from app.db.session import AsyncSessionLocal
 from app.messaging import dialogs_on_inactive_channels
 from app.ping.eligibility import is_non_broadcast_curator_message, is_pingable_outbound
@@ -40,12 +57,15 @@ logger = logging.getLogger(__name__)
 _MIN_AGE_HOURS = 24
 
 
-async def _candidates(include_ai_last: bool) -> list[int]:
+async def _candidates(include_ai_last: bool, include_curator: bool) -> list[int]:
     async with AsyncSessionLocal() as db:
-        blacklist_ids = select(DialogStatusConfig.id).where(DialogStatusConfig.name == "ЧС")
+        skip_names = ["ЧС"] if include_curator else ["ЧС", CURATOR_STATUS_NAME]
+        skip_ids = select(DialogStatusConfig.id).where(DialogStatusConfig.name.in_(skip_names))
         cutoff = msk_now() - timedelta(hours=_MIN_AGE_HOURS)
         rows = (await db.execute(
-            select(Dialog.id)
+            select(Dialog.id, VkGroup.platform)
+            .join(Client, Dialog.client_id == Client.id)
+            .outerjoin(VkGroup, Client.vk_group_id == VkGroup.id)
             .where(
                 Dialog.ai_paused == False,
                 Dialog.vk_blocked == False,
@@ -53,14 +73,14 @@ async def _candidates(include_ai_last: bool) -> list[int]:
                 Dialog.id.not_in(dialogs_on_inactive_channels()),
                 Dialog.last_message_at.isnot(None),
                 Dialog.last_message_at < cutoff,
-                Dialog.current_status_id.not_in(blacklist_ids)
+                Dialog.current_status_id.not_in(skip_ids)
                 | Dialog.current_status_id.is_(None),
             )
             .order_by(Dialog.id)
-        )).scalars().all()
+        )).all()
 
         keep: list[int] = []
-        for dialog_id in rows:
+        for dialog_id, platform in rows:
             last = await db.scalar(
                 select(Message)
                 .where(Message.dialog_id == dialog_id)
@@ -69,16 +89,33 @@ async def _candidates(include_ai_last: bool) -> list[int]:
             )
             if last is None:
                 continue
-            if is_non_broadcast_curator_message(last):
-                keep.append(dialog_id)
-            elif include_ai_last and last.role == MessageRole.ai and is_pingable_outbound(last):
-                keep.append(dialog_id)
+            if not is_non_broadcast_curator_message(last) and not (
+                include_ai_last and last.role == MessageRole.ai and is_pingable_outbound(last)
+            ):
+                continue
+            # В ВК диалог заводит либо сообщение клиента, либо рассылка. Пинговать
+            # второе — писать незнакомому человеку (то же правило в discover()).
+            if platform != "max":
+                client_msgs = await db.scalar(
+                    select(func.count()).where(
+                        Message.dialog_id == dialog_id,
+                        Message.role == MessageRole.client,
+                    )
+                )
+                if not client_msgs:
+                    continue
+            keep.append(dialog_id)
         return keep
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--include-curator",
+        action="store_true",
+        help="взять и диалоги в статусе «Нужен куратор» (их ведёт человек)",
+    )
     parser.add_argument(
         "--include-ai-last",
         action="store_true",
@@ -87,7 +124,7 @@ async def main() -> None:
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
 
-    ids = await _candidates(args.include_ai_last)
+    ids = await _candidates(args.include_ai_last, args.include_curator)
     if args.limit:
         ids = ids[: args.limit]
     print(f"кандидатов: {len(ids)}")
@@ -103,12 +140,14 @@ async def main() -> None:
             )
             if state is not None and not state.is_completed:
                 continue  # воронка и так идёт
-            if args.dry_run:
-                print(f"  диалог {dialog_id}: воронка была бы продолжена")
-                done += 1
-                continue
+            # В сухом прогоне делаем ровно ту же работу и откатываем: иначе
+            # «кандидат» ничего не говорит о том, уйдёт клиенту пинг или нет —
+            # у диалога без отправленной цены воронки не будет вовсе.
             what = await resume_after_handoff(db, dialog)
-            await db.commit()
+            if args.dry_run:
+                await db.rollback()
+            else:
+                await db.commit()
             print(f"  диалог {dialog_id}: {what}")
             done += 1
 
