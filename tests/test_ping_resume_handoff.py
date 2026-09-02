@@ -230,3 +230,69 @@ class TestHotStageNoLongerTakesTheDialogBack:
         assert dialog.ai_paused is True
         assert agent_ran == []
         assert notified and "горячая стадия" in notified[0]
+
+
+class TestHotStageDialogGetsItsOwnFunnel:
+    """Догонять горячий диалог общей воронкой — шаг назад: «Я Вам стоимость
+    отправила, а вы мне что-то не отвечаете))» человеку, которому уже показали
+    способы оплаты. Пока ОП не заполнил именную воронку, диалог молчит."""
+
+    async def test_checkout_stage_switches_the_funnel(self, db, dialog, rules):
+        db.add(PingRule(
+            type_id=dialog.type_id, funnel_type="checkout", step=1,
+            delay_seconds=1800, phrase_text="получилось выбрать способ оплаты?",
+            is_active=True,
+        ))
+        await db.commit()
+        dialog.funnel_stage = "checkout"
+        await _say(db, dialog, MessageRole.curator, "Сумма заказа - 5 990 ₽", minutes_ago=10)
+        db.add(DialogPingState(
+            dialog_id=dialog.id, funnel_type="knows_price", current_step=2, is_completed=True,
+        ))
+        await db.commit()
+
+        what = await worker.resume_after_handoff(db, dialog, NOW)
+
+        state = await db.scalar(select(DialogPingState))
+        assert state.funnel_type == "checkout"
+        assert state.resumed_by_manager is True
+        assert "заведена воронка «checkout»" in what
+
+    async def test_empty_named_funnel_keeps_quiet(self, db, dialog, rules):
+        """Шаги заведены, но выключены — ОП ещё не написал тексты."""
+        db.add(PingRule(
+            type_id=dialog.type_id, funnel_type="checkout", step=1,
+            delay_seconds=1800, phrase_text="заготовка", is_active=False,
+        ))
+        await db.commit()
+        dialog.funnel_stage = "checkout"
+        await _say(db, dialog, MessageRole.curator, "Сумма заказа - 5 990 ₽", minutes_ago=10)
+
+        what = await worker.resume_after_handoff(db, dialog, NOW)
+
+        assert await db.scalar(select(DialogPingState)) is None
+        assert "ещё не заполнена" in what
+
+    async def test_named_funnel_already_running_is_continued_not_restarted(
+        self, db, dialog, rules,
+    ):
+        for step, delay in ((1, 1800), (2, 10800)):
+            db.add(PingRule(
+                type_id=dialog.type_id, funnel_type="checkout", step=step,
+                delay_seconds=delay, phrase_text=f"checkout {step}", is_active=True,
+            ))
+        await db.commit()
+        dialog.funnel_stage = "checkout"
+        await _say(db, dialog, MessageRole.ai, "checkout 1", minutes_ago=600,
+                   metadata={"ping": True, "funnel": "checkout", "step": 1})
+        await _say(db, dialog, MessageRole.curator, "Держу заказ", minutes_ago=10)
+        db.add(DialogPingState(
+            dialog_id=dialog.id, funnel_type="checkout", current_step=2, is_completed=True,
+        ))
+        await db.commit()
+
+        what = await worker.resume_after_handoff(db, dialog, NOW)
+
+        state = await db.scalar(select(DialogPingState))
+        assert (state.funnel_type, state.current_step) == ("checkout", 2)
+        assert "продолжена с шага 2" in what

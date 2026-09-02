@@ -37,6 +37,15 @@ _MIN_SILENCE_SECONDS = 15 * 60
 # воронки для горячей стадии и заведены (просьба Лены от 01.09).
 FORCED_FUNNELS = frozenset({"checkout", "after_payment"})
 
+# Какая из них подходит диалогу, застрявшему на горячей стадии. Стадию ставит
+# классификатор на каждое сообщение клиента, и по ней видно, что человеку уже
+# показали: способы оплаты (checkout) или счёт (payment_link, post_payment).
+FUNNEL_BY_STAGE = {
+    "checkout": "checkout",
+    "payment_link": "after_payment",
+    "post_payment": "after_payment",
+}
+
 # Ping agent sometimes returns action=complete without calling its context tools (a
 # model misfire). We retry such states instead of killing them; _MAX_PING_MISFIRES
 # bounds the retries so a persistently-broken agent eventually stops.
@@ -734,6 +743,32 @@ async def resume_after_handoff(db: AsyncSession, dialog: Dialog, now=None) -> st
     state = await db.scalar(
         select(DialogPingState).where(DialogPingState.dialog_id == dialog.id)
     )
+
+    # Диалог стоит на горячей ступени — догонять его надо своей воронкой, а не
+    # общей: «Я Вам стоимость отправила, а вы мне что-то не отвечаете))» человеку,
+    # которому уже показали способы оплаты, — это шаг назад. Пока ОП не заполнил
+    # такую воронку, диалог молчит: это лучше, чем не тот пинг.
+    named = FUNNEL_BY_STAGE.get(dialog.funnel_stage or "")
+    if named and (state is None or state.funnel_type != named):
+        first_rule = await _find_first_rule(db, dialog.type_id, named, None)
+        if first_rule is None:
+            return f"воронка «{named}» ещё не заполнена — пингов не будет"
+        if state is not None:
+            await db.delete(state)
+            await db.flush()
+        base = last_out.created_at if last_out is not None else now
+        db.add(DialogPingState(
+            dialog_id=dialog.id,
+            funnel_type=named,
+            funnel_reason="диалог вернул менеджер на горячей ступени",
+            current_step=first_rule.step,
+            next_ping_due_at=max(
+                base + timedelta(seconds=first_rule.delay_seconds),
+                now + timedelta(seconds=_MIN_SILENCE_SECONDS),
+            ),
+            resumed_by_manager=True,
+        ))
+        return f"заведена воронка «{named}» с шага {first_rule.step}"
 
     if state is None:
         if last_out is None:
