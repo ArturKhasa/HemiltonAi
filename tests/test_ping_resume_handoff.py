@@ -160,7 +160,10 @@ class TestFunnelIsCreatedWhenThereIsNone:
         assert state is not None and "заведена с шага 1" in what
         assert state.current_step == 1
         assert state.resumed_by_manager is True
-        assert state.next_ping_due_at == manager.created_at + timedelta(seconds=900)
+        # Срок первого шага прошёл ещё пять суток назад, но менеджер нажал
+        # «вернуть ИИ» только что и, скорее всего, ещё в диалоге.
+        assert state.next_ping_due_at == NOW + timedelta(seconds=worker._MIN_SILENCE_SECONDS)
+        assert manager.created_at < NOW
 
     async def test_no_price_means_no_funnel_and_an_honest_report(
         self, db, dialog, rules, monkeypatch,

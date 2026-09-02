@@ -784,6 +784,12 @@ async def resume_after_handoff(db: AsyncSession, dialog: Dialog, now=None) -> st
         )
         if created is None:
             return "воронка не заведена — цену клиенту не отправляли"
+        # Диалог молчит давно, и срок первого шага давно прошёл. Отправлять
+        # немедленно нельзя: менеджер только что нажал «вернуть ИИ» и, скорее
+        # всего, ещё в диалоге. Даём те же 15 минут тишины, что и всем.
+        created.next_ping_due_at = max(
+            created.next_ping_due_at, now + timedelta(seconds=_MIN_SILENCE_SECONDS),
+        )
         return f"воронка «{created.funnel_type}» заведена с шага {created.current_step}"
 
     sent_step = await _last_sent_ping_step(db, dialog.id)
