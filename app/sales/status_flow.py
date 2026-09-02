@@ -172,6 +172,29 @@ async def sync_status(
     return target
 
 
+async def _checkout_sent_by_manager(db: AsyncSession, dialog: Dialog) -> bool:
+    """Способы оплаты отправил живой менеджер, а не ИИ.
+
+    Лестница читает и сообщения менеджера — иначе 665 диалогов, которые ведёт
+    живой оператор, навсегда остались бы в стартовом статусе. Но звать людей в
+    телеграм на диалог, в котором их коллега уже сидит, незачем: за неделю таких
+    было 217 из 363 (замер 02.09, просьба ОП «много лишней инфы»).
+    """
+    messages = list((await db.execute(
+        select(Message)
+        .where(Message.dialog_id == dialog.id)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+    )).scalars().all())
+    for m in messages:
+        if not was_delivered(m) or (m.msg_metadata or {}).get("broadcast"):
+            continue
+        if m.role not in (MessageRole.ai, MessageRole.curator):
+            continue
+        if CHECKOUT_PRESENTED_RE.search(m.text or ""):
+            return m.role == MessageRole.curator
+    return False
+
+
 async def _announce_hot(db: AsyncSession, dialog: Dialog) -> None:
     """Позвать людей в телеграм: клиенту показаны способы оплаты.
 
@@ -181,6 +204,13 @@ async def _announce_hot(db: AsyncSession, dialog: Dialog) -> None:
     from app.db.models import Client, VkGroup
     from app.messaging import platform_of
     from app.notify import notify_hot
+
+    if await _checkout_sent_by_manager(db, dialog):
+        logger.info(
+            "уведомление о «Горячем» не отправлено — способы оплаты отправил менеджер "
+            "| dialog=%s", dialog.id,
+        )
+        return
 
     client = await db.get(Client, dialog.client_id)
     channel = (
@@ -203,22 +233,27 @@ async def _apply_side_effects(db: AsyncSession, dialog: Dialog, target: str, now
     только на том пути, где статус ставила модель."""
     from app.db.models import DialogPingState
 
-    if dialog.ai_paused and target == AWAITING_PREPAY:
-        # Счёт выставил менеджер, забравший диалог, — и лестница вызвана как раз
-        # из его ответа (вебхук ВК, панель, наблюдатель MAX), где пинги только
-        # что погашены. Заводить воронку заново значит писать поверх живого
-        # разговора: «пинги должны отключаться, когда диалог переведён на
-        # менеджера».
+    # Ступень, у которой есть своя воронка пингов: способы оплаты показаны
+    # (просьба Лены от 01.09 — «новая воронка пингов для лидов, которые молчат
+    # после способов оплаты») и счёт выставлен.
+    funnel_for_step = {HOT: "checkout", AWAITING_PREPAY: "after_payment"}.get(target)
+
+    if dialog.ai_paused and funnel_for_step:
+        # Способы оплаты или счёт отправил менеджер, забравший диалог, — и
+        # лестница вызвана как раз из его ответа (вебхук ВК, панель, наблюдатель
+        # MAX), где пинги только что погашены. Заводить воронку заново значит
+        # писать поверх живого разговора: «пинги должны отключаться, когда диалог
+        # переведён на менеджера».
         logger.info("ping: воронка не заводится — диалог ведёт человек | dialog=%s", dialog.id)
         return
 
-    if target == AWAITING_PREPAY:
-        # Клиент получил счёт — общая воронка «знает цену» ему больше не
-        # подходит: дожимать предоплату надо своей лестницей пингов.
+    if funnel_for_step:
+        # Общая воронка «знает цену» такому клиенту больше не подходит: он уже
+        # видел сумму и способы оплаты, дожимать его надо своей лестницей.
         from app.ping.worker import force_ping_funnel
         from app.utils.time import msk_now
 
-        await force_ping_funnel(db, dialog, "after_payment", now or msk_now())
+        await force_ping_funnel(db, dialog, funnel_for_step, now or msk_now())
     elif target == ORDER_CREATED:
         state = await db.scalar(
             select(DialogPingState).where(DialogPingState.dialog_id == dialog.id)

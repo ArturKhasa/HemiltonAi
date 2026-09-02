@@ -109,3 +109,42 @@ class TestNotConfigured:
         await _say(db, dialog, MessageRole.ai, CHECKOUT)
         assert await sync_status(db, dialog) == HOT
         assert calls == []
+
+
+class TestManagerHandledDialogsAreQuiet:
+    """ОП, 02.09: «уведы приходят по любому поводу, много лишней инфы».
+
+    Лестница читает и сообщения менеджера — иначе 665 диалогов, которые ведёт
+    живой оператор, навсегда остались бы в стартовом статусе. Но звать людей в
+    чат на диалог, где их коллега уже сидит, незачем: за неделю таких было 217
+    из 363. Заказчик 02.09: «диалоги менеджеров отключаем».
+    """
+
+    async def test_silent_when_the_manager_sent_the_payment_options(
+        self, db, dialog, statuses, sent,
+    ):
+        await _say(db, dialog, MessageRole.client, "Беру")
+        await _say(db, dialog, MessageRole.curator, CHECKOUT)
+
+        assert await sync_status(db, dialog) == HOT
+        assert sent == []
+
+    async def test_still_fires_when_the_ai_sent_them(self, db, dialog, statuses, sent):
+        await _say(db, dialog, MessageRole.client, "Беру")
+        await _say(db, dialog, MessageRole.ai, CHECKOUT)
+
+        assert await sync_status(db, dialog) == HOT
+        assert len(sent) == 1
+
+    async def test_broadcast_with_the_same_words_does_not_decide_anything(
+        self, db, dialog, statuses, sent,
+    ):
+        """Рассылку лестница не читает вовсе — и молчать из-за неё не должна."""
+        await _say(db, dialog, MessageRole.client, "Беру")
+        db.add(Message(dialog_id=dialog.id, role=MessageRole.curator, text=CHECKOUT,
+                       msg_metadata={"broadcast": True}))
+        await db.commit()
+        await _say(db, dialog, MessageRole.ai, CHECKOUT)
+
+        assert await sync_status(db, dialog) == HOT
+        assert len(sent) == 1

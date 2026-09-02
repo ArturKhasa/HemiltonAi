@@ -172,7 +172,13 @@ async def detect_funnel_with_ai(
             PingRule.is_active == True,
         ).distinct()
     )
-    funnels = [row[0] for row in funnels_result.fetchall()]
+    # Именные воронки горячей стадии назначает код по факту («показаны способы
+    # оплаты», «выставлен счёт»), и классификатору выбирать из них нечего: он
+    # видит молчащий диалог, а не момент отправки. Оставь мы их в списке — на
+    # каждый молчащий диалог уходил бы лишний запрос к модели со списком воронок,
+    # про которые в промпте классификатора не сказано ничего.
+    from app.ping.worker import FORCED_FUNNELS
+    funnels = [row[0] for row in funnels_result.fetchall() if row[0] not in FORCED_FUNNELS]
     if not funnels:
         logger.warning("detect_funnel_ai: no funnels in DB | dialog=%s type_id=%s", dialog.id, type_id)
         return "regular", "нет активных воронок в БД — fallback regular"
@@ -427,6 +433,22 @@ def _build_ping_agent(
     )
 
 
+async def _last_manager_line(db: AsyncSession, dialog: Dialog) -> str | None:
+    """Последняя живая реплика менеджера в диалоге — без рассылок и без реплик ИИ."""
+    from app.ping.eligibility import is_non_broadcast_curator_message
+
+    rows = (await db.execute(
+        select(Message)
+        .where(Message.dialog_id == dialog.id)
+        .order_by(Message.created_at.desc())
+        .limit(30)
+    )).scalars().all()
+    for msg in rows:
+        if is_non_broadcast_curator_message(msg) and (msg.text or "").strip():
+            return msg.text.strip()[:400]
+    return None
+
+
 async def run_ping_agent(
     db: AsyncSession,
     state: DialogPingState,
@@ -458,6 +480,22 @@ async def run_ping_agent(
         "Изготовление занимает 10-14 дней плюс доставка 2-3 дня. Считай сроки от "
         "этой даты и не обещай того, что в них не укладывается."
     )
+
+    # Диалог вёл человек и вернул его нам. Пинг обязан продолжать разговор с того
+    # места, где менеджер остановился, а не начинать свою линию: «на чем
+    # закончили, то нужно и продолжить… она пингует клиента, подстраиваясь под
+    # последнее сообщение менеджера» (Лена, 01.09).
+    if state.resumed_by_manager:
+        handoff = await _last_manager_line(db, dialog)
+        if handoff:
+            dynamic_context.append(
+                "[Диалог вернули ИИ]\n"
+                "До этого диалог вёл живой менеджер, его последнее сообщение клиенту:\n"
+                f"«{handoff}»\n"
+                "Продолжай именно с этого места: напомни о том, чего менеджер ждёт "
+                "от клиента, своими словами и без приветствия."
+            )
+            logger.info("ping_agent: handoff context injected | dialog=%s", dialog.id)
 
     feedback_rules = await load_active_feedback_rules(db, type_id, is_ping=True)
     if feedback_rules:

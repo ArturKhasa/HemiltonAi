@@ -194,6 +194,27 @@ def oversize(text: str | None, size_expected: bool = False) -> bool:
     )
 
 
+def curator_trigger_in_batch(
+    texts: list[str | None], size_expected: bool = False,
+) -> str | None:
+    """Тема менеджера в любой из неотвеченных реплик клиента.
+
+    Клиент дробит мысль: «а вышивка есть?» и следом «или только принт?». Прогон
+    по первой уступает ход последней (`superseded_by_newer_message`), и проверка
+    видела только текст последней — тема менеджера в предыдущей терялась. По
+    боевой базе таких сообщений шесть за три недели, а Лена 01.09 просит, чтобы
+    после слова про вышивку ИИ выключался строго.
+
+    Порядок важен: первым идёт текущее сообщение, за ним более ранние. Так в
+    логах и в причине эскалации остаётся тема, из-за которой ход и остановлен.
+    """
+    for text in texts:
+        trigger = curator_trigger(text, size_expected=size_expected)
+        if trigger:
+            return trigger
+    return None
+
+
 def curator_trigger(text: str | None, size_expected: bool = False) -> str | None:
     """Название сработавшего триггера эскалации, либо None.
 

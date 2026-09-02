@@ -49,6 +49,19 @@ async def live_dialog(db):
 
 
 @pytest.fixture
+async def ping_rules(db):
+    """Воронка «знает цену» из двух шагов — как на проде, только короче."""
+    from app.db.models import PingRule
+
+    for step, delay in ((1, 900), (2, 3600)):
+        db.add(PingRule(
+            type_id=1, funnel_type="knows_price", step=step,
+            delay_seconds=delay, phrase_text=f"шаг {step}", is_active=True,
+        ))
+    await db.commit()
+
+
+@pytest.fixture
 def fake_send(monkeypatch):
     sent = []
 
@@ -92,9 +105,13 @@ async def test_manager_reply_takes_the_dialog_from_ai(client, db, curator_header
     assert state.is_completed is True
 
 
-async def test_resuming_ai_removes_the_stopped_ping_state(
-    client, db, curator_headers, live_dialog, fake_send,
+async def test_resuming_ai_revives_the_stopped_ping_state(
+    client, db, curator_headers, live_dialog, fake_send, ping_rules,
 ):
+    """Снятие паузы — явная передача диалога обратно ИИ: воронка продолжается с
+    того шага, где встала. Раньше состояние удалялось в расчёте на discovery, а
+    он смотрит только сутки назад и начинает воронку с первого шага — «на чем
+    закончили, то нужно и продолжить» (Лена, 01.09)."""
     await client.post(
         f"/api/chat/{live_dialog.id}/reply",
         headers=curator_headers,
@@ -113,7 +130,31 @@ async def test_resuming_ai_removes_the_stopped_ping_state(
     state = await db.scalar(
         select(DialogPingState).where(DialogPingState.dialog_id == live_dialog.id)
     )
-    assert state is None
+    assert state.is_completed is False
+    assert state.current_step == 2
+    assert state.resumed_by_manager is True
+
+
+async def test_resuming_ai_closes_a_funnel_with_no_steps_left(
+    client, db, curator_headers, live_dialog, fake_send,
+):
+    """Правил в воронке нет вовсе — продолжать нечем, и это не ошибка."""
+    await client.post(
+        f"/api/chat/{live_dialog.id}/reply",
+        headers=curator_headers,
+        json={"text": "Здравствуйте, я подключилась"},
+    )
+    resp = await client.post(
+        f"/api/dialogs/{live_dialog.id}/ai-pause",
+        headers=curator_headers,
+        json={"paused": False},
+    )
+
+    assert resp.status_code == 200
+    state = await db.scalar(
+        select(DialogPingState).where(DialogPingState.dialog_id == live_dialog.id)
+    )
+    assert state.is_completed is True
 
 
 async def test_empty_reply_rejected(client, curator_headers, live_dialog, fake_send):

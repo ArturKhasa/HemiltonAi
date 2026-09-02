@@ -24,7 +24,7 @@ from app.ai.run_log import log_failed_run, usage_from_result
 from app.ai.tools import fetch_client_tags, tagged_variant
 from app.ai.providers import get_model_name
 from app.ai.schemas import AgentOutput
-from app.ai.triggers import CURATOR_STATUS_NAME, curator_trigger
+from app.ai.triggers import CURATOR_STATUS_NAME, curator_trigger, curator_trigger_in_batch
 from app.config import settings
 from app.utils.time import human_msk_now
 from app.utils.media import (
@@ -791,7 +791,9 @@ async def run_ai(
 
     greeting_script = await resolve_greeting(db, dialog, client, type_id)
     if greeting_script is not None:
-        return await _run_scripted_greeting(db, dialog, client, greeting_script, ctx)
+        return await _run_scripted_greeting(
+            db, dialog, client, greeting_script, ctx, client_text=text,
+        )
 
     logger.info("[%s] loading system prompt | type_id=%s", ctx, type_id)
     instructions = await get_system_prompt(db, type_id=type_id)
@@ -1632,7 +1634,15 @@ async def run_ai(
     _asked_size = bool(
         manager_history_texts and asked_slot(manager_history_texts[-1]) == "size"
     )
-    trigger = curator_trigger(text, size_expected=_asked_size)
+    # Смотрим не только текущую реплику, но и всё, что клиент написал после
+    # нашего последнего сообщения: ход по ранней реплике уступает место поздней,
+    # и тема менеджера в ней иначе теряется (см. curator_trigger_in_batch).
+    unanswered: list[str | None] = [text]
+    for earlier in reversed(local_msgs):
+        if earlier.role != MessageRole.client:
+            break
+        unanswered.append(earlier.text)
+    trigger = curator_trigger_in_batch(unanswered, size_expected=_asked_size)
     if trigger:
         # На саму реплику с триггером отвечаем, дальше замолкаем и ждём менеджера.
         # Пауза заодно держит статус: без неё следующий же прогон перезаписал бы
@@ -2056,6 +2066,7 @@ async def _run_scripted_greeting(
     client: Client | None,
     script: Script,
     ctx: str,
+    client_text: str | None = None,
 ) -> tuple[AgentOutput, AIRun, list[ReplyPart]]:
     """Отдать приветствие дословно из скрипта, без обращения к модели.
 
@@ -2063,6 +2074,11 @@ async def _run_scripted_greeting(
     а решать тут нечего: текст готов, вопрос следом задан регламентом. AIRun
     заводим с нулевой стоимостью — прогона модели не было, но диалогу нужна
     запись, на которую сошлётся output_message_id и дедуп вебхука.
+
+    `client_text` — первая реплика клиента. Темы менеджера проверяются и здесь:
+    приветствие уходит мимо модели, а вместе с ним раньше уходил и весь путь до
+    гейтов эскалации. По боевой базе за три недели тринадцать диалогов начались
+    словом про вышивку, и ни один из них менеджеру передан не был.
     """
     # Текст берём через greeting_text: у приветствия под рекламную метку в
     # админке заполняют только картинки, и без подстановки общего текста клиент
@@ -2115,14 +2131,42 @@ async def _run_scripted_greeting(
     parts = [ReplyPart(text=text, image_urls=image_urls, message=message)]
     parts.extend(await _build_follow_up_parts(db, dialog, script.id, client, ctx))
 
+    # Клиент пришёл сразу с темой менеджера — «а вышивка у вас есть?» первым же
+    # сообщением. Приветствие всё равно отдаём: тишина в ответ на первое
+    # сообщение хуже всего, а дальше диалог ведёт человек.
+    curator_reason = None
+    trigger = curator_trigger(client_text) if client_text else None
+    if trigger:
+        curator_reason = f"Тема менеджера: {trigger}"
+        status = await db.scalar(
+            select(DialogStatusConfig).where(
+                DialogStatusConfig.name == CURATOR_STATUS_NAME,
+                DialogStatusConfig.is_active == True,
+            )
+        )
+        if status is not None:
+            dialog.current_status_id = status.id
+        dialog.ai_paused = True
+        ai_run.curator_reason = curator_reason
+        ai_run.status_after = CURATOR_STATUS_NAME
+        logger.info(
+            "[%s] триггер %r в первом сообщении — приветствие ушло, дальше менеджер",
+            ctx, trigger,
+        )
+
     await db.commit()
     await db.refresh(ai_run)
+
+    if curator_reason:
+        from app.notify import notify_curator
+        await notify_curator(dialog.id, curator_reason, last_message=client_text)
 
     output = AgentOutput(
         reply_text=text,
         confidence_score=1.0,
         selected_script="greeting:scripted",
         source_script_id=script.id,
+        curator_reason=curator_reason,
     )
     logger.info(
         "[%s] scripted greeting sent | script=%s | photos=%d | parts=%d (модель не вызывалась)",

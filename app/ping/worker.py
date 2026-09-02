@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 
 _MIN_SILENCE_SECONDS = 15 * 60
 
+# Воронки, которые назначает КОД по факту, а не классификатор по переписке:
+# «показаны способы оплаты» и «выставлен счёт». Их две особенности — они не
+# участвуют в автоопределении (app.ping.agent.detect_funnel_with_ai) и не гасятся
+# заслоном горячей стадии: заслон написан против ОБЩЕЙ воронки, которая после
+# способов оплаты спрашивала «что для Вас важнее — качество или цена?», а эти
+# воронки для горячей стадии и заведены (просьба Лены от 01.09).
+FORCED_FUNNELS = frozenset({"checkout", "after_payment"})
+
 # Ping agent sometimes returns action=complete without calling its context tools (a
 # model misfire). We retry such states instead of killing them; _MAX_PING_MISFIRES
 # bounds the retries so a persistently-broken agent eventually stops.
@@ -393,11 +401,21 @@ async def _process_state(db: AsyncSession, state: DialogPingState, now) -> None:
             await db.commit()
             return
 
-    # Клиент уже выбрал способ оплаты или дал контакты — общий пинг тут вредит.
+    # Клиент уже выбрал способ оплаты или дал контакты — ОБЩИЙ пинг тут вредит.
     # Диалог 150: в 09:59 у клиента запросили ФИО, в 10:15 пинг спросил «что для
     # Вас важнее - качество или цена?» и отбросил его назад. ОП, 14:12: «должен
     # подключаться менеджер и пинговать клиента индивидуально. Не общими, как бот».
-    if dialog and dialog.funnel_stage in HOT_STAGES:
+    #
+    # Два исключения, оба появились 02.09 из правок ОП. Именная воронка горячей
+    # стадии — это и есть тот самый индивидуальный дожим, ради которого заслон
+    # ставили. А диалог, который менеджер вручную вернул ИИ, человек уже видел:
+    # забирать его обратно автоматике незачем («вне зависимости от статуса»).
+    if (
+        dialog
+        and dialog.funnel_stage in HOT_STAGES
+        and state.funnel_type not in FORCED_FUNNELS
+        and not state.resumed_by_manager
+    ):
         state.is_completed = True
         dialog.ai_paused = True
         await _escalate(db, dialog, f"горячая стадия «{dialog.funnel_stage}», клиент молчит")
@@ -590,6 +608,7 @@ async def _init_ping_state(
     now,
     *,
     restart_completed: bool = False,
+    resumed_by_manager: bool = False,
 ) -> None:
     existing_result = await db.execute(
         select(DialogPingState).where(DialogPingState.dialog_id == dialog.id)
@@ -626,6 +645,7 @@ async def _init_ping_state(
         current_step=first_rule.step,
         next_ping_due_at=next_due,
         marketing_tag=marketing_tag,
+        resumed_by_manager=resumed_by_manager,
     )
     db.add(state)
     await db.flush()
@@ -653,6 +673,102 @@ async def stop_pings(db: AsyncSession, dialog_id: int, reason: str) -> None:
         return
     state.is_completed = True
     logger.info("ping: остановлены | dialog=%s | %s", dialog_id, reason)
+
+
+async def _last_outbound(db: AsyncSession, dialog_id: int) -> Message | None:
+    """Последнее наше сообщение в диалоге: ответ ИИ или живая реплика менеджера.
+
+    Рассылка сюда не годится — она приходит в диалог сама по себе и продолжением
+    разговора не является (см. app.ping.eligibility).
+    """
+    rows = (await db.execute(
+        select(Message)
+        .where(Message.dialog_id == dialog_id)
+        .order_by(Message.created_at.desc())
+        .limit(50)
+    )).scalars().all()
+    for msg in rows:
+        if is_pingable_outbound(msg):
+            return msg
+    return None
+
+
+async def _last_sent_ping_step(db: AsyncSession, dialog_id: int) -> int | None:
+    """Номер шага последнего УШЕДШЕГО пинга, если он был.
+
+    По самому состоянию это не восстановить: `current_step` означает то шаг,
+    который ещё предстоит отправить (воронку погасил менеджер), то последний
+    отправленный (воронка кончилась сама). Отличить одно от другого можно только
+    по фактически ушедшим сообщениям.
+    """
+    rows = (await db.execute(
+        select(Message)
+        .where(Message.dialog_id == dialog_id, Message.role == MessageRole.ai)
+        .order_by(Message.created_at.desc())
+        .limit(50)
+    )).scalars().all()
+    for msg in rows:
+        meta = msg.msg_metadata or {}
+        if meta.get("ping") and isinstance(meta.get("step"), int):
+            return meta["step"]
+    return None
+
+
+async def resume_after_handoff(db: AsyncSession, dialog: Dialog, now=None) -> str:
+    """Менеджер снял паузу — воронка пингов продолжается с того шага, где встала.
+
+    Лена, 01.09: «Если менеджер снимает ИИ с паузы - ИИ нужно продолжить
+    пинговать лида вне зависимости от статуса/прошлого диалога», и следом: «на
+    чем закончили, то нужно и продолжить».
+
+    Полагаться на `discover()` тут нельзя по двум причинам: он смотрит только
+    сутки назад (`PING_DISCOVERY_MAX_AGE_HOURS`), а диалог менеджеру отдают и на
+    неделю, и заводит он воронку с ПЕРВОГО шага — клиент, до которого дошли
+    двенадцать, получил бы «Я Вам стоимость отправила, а вы мне что-то не
+    отвечаете))» заново.
+
+    Возвращает строку для лога — что именно сделали.
+    """
+    now = now or msk_now()
+    last_out = await _last_outbound(db, dialog.id)
+    state = await db.scalar(
+        select(DialogPingState).where(DialogPingState.dialog_id == dialog.id)
+    )
+
+    if state is None:
+        if last_out is None:
+            return "воронка не заведена — в диалоге нет наших сообщений"
+        await _init_ping_state(
+            db, dialog, last_out.created_at, now, resumed_by_manager=True,
+        )
+        return "воронка заведена заново"
+
+    sent_step = await _last_sent_ping_step(db, dialog.id)
+    if sent_step is None:
+        # Ни одного пинга ещё не ушло — продолжаем с того шага, который был
+        # назначен следующим.
+        rule = await _find_rule(
+            db, dialog.type_id, state.funnel_type, state.current_step, state.marketing_tag,
+        ) or await _find_first_rule(db, dialog.type_id, state.funnel_type, state.marketing_tag)
+    else:
+        rule = await _find_next_rule_after(
+            db, dialog.type_id, state.funnel_type, sent_step, state.marketing_tag,
+        )
+    if rule is None:
+        state.is_completed = True
+        where = f"после шага {sent_step} " if sent_step is not None else ""
+        return f"шагов {where}в воронке {state.funnel_type} не осталось"
+
+    base = last_out.created_at if last_out is not None else now
+    due = base + timedelta(seconds=rule.delay_seconds)
+    # Пауза могла держаться дольше всей воронки. Тогда пинг уходит ближайшим
+    # тиком, но не мгновенно: менеджер только что писал клиенту сам.
+    state.next_ping_due_at = max(due, now + timedelta(seconds=_MIN_SILENCE_SECONDS))
+    state.current_step = rule.step
+    state.is_completed = False
+    state.resumed_by_manager = True
+    state.misfire_count = 0
+    return f"воронка {state.funnel_type} продолжена с шага {rule.step}"
 
 
 async def force_ping_funnel(db: AsyncSession, dialog: Dialog, funnel: str, now) -> None:

@@ -401,6 +401,12 @@ class DialogPingState(Base):
     is_completed = Column(Boolean, default=False, nullable=False)
     misfire_count = Column(Integer, nullable=False, server_default="0", default=0)
     marketing_tag = Column(String(64), nullable=True)
+    # Менеджер снял паузу и вернул диалог автоматике. Пока признак стоит, заслон
+    # горячей стадии воронку не гасит: человек диалог видел и отдал его обратно
+    # осознанно (Лена, 01.09 — «продолжить пинговать вне зависимости от статуса»).
+    resumed_by_manager = Column(
+        Boolean, default=False, nullable=False, server_default="false",
+    )
     created_at = Column(DateTime, default=msk_now)
     updated_at = Column(DateTime, default=msk_now, onupdate=msk_now)
 
