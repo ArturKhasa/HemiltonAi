@@ -24,7 +24,12 @@ from app.ai.run_log import log_failed_run, usage_from_result
 from app.ai.tools import fetch_client_tags, tagged_variant
 from app.ai.providers import get_model_name
 from app.ai.schemas import AgentOutput
-from app.ai.triggers import CURATOR_STATUS_NAME, curator_trigger, curator_trigger_in_batch
+from app.ai.triggers import (
+    CURATOR_STATUS_NAME,
+    SILENT_TRIGGERS,
+    curator_trigger,
+    curator_trigger_in_batch,
+)
 from app.config import settings
 from app.utils.time import human_msk_now
 from app.utils.media import (
@@ -1648,18 +1653,24 @@ async def run_ai(
         # Пауза заодно держит статус: без неё следующий же прогон перезаписал бы
         # «Нужен куратор» своим next_status, и эскалация пропадала бы из списка.
         #
-        # need_curator снимаем принудительно: с ним вебхук придержал бы ответ
-        # (webhook.py), и на живом трафике клиент на «а вышивка есть?» не получил
-        # бы вообще ничего — а РОП просил отвечать общей формулировкой. Риск
-        # ограничен одной репликой: сразу за ней диалог встаёт на паузу.
+        # На темах из SILENT_TRIGGERS реплику ПРИДЕРЖИВАЕМ — `need_curator=True`
+        # означает для вебхука «не отправлять» (webhook.py). Клиент какое-то
+        # время не получает ничего, и это осознанный выбор заказчика от 02.09:
+        # прощальная реплика всё равно почти всегда кончалась вопросом, на
+        # который отвечать было уже некому.
+        #
+        # На остальных темах менеджера реплику по-прежнему отпускаем: РОП просил
+        # отвечать общей формулировкой, а риск ограничен одной репликой — сразу
+        # за ней диалог встаёт на паузу.
+        hold_reply = trigger in SILENT_TRIGGERS
         logger.info(
-            "[%s] trigger %r in client message -> status %r + ai paused "
-            "(reply released to client, need_curator was %s)",
-            ctx, trigger, CURATOR_STATUS_NAME, output.need_curator,
+            "[%s] trigger %r in client message -> status %r + ai paused (%s)",
+            ctx, trigger, CURATOR_STATUS_NAME,
+            "ответ придержан" if hold_reply else "ответ отпущен клиенту",
         )
         output = output.model_copy(update={
             "next_status": CURATOR_STATUS_NAME,
-            "need_curator": False,
+            "need_curator": hold_reply,
             "curator_reason": f"Тема менеджера: {trigger}",
         })
         dialog.ai_paused = True
@@ -2132,12 +2143,17 @@ async def _run_scripted_greeting(
     parts.extend(await _build_follow_up_parts(db, dialog, script.id, client, ctx))
 
     # Клиент пришёл сразу с темой менеджера — «а вышивка у вас есть?» первым же
-    # сообщением. Приветствие всё равно отдаём: тишина в ответ на первое
-    # сообщение хуже всего, а дальше диалог ведёт человек.
+    # сообщением. На темах из SILENT_TRIGGERS придерживаем и приветствие: иначе
+    # клиент получит шаблон с вопросом «какое имя напишем?» вместо ответа на свой
+    # вопрос — ровно то, из-за чего реплику и убрали (решение заказчика 02.09).
+    # На прочих темах менеджера приветствие уходит: оно про его вопрос ничего не
+    # утверждает, а тишина на первое сообщение хуже всего.
     curator_reason = None
+    hold_reply = False
     trigger = curator_trigger(client_text) if client_text else None
     if trigger:
         curator_reason = f"Тема менеджера: {trigger}"
+        hold_reply = trigger in SILENT_TRIGGERS
         status = await db.scalar(
             select(DialogStatusConfig).where(
                 DialogStatusConfig.name == CURATOR_STATUS_NAME,
@@ -2150,8 +2166,9 @@ async def _run_scripted_greeting(
         ai_run.curator_reason = curator_reason
         ai_run.status_after = CURATOR_STATUS_NAME
         logger.info(
-            "[%s] триггер %r в первом сообщении — приветствие ушло, дальше менеджер",
+            "[%s] триггер %r в первом сообщении — %s, дальше менеджер",
             ctx, trigger,
+            "приветствие придержано" if hold_reply else "приветствие ушло",
         )
 
     await db.commit()
@@ -2166,10 +2183,11 @@ async def _run_scripted_greeting(
         confidence_score=1.0,
         selected_script="greeting:scripted",
         source_script_id=script.id,
+        need_curator=hold_reply,
         curator_reason=curator_reason,
     )
     logger.info(
-        "[%s] scripted greeting sent | script=%s | photos=%d | parts=%d (модель не вызывалась)",
+        "[%s] scripted greeting | script=%s | photos=%d | parts=%d (модель не вызывалась)",
         ctx, script.id, len(image_urls), len(parts),
     )
     return output, ai_run, parts
