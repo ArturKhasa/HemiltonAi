@@ -139,6 +139,76 @@ def _find_city(text: str) -> str | None:
     return None
 
 
+# «Город Шелехов», «г. Шелехов», «пос. Умёт» — клиент сам назвал слово «город».
+# Список в _CITIES знает 125 крупных городов, а в России их тысячи: Шелехов в
+# него не входит, и в диалоге 83237 клиент назвал его трижды, каждый раз получая
+# «В какой город нужна будет доставка?» снова (замечание РОПа 03.09: «на
+# последних этапах прям спамит им бесконечно»).
+_CITY_PREFIX_RE = re.compile(
+    # Регистр указан руками: под re.IGNORECASE заглавная буква названия
+    # перестала бы отличать «Город Шелехов» от «город доставки».
+    r"(?:^|[\s,;])(?:[Гг]ород|[Гг]ор\.|[Гг]\.|[Пп]ос\.|[Пп]осёлок|[Пп]оселок"
+    r"|[Сс]\.|[Сс]ело|[Сс]таница|[Дд]еревня)\s*"
+    r"([А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+)?)",
+)
+
+# Способ доставки — не город. «Почтой России», «СДЭК», «самовывоз» приходят в
+# ответ на тот же вопрос. Туда же кодовые слова из рекламы («начать», «+»,
+# «/start») и отговорки: по боевым данным 03.09 городами записались «Начать»
+# (диалог 83246) и «Напишу позже» (83209).
+_NOT_A_CITY_RE = re.compile(
+    r"почт|сдэк|cdek|курьер|самовывоз|пункт выдачи|пвз|боксберри|яндекс|достав"
+    r"|^\W*(?:начать|старт|/start|\+)\W*$"
+    r"|напиш\w*\s+(?:поз|later)|подума\w+|позже|не знаю|пока не|уточн\w+\s+поз",
+    re.I,
+)
+# Ответ на вопрос про город — короткая реплика: «Шелехов», «Забайкальский край»,
+# «Ханты-Мансийский АО». Длинная фраза — уже не название.
+_MAX_CITY_WORDS = 4
+
+
+def city_named_explicitly(text: str) -> str | None:
+    """Город, названный словом: «Город Шелехов», «г. Шелехов», «пос. Умёт».
+
+    Работает независимо от того, о чём мы спрашивали: слово «город» рядом с
+    названием ставит клиент сам, спутать его не с чем. В диалоге 83237 клиент
+    так и написал — «Кадникова Ольга Владимировна, 89500708618 / Город Шелехов»,
+    — а город всё равно остался незаполненным.
+    """
+    found = _CITY_PREFIX_RE.search(text or "")
+    return found.group(1).strip() if found else None
+
+
+def city_from_reply(text: str) -> str | None:
+    """Город из ответа клиента на НАШ вопрос «в какой город доставка».
+
+    Берём ответ целиком, а не ищем по списку: названий населённых пунктов
+    тысячи, и любой список рано или поздно промахнётся. Слово в ответе на прямой
+    вопрос — это и есть город, кроме случая, когда клиент назвал способ доставки
+    или переспросил.
+    """
+    raw = (text or "").strip().strip(".!,;:")
+    if not raw or "?" in raw:
+        return None
+    if _NOT_A_CITY_RE.search(raw) or _PHONE_RE.search(raw):
+        return None
+    # Ответ про другой слот. В диалоге 83109 код дописал вопрос про доставку к
+    # ходу, где клиент выбирал цвет, — и «Черный» уехал бы в города.
+    if _find_color(raw):
+        return None
+    # «?», «Чего?», «м» — переспрос, а не название (app.sales.non_answer).
+    from app.sales.non_answer import is_non_answer
+
+    if is_non_answer(raw):
+        return None
+    words = _words(raw)
+    if not words or len(words) > _MAX_CITY_WORDS:
+        return None
+    if not re.fullmatch(r"[А-Яа-яЁё\-\s]+", raw):
+        return None
+    return raw[:1].upper() + raw[1:]
+
+
 def _find_color(text: str) -> str | None:
     for word in _words((text or "").lower()):
         clean = word.strip(".,!?;:«»\"'")
@@ -211,7 +281,12 @@ def collect_slots(history: list[tuple[str, str]]) -> dict[str, str]:
     for role, text in history:
         text = text or ""
         if role != "client":
-            asked = "inscription" if ASKS_INSCRIPTION_RE.search(text) else None
+            if ASKS_INSCRIPTION_RE.search(text):
+                asked = "inscription"
+            elif ASKS_CITY_RE.search(text):
+                asked = "city"
+            else:
+                asked = None
             continue
 
         # Явные шаблоны — независимо от того, о чём мы спрашивали.
@@ -227,7 +302,11 @@ def collect_slots(history: list[tuple[str, str]]) -> dict[str, str]:
             # печатает их разными строками ([Заказ.Рост] / [Заказ.Вес]).
             slots["height"], slots["weight"] = size
             slots["size"] = f"рост {size[0]} см, вес {size[1]} кг"
-        city = _find_city(text)
+        city = _find_city(text) or city_named_explicitly(text)
+        if not city and asked == "city":
+            # Мы спросили про город прямо — ответ и есть город, даже если его нет
+            # в списке (см. city_from_reply).
+            city = city_from_reply(text)
         if city:
             slots["city"] = city
         color = _find_color(text)

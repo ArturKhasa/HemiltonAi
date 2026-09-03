@@ -612,12 +612,26 @@ _SLOT_QUESTIONS: list[tuple[str, str]] = [
 _FALLBACK_QUESTION = "Что и где разместим на изделии?"
 
 
-def _ensure_question(parts, slots: dict[str, str], ctx: str):
-    """Дописать вопрос к последней реплике хода, если его нет ни в одной."""
+def _ensure_question(parts, slots: dict[str, str], ctx: str, manager_texts=None):
+    """Дописать вопрос к последней реплике хода, если его нет ни в одной.
+
+    Слот, о котором мы только что спрашивали, второй раз не берём. Список городов
+    в коде знает 125 названий, и на «Шелехов» слот города не заполнялся — вопрос
+    про доставку дописывался к каждому ходу, клиент отвечал на него трижды
+    (диалог 83237, замечание РОПа 03.09: «прям спамит им бесконечно»). Даже когда
+    слот не распознан, повторять один и тот же вопрос подряд нельзя.
+    """
     if not parts or any(_questions_in(p.text or "") for p in parts):
         return parts
+    just_asked = {
+        asked_slot(t) for t in (manager_texts or [])[-_SLOT_REPEAT_LIMIT:] if t
+    }
     question = next(
-        (q for slot, q in _SLOT_QUESTIONS if not slots.get(slot)), _FALLBACK_QUESTION,
+        (
+            q for slot, q in _SLOT_QUESTIONS
+            if not slots.get(slot) and slot not in just_asked
+        ),
+        _FALLBACK_QUESTION,
     )
     last = parts[-1]
     last.set_text(f"{(last.text or '').rstrip()}\n\n{question}".strip())
@@ -2058,7 +2072,7 @@ async def run_ai(
     # Последним: предыдущие проверки умеют снимать вопрос, и ход может остаться
     # без единого — тогда клиенту нечего ответить и диалог обрывается.
     if dialog.funnel_stage != _TERMINAL_STAGE:
-        parts = _ensure_question(parts, slots, ctx)
+        parts = _ensure_question(parts, slots, ctx, manager_history_texts)
 
     await db.commit()
     await db.refresh(ai_run)
