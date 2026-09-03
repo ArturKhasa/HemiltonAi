@@ -200,3 +200,46 @@ class TestAnchoredOnTheQuoteScript:
         text = await render_price_placeholders(db, CHECKOUT, type_id=1, dialog=dialog)
 
         assert text == f"Получается сумма заказа - {format_price(5990)}"
+
+
+class TestTaggedCalculation:
+    """Расчёт под рекламную метку верен и тогда, когда модель пересказала его
+    своими словами: сообщение не помечено скриптом, а заказ всё равно на
+    комплект. По замеру 03.09 таких диалогов было 7 из 40."""
+
+    @pytest.fixture
+    async def kit_client(self, db, dialog):
+        client = await db.get(Client, dialog.client_id)
+        client.marketing_tags = ["hood141"]
+        await db.commit()
+        return dialog
+
+    async def test_model_retelling_still_gives_the_kit_price(self, db, kit_client):
+        await _sent(db, kit_client, ONE, script_id=PRICE_SCRIPT_ID)
+        await _sent(db, kit_client, "По комплекту кратко: свитшот 5490, жилетка 3490")
+
+        text = await render_price_placeholders(db, CHECKOUT, type_id=1, dialog=kit_client)
+
+        assert text == f"Получается сумма заказа - {format_price(8980)}"
+
+    async def test_client_without_the_tag_is_unaffected(self, db, dialog):
+        """Комплект, вброшенный моделью клиенту без метки, заказом не становится:
+        диалог 83109 — клиент его не просил и не подтверждал."""
+        await _sent(db, dialog, ONE, script_id=PRICE_SCRIPT_ID)
+        await _sent(db, dialog, "Комплект из толстовки и жилетки - 8 980 ₽ вместо 12 980 ₽")
+
+        text = await render_price_placeholders(db, CHECKOUT, type_id=1, dialog=dialog)
+
+        assert text == f"Получается сумма заказа - {format_price(5990)}"
+
+    async def test_concession_beats_the_tagged_calculation(self, db, kit_client):
+        """Уступили после «дорого» — заказ стоит столько, сколько названо последним."""
+        db.add(Script(id=397, condition="Возражение дорого", type_id=1,
+                      phrase_text="Спец. цена - [минимальная-цена:свитшот]"))
+        await db.commit()
+        await _sent(db, kit_client, KIT, script_id=KIT_SCRIPT_ID)
+        await _sent(db, kit_client, "Спец. цена - 4 990 ₽", script_id=397)
+
+        text = await render_price_placeholders(db, CHECKOUT, type_id=1, dialog=kit_client)
+
+        assert text == f"Получается сумма заказа - {format_price(4990)}"

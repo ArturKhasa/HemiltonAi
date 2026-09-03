@@ -157,7 +157,51 @@ def _pin_price(dialog, product_name: str, price):
     return value
 
 
-async def _price_script_ids(db: AsyncSession) -> set[int]:
+async def _tagged_price_script(db: AsyncSession, dialog, price_ids: set[int]) -> str | None:
+    """Текст ценового скрипта, заведённого под рекламную метку этого клиента.
+
+    У метки на комплект свой расчёт (свитшот + жилетка), и он верен независимо от
+    того, ушёл ли он скриптом или моделью в пересказе. Правило подбора то же, что
+    у подмены шага (`app.ai.tools.tagged_variant`): метки скрипта должны входить
+    в метки клиента. Парные варианты пропускаем — они про число изделий, а не про
+    состав заказа, и приходят своим скриптом.
+    """
+    if dialog is None or not price_ids:
+        return None
+    from sqlalchemy import select
+
+    from app.ai.tools import _parse_tags, norm_tag
+    from app.db.models import Client, Script
+
+    client = await db.get(Client, dialog.client_id)
+    tags = {norm_tag(str(t)) for t in (getattr(client, "marketing_tags", None) or []) if str(t).strip()}
+    if not tags:
+        return None
+
+    variants = (await db.execute(
+        select(Script).where(
+            Script.is_active == True,
+            Script.variant_of_script_id.in_(price_ids),
+            Script.marketing_tag.isnot(None),
+        )
+    )).scalars().all()
+    fitting = [
+        v for v in variants
+        if _parse_tags(v.marketing_tag) <= tags
+        and not getattr(v, "is_pair_variant", False)
+        and (v.phrase_text or "").strip()
+    ]
+    if not fitting:
+        return None
+    # Самый специфичный: больше меток — точнее попадание в клиента.
+    best = max(fitting, key=lambda v: (len(_parse_tags(v.marketing_tag)), -v.id))
+    return best.phrase_text
+
+
+async def _price_script_ids(
+    db: AsyncSession,
+    macros: tuple[str, ...] = ("цена", "цена-до-скидки", "цена-со-скидкой", "минимальная-цена"),
+) -> set[int]:
     """Скрипты, которыми мы называем клиенту РАСЧЁТ.
 
     Узнаются по плейсхолдеру цены в тексте — «Стоимость толстовки … [цена:свитшот]»,
@@ -177,10 +221,7 @@ async def _price_script_ids(db: AsyncSession) -> set[int]:
     base = (await db.execute(
         select(Script.id).where(
             Script.is_active == True,
-            or_(*[
-                Script.phrase_text.like(f"%[{macro}:%")
-                for macro in ("цена", "цена-до-скидки", "цена-со-скидкой", "минимальная-цена")
-            ]),
+            or_(*[Script.phrase_text.like(f"%[{macro}:%") for macro in macros]),
         )
     )).scalars().all()
     if not base:
@@ -228,6 +269,29 @@ async def _quoted_order_total(db: AsyncSession, dialog) -> int | None:
     ]
 
     price_ids = await _price_script_ids(db)
+
+    # Уступка после «дорого» перебивает всё: заказ стоит столько, сколько названо
+    # последним. Скидочные скрипты узнаются по своим плейсхолдерам.
+    discount_ids = await _price_script_ids(db, macros=("минимальная-цена", "цена-со-скидкой"))
+    for m in ours:
+        sid = (m.msg_metadata or {}).get("source_script_id")
+        if sid in price_ids:
+            if sid not in discount_ids:
+                break
+            total = order_total([m.text or ""])
+            if total is not None:
+                return total
+
+    # Расчёт под рекламную метку. Берём его из САМОГО скрипта, а не из переписки:
+    # модель регулярно пересказывает расчёт своими словами, и такое сообщение
+    # скриптом не помечено. По замеру 03.09 из 40 диалогов с расчётом на комплект
+    # 7 получили его пересказом — и сумма заказа снова становилась свитшотной.
+    tagged = await _tagged_price_script(db, dialog, price_ids)
+    if tagged is not None:
+        total = order_total([tagged])
+        if total is not None:
+            return total
+
     for m in ours:
         if (m.msg_metadata or {}).get("source_script_id") in price_ids:
             total = order_total([m.text or ""])
