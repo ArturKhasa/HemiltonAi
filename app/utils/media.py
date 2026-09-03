@@ -123,10 +123,15 @@ async def collect_sent_image_hashes(db: AsyncSession, dialog_id: int) -> set[str
 
 
 # Токены вложений внутри текста фразы: «[photo-<url>]», «[photo-<id>_<id>]»,
-# а также video/clip/audio_message. Их разбирает app.vk.sender при отправке.
+# а также video/clip/audio_message/doc. Их разбирает app.vk.sender при отправке.
 # Дефис необязателен: голосовые в выгрузке ОП записаны без него —
 # «[audio_message569993513_687712211]».
-_ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|video|clip|audio_message)-?[^\]\s]+\]")
+#
+# «doc» — видео, pdf и аудио, загруженные в скрипт файлом (ОП, 03.09: «добавьте
+# возможность добавлять видео в скрипты»). Без него такой токен не считался
+# вложением: редактор скриптов оставлял его в тексте, модель видела его среди
+# слов и теряла при пересказе.
+_ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|video|clip|audio_message|doc)-?[^\]\s]+\]")
 
 # Ссылка в токене со всеми параметрами длиной под три сотни символов, и модель
 # переписывает её с ошибкой: в диалоге 91 она потеряла половину «attachment=
@@ -134,7 +139,7 @@ _ATTACHMENT_TOKEN_RE = re.compile(r"\[(?:photo|video|clip|audio_message)-?[^\]\s
 # скриптовым посимвольно, скриптовый дописывался как «потерянный», и клиент
 # получал одну и ту же вешалку с цветами дважды. Сравниваем по адресу без
 # query: параметры кадрирования на то, какая это картинка, не влияют.
-_TOKEN_URL_RE = re.compile(r"\[(photo|video|clip|audio_message)-?(https?://[^\]?]+)")
+_TOKEN_URL_RE = re.compile(r"\[(photo|video|clip|audio_message|doc)-?(https?://[^\]?]+)")
 
 
 def attachment_tokens(text: str | None) -> list[str]:

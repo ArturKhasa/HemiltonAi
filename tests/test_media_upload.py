@@ -95,3 +95,43 @@ async def test_anonymous_cannot_upload(client, db, media_dir):
         files={"file": ("a.jpg", b"jpeg", "image/jpeg")},
     )
     assert resp.status_code in (401, 403)
+
+
+class TestVideoInScripts:
+    """ОП, 03.09: «Добавьте, пожалуйста, возможность добавлять видео в скрипты».
+
+    Файл отбивался словами «Это не картинка» ещё во фронте, хотя хранилище mp4
+    принимает, а ВК получает такой файл документом. Со стороны кода не хватало
+    одного: токен «[doc-…]» не считался вложением — редактор скриптов оставлял
+    его в тексте, а модель теряла при пересказе.
+    """
+
+    def test_doc_token_is_an_attachment(self):
+        from app.utils.media import attachment_tokens, strip_attachment_tokens
+
+        text = "Посмотрите, как шьём [doc-https://ai.hemilton.ru/media/greeting/a1.mp4]"
+        assert attachment_tokens(text) == ["[doc-https://ai.hemilton.ru/media/greeting/a1.mp4]"]
+        assert strip_attachment_tokens(text) == "Посмотрите, как шьём"
+
+    def test_model_cannot_lose_the_video(self):
+        """Пересказ без токена — вложение возвращается в конец фразы."""
+        from app.utils.media import carry_over_attachments
+
+        source = "Вот наше производство [doc-https://ai.hemilton.ru/media/greeting/a1.mp4]"
+        retold = "Показываю наше производство"
+        assert carry_over_attachments(retold, source).endswith(
+            "[doc-https://ai.hemilton.ru/media/greeting/a1.mp4]"
+        )
+
+    def test_video_file_gets_a_doc_token(self):
+        from app.utils.media import attachment_token
+
+        assert attachment_token("https://ai.hemilton.ru/media/greeting/a1.mp4").startswith("[doc-")
+        assert attachment_token("https://ai.hemilton.ru/media/greeting/a1.jpg").startswith("[photo-")
+
+    def test_storage_accepts_video(self):
+        from app.storage.local import safe_extension
+
+        assert safe_extension("proizvodstvo.mp4") == "mp4"
+        assert safe_extension("proizvodstvo.mov") == "mov"
+        assert safe_extension("virus.exe") == "bin"

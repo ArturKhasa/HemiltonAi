@@ -42,7 +42,10 @@ async def upload_media(
     if ext == "bin":
         raise HTTPException(
             status_code=400,
-            detail="Не тот тип файла: нужна картинка (jpg, png, gif, webp, heic)",
+            detail=(
+                "Не тот тип файла: картинка (jpg, png, gif, webp, heic), "
+                "видео (mp4, mov), pdf или аудио (mp3, m4a, ogg)"
+            ),
         )
 
     url = await save_file(data, f"greeting/{uuid.uuid4().hex}.{ext}")

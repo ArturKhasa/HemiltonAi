@@ -1,5 +1,5 @@
 <!--
-  Картинки приветствия: превью, порядок, удаление.
+  Вложения приветствия и скриптов: превью, порядок, удаление.
 
   В базе они лежат токенами «[photo-<ссылка>]» внутри текста приветствия, и
   править их приходилось руками в textarea — среди трёхсотсимвольных ссылок с
@@ -8,6 +8,13 @@
 
   Токены не только фото: у пингов бывают video и clip. Их тоже показываем и
   двигаем, только без превью — плашкой с типом.
+
+  Видео добавляется двумя путями, и оба спрашивала ОП 03.09 («добавьте,
+  пожалуйста, возможность добавлять видео в скрипты»): файлом с компьютера — он
+  ложится на наш сервер и уходит клиенту вложением-документом, — и ссылкой на
+  ролик ВК, которая становится [video-…] и уходит настоящим видео-вложением.
+  Раньше файл отбивался словами «Это не картинка», а ссылка на ролик молча
+  превращалась в [photo-…] и до клиента не доезжала.
 -->
 <template>
   <div>
@@ -73,10 +80,11 @@
       >{{ uploading ? `Загружаю… ${progress}%` : 'Загрузить с компьютера' }}</button>
       <span v-if="uploading && uploadingName" class="text-xs text-gray-400 block mt-1">{{ uploadingName }}</span>
       <span class="text-xs text-gray-400 block mt-1">или перетащите файлы сюда</span>
+      <span class="text-xs text-gray-400 block">картинка, видео (mp4, mov), pdf или аудио</span>
       <input
         ref="picker"
         type="file"
-        accept="image/*"
+        accept="image/*,video/mp4,video/quicktime,audio/*,application/pdf"
         multiple
         class="hidden"
         @change="onPick"
@@ -87,7 +95,7 @@
       <input
         v-model="draft"
         @keyup.enter="add"
-        placeholder="…или ссылка / photo-44440184_457423551"
+        placeholder="…или ссылка на картинку либо ролик ВК"
         class="flex-1 min-w-0 border rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500"
       />
       <button
@@ -138,12 +146,24 @@ function shortLabel(token) {
   return file.length > 18 ? file.slice(0, 18) + '…' : file
 }
 
-// «https://…» → [photo-https://…]; «photo-44440184_457423551» и
+// Ссылка на ролик ВК → [video-…]: такое вложение уходит клиенту настоящим
+// видео. Картинка → [photo-…], остальные файлы (mp4 с нашего сервера, pdf,
+// аудио) → [doc-…] — так же, как их размечает бэкенд (app.utils.media).
+const VIDEO_HOSTS = /(?:vkvideo\.ru|vk\.com\/(?:video|clip)|vk\.ru\/(?:video|clip))/i
+const IMAGE_EXT = /\.(?:jpe?g|png|gif|webp|heic)(?:$|\?)/i
+
+function tokenForUrl(url) {
+  if (VIDEO_HOSTS.test(url)) return `[video-${url}]`
+  if (IMAGE_EXT.test(url)) return `[photo-${url}]`
+  return `[doc-${url}]`
+}
+
+// «https://…» → токен по типу ссылки; «photo-44440184_457423551» и
 // «44440184_457423551» → [photo-…]; готовый токен принимаем как есть.
 function toToken(raw) {
   const v = raw.trim()
   if (/^\[[a-z_]+-?[^\]\s]+\]$/.test(v)) return v
-  if (/^https?:\/\//.test(v)) return `[photo-${v}]`
+  if (/^https?:\/\//.test(v)) return tokenForUrl(v)
   const m = v.match(/^(photo|video|clip)-?(-?\d+_\d+)$/)
   if (m) return `[${m[1]}-${m[2]}]`
   if (/^-?\d+_\d+$/.test(v)) return `[photo-${v}]`
@@ -153,11 +173,11 @@ function toToken(raw) {
 function add() {
   const token = toToken(draft.value)
   if (!token) {
-    error.value = 'Нужна ссылка на картинку или id вида photo-44440184_457423551'
+    error.value = 'Нужна ссылка на файл или id вида photo-44440184_457423551'
     return
   }
   if (props.modelValue.includes(token)) {
-    error.value = 'Эта картинка уже добавлена'
+    error.value = 'Это вложение уже добавлено'
     return
   }
   error.value = ''
@@ -180,15 +200,18 @@ const UPLOAD_TIMEOUT_MS = 90_000
 // чем гнать десятки мегабайт и получить отказ в конце.
 const MAX_UPLOAD_MB = 20
 
+// Что примет сервер: тот же белый список расширений, что в app.storage.local.
+const ALLOWED_EXT = /\.(?:jpe?g|png|gif|webp|heic|mp4|mov|pdf|ogg|mp3|m4a)$/i
+
 async function upload(files) {
-  const images = [...files].filter(f => f.type.startsWith('image/'))
+  const images = [...files].filter(f => ALLOWED_EXT.test(f.name))
   if (!images.length) {
-    error.value = 'Это не картинка'
+    error.value = 'Не тот тип файла: картинка, видео (mp4, mov), pdf или аудио'
     return
   }
   const tooBig = images.find(f => f.size > MAX_UPLOAD_MB * 1024 * 1024)
   if (tooBig) {
-    error.value = `${tooBig.name}: больше ${MAX_UPLOAD_MB} МБ — уменьшите картинку`
+    error.value = `${tooBig.name}: больше ${MAX_UPLOAD_MB} МБ — файл не пройдёт`
     return
   }
   error.value = ''
@@ -211,7 +234,7 @@ async function upload(files) {
             if (e.total) progress.value = Math.round((e.loaded / e.total) * 100)
           },
         })
-        next = [...next, `[photo-${res.data.url}]`]
+        next = [...next, tokenForUrl(res.data.url)]
         emit('update:modelValue', next)
       } catch (e) {
         const reason = e.code === 'ECONNABORTED'
