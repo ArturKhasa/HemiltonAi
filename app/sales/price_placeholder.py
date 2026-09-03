@@ -157,11 +157,53 @@ def _pin_price(dialog, product_name: str, price):
     return value
 
 
-async def _quoted_order_total(db: AsyncSession, dialog) -> int | None:
-    """Сумма из последнего нашего сообщения с ценой — то, что клиент уже видел.
+async def _price_script_ids(db: AsyncSession) -> set[int]:
+    """Скрипты, которыми мы называем клиенту РАСЧЁТ.
 
-    Рассылки не читаем: цена в них своя («ТОЛСТОВКА ЗА 4 990₽ + 3 ПОДАРКА» ушла
-    в 58 тысяч диалогов) и к заказу отношения не имеет. Недоставленное тоже: его
+    Узнаются по плейсхолдеру цены в тексте — «Стоимость толстовки … [цена:свитшот]»,
+    «Специально для Вас … [минимальная-цена:свитшот]». Плюс их варианты под
+    рекламные метки: у комплекта (скрипт 519 при 367) цены выписаны числами, и по
+    тексту его от обычного сообщения не отличить, а по ссылке `variant_of_script_id`
+    — сразу.
+
+    Скрипт оформления в набор не попадает: в нём стоит «[сумма-заказа:…]», а не
+    «[цена:…]». Это важно — иначе он считал бы сумму по собственному прошлому
+    сообщению и навсегда закреплял бы свою же ошибку.
+    """
+    from sqlalchemy import or_, select
+
+    from app.db.models import Script
+
+    base = (await db.execute(
+        select(Script.id).where(
+            Script.is_active == True,
+            or_(*[
+                Script.phrase_text.like(f"%[{macro}:%")
+                for macro in ("цена", "цена-до-скидки", "цена-со-скидкой", "минимальная-цена")
+            ]),
+        )
+    )).scalars().all()
+    if not base:
+        return set()
+    variants = (await db.execute(
+        select(Script.id).where(
+            Script.is_active == True,
+            Script.variant_of_script_id.in_(base),
+        )
+    )).scalars().all()
+    return set(base) | set(variants)
+
+
+async def _quoted_order_total(db: AsyncSession, dialog) -> int | None:
+    """Сумма из последнего РАСЧЁТА, отправленного клиенту.
+
+    Якорь — именно ценовой скрипт, а не любое наше сообщение с цифрой. В диалоге
+    83014 клиент после расчёта спросил про жилетку, ИИ ответил «её стоимость
+    4 090 ₽», и «последняя названная цена» превратила бы заказ на комплект
+    (8 980 ₽) в заказ на безрукавку.
+
+    Рассылки не читаем: цена в них своя («ТОЛСТОВКА ЗА 4 990₽ + 3 ПОДАРКА» ушла в
+    58 тысяч диалогов) и к заказу отношения не имеет. Недоставленное тоже: его
     клиент не видел, а строка в базе остаётся (см. app.vk.outgoing).
     """
     if dialog is None:
@@ -178,13 +220,26 @@ async def _quoted_order_total(db: AsyncSession, dialog) -> int | None:
             Message.role.in_((MessageRole.ai, MessageRole.curator)),
         )
         .order_by(Message.created_at.desc(), Message.id.desc())
-        .limit(30)
+        .limit(40)
     )).scalars().all()
-    texts = [
-        m.text or "" for m in rows
+    ours = [
+        m for m in rows
         if was_delivered(m) and not (m.msg_metadata or {}).get("broadcast")
     ]
-    return order_total(texts)
+
+    price_ids = await _price_script_ids(db)
+    for m in ours:
+        if (m.msg_metadata or {}).get("source_script_id") in price_ids:
+            total = order_total([m.text or ""])
+            if total is not None:
+                return total
+
+    # Расчёта скриптом не было — значит диалог считал человек, и его сумму по
+    # тексту не восстановить. Первая версия правки брала тут последнюю названную
+    # цену и в диалоге 82426 подставила «Остаток составляет 8080 руб» — остаток
+    # после предоплаты, а не сумму заказа. Возвращаемся к цене матрицы: она
+    # хотя бы предсказуема, а такие диалоги ИИ и не оформляет — они на паузе.
+    return None
 
 
 async def render_price_placeholders(
