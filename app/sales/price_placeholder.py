@@ -15,6 +15,7 @@ import re
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.sales.prices import order_total
 from app.sales.products import ProductService
 
 logger = logging.getLogger(__name__)
@@ -32,8 +33,17 @@ logger = logging.getLogger(__name__)
 # «[цена-со-скидкой:свитшот]» — явно средняя ступень, если скрипт написан именно
 # под неё. «[цена-до-скидки:...]» остаётся синонимом «[цена:...]»: так писались
 # первые скрипты, и менять их все разом ради одного слова незачем.
+#
+# «[сумма-заказа:свитшот]» — итог заказа: сколько клиенту НАЗВАЛИ в этом диалоге,
+# а не сколько стоит товар из скобок. Товар в скобках остаётся запасным вариантом
+# на случай, когда цену ещё не называли. Появился 03.09 по замечанию РОПа:
+# «клиент пришёл за комплектом, ИИ отправляет ему цену на один свитшот». Скрипт
+# оформления называл сумму через «[цена:свитшот]», то есть всегда цену одного
+# изделия из матрицы, — и клиент с рекламной метки на комплект (5 490 + 3 490 =
+# 8 980 ₽) видел в сумме заказа 5 990 ₽. За две недели так ушло 133 сообщения.
 _PRICE_PLACEHOLDER_RE = re.compile(
-    r"\[(минимальная-цена|цена-со-скидкой|цена-до-скидки|цена):([^\]]+)\]", re.IGNORECASE
+    r"\[(минимальная-цена|цена-со-скидкой|цена-до-скидки|сумма-заказа|цена):([^\]]+)\]",
+    re.IGNORECASE,
 )
 
 # «[ссылка-оплаты]» — счёт клиенту. Пока платёжной интеграции нет, подставляется
@@ -147,6 +157,36 @@ def _pin_price(dialog, product_name: str, price):
     return value
 
 
+async def _quoted_order_total(db: AsyncSession, dialog) -> int | None:
+    """Сумма из последнего нашего сообщения с ценой — то, что клиент уже видел.
+
+    Рассылки не читаем: цена в них своя («ТОЛСТОВКА ЗА 4 990₽ + 3 ПОДАРКА» ушла
+    в 58 тысяч диалогов) и к заказу отношения не имеет. Недоставленное тоже: его
+    клиент не видел, а строка в базе остаётся (см. app.vk.outgoing).
+    """
+    if dialog is None:
+        return None
+    from sqlalchemy import select
+
+    from app.db.models import Message, MessageRole
+    from app.vk.outgoing import was_delivered
+
+    rows = (await db.execute(
+        select(Message)
+        .where(
+            Message.dialog_id == dialog.id,
+            Message.role.in_((MessageRole.ai, MessageRole.curator)),
+        )
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(30)
+    )).scalars().all()
+    texts = [
+        m.text or "" for m in rows
+        if was_delivered(m) and not (m.msg_metadata or {}).get("broadcast")
+    ]
+    return order_total(texts)
+
+
 async def render_price_placeholders(
     db: AsyncSession, text: str, type_id: int | None = None, dialog=None,
 ) -> str:
@@ -169,6 +209,22 @@ async def render_price_placeholders(
     for m in matches:
         macro = m.group(1).lower()
         query = m.group(2).strip()
+
+        # Итог заказа считается по переписке и от товарной матрицы не зависит:
+        # клиент с метки на комплект видел свою сумму (5 490 + 3 490 = 8 980 ₽),
+        # а матрица знает только цену одного изделия. Товар в скобках — запасной
+        # вариант, если цену ещё не называли: черновик в админке, тестовый диалог,
+        # оборванный ход.
+        if macro == "сумма-заказа":
+            total = await _quoted_order_total(db, dialog)
+            if total is not None:
+                logger.info(
+                    "сумма заказа взята из переписки: %s | dialog=%s",
+                    total, getattr(dialog, "id", None),
+                )
+                result = result.replace(m.group(0), format_price(total))
+                continue
+
         # limit=1 нельзя: LIMIT отсекает строки в SQL, до сортировки «точное
         # название вперёд» (см. ProductService.search), и «[цена:Доп. принт]»
         # доставал градиентный принт.
