@@ -54,14 +54,14 @@ from app.sales.offer_terms import (
     promises_offer_another_day,
     promises_to_return,
 )
-from app.sales.price_objection import concession_allowed
+from app.sales.price_objection import concession_allowed, is_price_objection
 from app.sales.product_photo import (
     asks_to_see_product,
     claims_picture_already_sent,
     reply_shows_photo,
 )
 from app.sales.price_placeholder import payment_link_configured, render_price_placeholders
-from app.sales.prices import prices_in as _prices_in
+from app.sales.prices import order_amounts, prices_in as _prices_in
 from app.sales.status_names import MODEL_STATUSES
 from app.sales.funnel_steps import (
     delivered_outgoing_texts,
@@ -90,6 +90,7 @@ from app.sales.funnel_steps import (
     honest_answer,
     client_walks_away,
     lets_client_go,
+    payment_choice_pending,
     payment_option_chosen,
     places_inscription_in_the_center,
     render_design_review,
@@ -306,6 +307,17 @@ _REFUSAL_RETRY_INSTRUCTION = (
     "не фиксируй дизайн, не называй сумму заказа, не проси ФИО и телефон, не "
     "выставляй счёт. Присоединись к клиенту и одним коротким вопросом уточни, от "
     "чего именно отказ и что не подошло."
+)
+
+# Мы только что спросили способ оплаты («всю сумму сразу или 500₽?»), а клиент
+# ответил не про это — а ответ всё равно просит ФИО и телефон. Диалог со скрина
+# ОП, 04.09: вопрос про оплату повис без ответа, следующим ходом сразу ушёл
+# запрос данных получателя (PLAN-2026-09-04-pravki-OP.md, пункт E).
+_PAYMENT_CHOICE_PENDING_RETRY_INSTRUCTION = (
+    "[Служебное] Ты только что спросила способ оплаты (всю сумму сразу или "
+    "500 ₽), а клиент ответил не про это. Шаг не закрыт: не проси ФИО и телефон "
+    "получателя, не называй сумму заказа. Вернись к вопросу про способ оплаты — "
+    "коротко переспроси его ещё раз."
 )
 
 # «Надпись размещаем на груди по центру» — модель пишет это своими словами даже
@@ -633,6 +645,16 @@ _SLOT_QUESTIONS: list[tuple[str, str]] = [
 # Вы хотите! / Что скажете?» (диалог 75853, 21.08 08:47).
 _FALLBACK_QUESTION = "Что и где разместим на изделии?"
 
+# Реплика уже фактически просит ФИО и телефон получателя (скрипт «5.1 Данные
+# перед оформлением» построен без «?» — «Отлично, тогда подскажите...»), но сама
+# просьба вопросом не считается (asked_slot её тоже видит только по смыслу, а
+# _questions_in ищет буквальный «?»). Без отдельной ветки сюда падал общий
+# фолбэк по товарным слотам — и клиент, у которого только что спросили
+# ФИО/телефон/город, получал ещё и «Какой цвет выберем?» тем же сообщением
+# (скрин ОП, 04.09, PLAN-2026-09-04-pravki-OP.md, пункт D). Лена, 04.09 11:30:
+# «На этапе запроса данных вопрос — «Получится сейчас?»».
+_DATA_COLLECTION_FALLBACK_QUESTION = "Получится сейчас?"
+
 
 def _ensure_question(parts, slots: dict[str, str], ctx: str, manager_texts=None):
     """Дописать вопрос к последней реплике хода, если его нет ни в одной.
@@ -648,19 +670,22 @@ def _ensure_question(parts, slots: dict[str, str], ctx: str, manager_texts=None)
     """
     if not parts or any(_questions_in(p.text or "") for p in parts):
         return parts
-    # Не «последние два сообщения», а вся видимая история: один и тот же вопрос,
-    # дописанный кодом дважды за диалог, клиент читает как то, что его не
-    # слушают. Если клиент на него не ответил, спросит модель своими словами —
-    # у неё вся переписка перед глазами.
-    already_asked = {asked_slot(t) for t in (manager_texts or []) if t}
-    question = next(
-        (
-            q for slot, q in _SLOT_QUESTIONS
-            if not slots.get(slot) and slot not in already_asked
-        ),
-        _FALLBACK_QUESTION,
-    )
     last = parts[-1]
+    if asked_slot(last.text or "") == "recipient":
+        question = _DATA_COLLECTION_FALLBACK_QUESTION
+    else:
+        # Не «последние два сообщения», а вся видимая история: один и тот же
+        # вопрос, дописанный кодом дважды за диалог, клиент читает как то, что
+        # его не слушают. Если клиент на него не ответил, спросит модель своими
+        # словами — у неё вся переписка перед глазами.
+        already_asked = {asked_slot(t) for t in (manager_texts or []) if t}
+        question = next(
+            (
+                q for slot, q in _SLOT_QUESTIONS
+                if not slots.get(slot) and slot not in already_asked
+            ),
+            _FALLBACK_QUESTION,
+        )
     last.set_text(f"{(last.text or '').rstrip()}\n\n{question}".strip())
     logger.info("[%s] ход заканчивался без вопроса — дописан %r", ctx, question)
     return parts
@@ -687,18 +712,29 @@ def _keep_one_question(parts, ctx: str):
     отправлять похвалу, стоимость и доставку подряд, не дожидаясь клиента, — но
     вопрос там ровно один, в последнем звене. Поэтому режем не сообщения, а
     лишние вопросы: первый остаётся, всё остальное вопросительное снимается.
+
+    Резать нужно и ВНУТРИ одной части, не только между частями: на этапе сбора
+    ФИО/телефона/города модель иногда пишет свой пересказ поверх слотового
+    вопроса и приклеивает к нему второй, несвязанный («Какой цвет выберем?» — к
+    запросу ФИО и телефона получателя, скрин ОП 04.09,
+    PLAN-2026-09-04-pravki-OP.md, пункт D). Оба вопроса физически лежат в одном
+    part.text, и старая версия резала повтор только между частями — здесь его
+    не видела вовсе.
     """
     seen_question = False
     kept = []
     for part in parts:
         text = part.text or ""
         questions = _questions_in(text)
-        if seen_question and questions:
-            for q in questions:
+        if questions:
+            # Первый вопрос части оставляем, только если до неё вопросов ещё не
+            # было; иначе (как и раньше) снимаем все вопросы этой части.
+            extra = questions if seen_question else questions[1:]
+            for q in extra:
                 text = text.replace(q, "")
                 logger.info("[%s] второй вопрос за ход снят | %r", ctx, q.strip()[:60])
-            text = re.sub(r"\n{3,}", "\n\n", text).strip()
-        elif questions:
+            if extra:
+                text = re.sub(r"\n{3,}", "\n\n", text).strip()
             seen_question = True
         if not text and not part.image_urls:
             continue
@@ -1166,7 +1202,22 @@ async def run_ai(
     non_answer = is_non_answer(text)
     if non_answer:
         logger.info("[%s] клиент переспрашивает, а не отвечает — воронку не двигаем | text=%r", ctx, text[:40])
-    held = refused or design_edit or non_answer
+    # Мы спросили способ оплаты, а ответ клиента не выбор варианта, не отказ и не
+    # переспрос — что-то третье мимо вопроса. Без этой проверки шаг можно
+    # перескочить и сразу попросить ФИО/телефон, не дождавшись ответа про оплату.
+    # Ценовое возражение («дорого») сюда не попадает — приоритетнее сам вопрос
+    # про способ оплаты (пункт F): его отрабатывает модель, а не этот гейт,
+    # иначе retry заставил бы её просто переспросить оплату вместо возражения.
+    payment_pending = (
+        not (refused or design_edit or non_answer or is_price_objection(text))
+        and await payment_choice_pending(db, dialog.id, text)
+    )
+    if payment_pending:
+        logger.info(
+            "[%s] спросили способ оплаты, ответ не про это — воронку не двигаем | text=%r",
+            ctx, text[:60],
+        )
+    held = refused or design_edit or non_answer or payment_pending
     praise_point = not held and await answered_inscription_question(db, dialog.id, type_id)
     # Клиент не назвал надпись, а спросил своё — чаще всего про цену. Связка
     # нужна, присоединение «Супер, зафиксировала» — нет: фиксировать нечего.
@@ -1490,6 +1541,12 @@ async def run_ai(
                 ctx, (output.reply_text or "")[:80],
             )
             correction = _NON_ANSWER_RETRY_INSTRUCTION
+        elif ignores_refusal and payment_pending:
+            logger.warning(
+                "[%s] спросили способ оплаты, ответ не про это, а реплика двигает "
+                "воронку — retrying | reply_head=%r", ctx, (output.reply_text or "")[:80],
+            )
+            correction = _PAYMENT_CHOICE_PENDING_RETRY_INSTRUCTION
         elif ignores_refusal:
             logger.warning(
                 "[%s] клиент отказался, а ответ двигает воронку — retrying | reply_head=%r",
@@ -1790,18 +1847,10 @@ async def run_ai(
         dialog.ai_paused = True
         logger.info("[%s] need_curator=True — dialog paused for curator", ctx)
 
-    # Эскалация без уведомления не работала: менеджер узнавал о диалоге, только
-    # если сам открывал панель (ОП, 14:12: «Тут надо бросать диалог, должен
-    # подключаться менеджер»).
-    if dialog.ai_paused:
-        from app.notify import notify_curator
-        await notify_curator(
-            dialog.id,
-            output.curator_reason or "ИИ снят с диалога",
-            last_message=text,
-            vk_user_id=vk_user_id,
-            platform=platform,
-        )
+    # Уведомление в ТГ по паузам ИИ (темы менеджера, «вопрос вместо имени» и
+    # т.п.) выключено 04.09 по просьбе ОП (PLAN-2026-09-04-pravki-OP.md,
+    # пункт A) — в чат идут только уведы про способы оплаты (notify_hot).
+    # Статус «Нужен куратор» и пауза ИИ (выше) остаются как были.
 
     ai_run = AIRun(
         dialog_id=dialog.id,
@@ -1895,6 +1944,29 @@ async def run_ai(
             )
             reply_text = resolve_spintax(_praise.phrase_text)
             output = output.model_copy(update={"source_script_id": _praise.id})
+
+    # Первая цена в диалоге ДО похвалы (клиент спросил «сколько стоит?» раньше,
+    # чем назвал надпись, — путь выше её не перехватывает) тоже обязана уйти
+    # полноценным прайс-скриптом, а не куцым пересказом и не соседним по смыслу
+    # скриптом вроде #482 «Коротко о главном»: условия у них пересекаются, и
+    # текстовое сопоставление модели их иногда путает (скрины ОП, 04.09,
+    # PLAN-2026-09-04-pravki-OP.md, пункт B — «Стоимость свитшота... 5 990 ₽.
+    # Шьём из плотной ткани...» вместо полного расчёта с фото и рассрочкой).
+    # order_amounts, а не сырое совпадение «₽» — сумма доставки/брони (890₽,
+    # 500₽) не в счёт, цена товара всегда четырёхзначная.
+    if not praise_point and not dialog.quoted_prices and order_amounts(reply_text):
+        _price = await find_price_script(db, type_id)
+        if (
+            _price is not None
+            and (_price.phrase_text or "").strip()
+            and output.source_script_id != _price.id
+        ):
+            logger.info(
+                "[%s] первая цена в диалоге ушла не тем скриптом (%s) — "
+                "подменяю на прайс-скрипт %s", ctx, output.source_script_id, _price.id,
+            )
+            reply_text = resolve_spintax(_price.phrase_text)
+            output = output.model_copy(update={"source_script_id": _price.id})
 
     # Плейсхолдеры скрипта модель переносит в ответ как есть — «Оплата доставки
     # уже при получении. [Имя], а цвет какой выберем?» ушло клиенту в прогоне
@@ -2222,9 +2294,8 @@ async def _run_scripted_greeting(
     await db.commit()
     await db.refresh(ai_run)
 
-    if curator_reason:
-        from app.notify import notify_curator
-        await notify_curator(dialog.id, curator_reason, last_message=client_text)
+    # Уведомление в ТГ по паузе ИИ на приветствии выключено 04.09 (см. выше) —
+    # статус/пауза уже проставлены до этого места, в чат идёт только notify_hot.
 
     output = AgentOutput(
         reply_text=text,

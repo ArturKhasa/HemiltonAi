@@ -107,6 +107,22 @@ class TestEnsureQuestion:
         parts = [FakePart("Какой цвет выберем?")]
         assert _texts(_ensure_question(parts, {}, "ctx")) == ["Какой цвет выберем?"]
 
+    def test_data_collection_reply_gets_its_own_fallback_question(self):
+        """Скрин ОП, 04.09 (PLAN-2026-09-04-pravki-OP.md, пункт D): скрипт «5.1
+        Данные перед оформлением» построен без «?» («Отлично, тогда
+        подскажите...»), и без этой ветки общий фолбэк по товарным слотам
+        приклеивал «Какой цвет выберем?» тем же сообщением, где уже просят
+        ФИО и телефон. Лена, 04.09 11:30: «На этапе запроса данных вопрос —
+        Получится сейчас?»."""
+        parts = [FakePart(
+            "Отлично, тогда подскажите, пожалуйста, ФИО и номер телефона "
+            "получателя посылки, выставлю счёт на предоплату и внесу заказ в "
+            "систему"
+        )]
+        got = _texts(_ensure_question(parts, {"color": "чёрный"}, "ctx"))
+        assert got[0].endswith("Получится сейчас?")
+        assert "цвет" not in got[0].lower()
+
 
 class TestRepeatedOffers:
     def test_free_mockup_is_offered_once(self):
@@ -142,10 +158,15 @@ class TestOneQuestionPerTurn:
         assert got[0].endswith("Какой у Вас рост и вес?")
         assert "?" not in "".join(got[1:])
 
-    def test_two_questions_inside_one_message_leave_the_first(self):
+    def test_two_questions_inside_one_message_keep_only_the_first(self):
+        """До 04.09 два вопроса в ОДНОЙ части не резались вовсе (резали только
+        между частями) — «Отлично, тогда подскажите ФИО и телефон получателя...
+        Какой цвет выберем?» уходило клиенту целиком (скрин ОП,
+        PLAN-2026-09-04-pravki-OP.md, пункт D)."""
         parts = [FakePart("Какой цвет выберем? И какой у Вас рост?")]
         got = _texts(_keep_one_question(parts, "ctx"))
-        assert got == ["Какой цвет выберем? И какой у Вас рост?"]
+        assert got == ["Какой цвет выберем?"]
+
 
     def test_the_regulation_chain_survives(self):
         """Похвала, стоимость и доставка уходят подряд по регламенту — вопрос в

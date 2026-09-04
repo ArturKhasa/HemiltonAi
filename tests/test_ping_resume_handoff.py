@@ -248,7 +248,10 @@ class TestHotStageNoLongerTakesTheDialogBack:
         assert state.is_completed is True
         assert dialog.ai_paused is True
         assert agent_ran == []
-        assert notified and "горячая стадия" in notified[0]
+        # Уведомление в ТГ по пинговым эскалациям выключено 04.09
+        # (PLAN-2026-09-04-pravki-OP.md, пункт A) — статус «Нужен куратор» и
+        # снятие с пингов (выше) остаются, в чат идёт только notify_hot.
+        assert notified == []
 
 
 class TestHotStageDialogGetsItsOwnFunnel:

@@ -100,7 +100,9 @@ class TestGreetingPath:
         status = await db.get(DialogStatusConfig, dialog.current_status_id)
         assert status.name == "Нужен куратор"
         assert output.curator_reason == "Тема менеджера: вышивка"
-        assert notified == ["Тема менеджера: вышивка"]
+        # Уведомление в ТГ по паузам ИИ выключено 04.09 (PLAN-2026-09-04-pravki-OP.md,
+        # пункт A) — статус и пауза остаются, в чат идёт только notify_hot.
+        assert notified == []
 
     async def test_other_manager_topics_still_get_the_greeting(self, db, setup, notified):
         """Опт, срочность, размер — там прощальная реплика осталась: она про
@@ -115,7 +117,7 @@ class TestGreetingPath:
         assert output.need_curator is False
         assert parts and "здравствуйте" in parts[0].text.lower()
         assert dialog.ai_paused is True
-        assert notified == ["Тема менеджера: опт"]
+        assert notified == []
 
     async def test_ordinary_first_message_keeps_the_ai_working(self, db, setup, notified):
         dialog, client = setup

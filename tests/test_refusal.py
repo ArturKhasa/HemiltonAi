@@ -13,6 +13,8 @@ from app.sales.funnel_steps import (
     places_inscription_in_the_center,
     reply_advances_funnel,
 )
+from app.sales.non_answer import is_non_answer
+from app.sales.price_objection import is_price_objection
 
 
 class TestClientRefused:
@@ -195,3 +197,33 @@ class TestCenterPlacement:
     ])
     def test_no_false_positives(self, text):
         assert places_inscription_in_the_center(text, []) is False
+
+
+class TestObjectionOutranksAPendingQuestion:
+    """PLAN-2026-09-04-pravki-OP.md, пункт F. Ильнур, 04.09: «Ваше имя?» →
+    «сколько стоит?» → назвали цену, снова «Ваше имя?» → «а не, дорого» — должны
+    сразу отработать возражение, а не повторять вопрос об имени. Лена
+    подтвердила: «возражение приоритетнее».
+
+    Явного гейта «возражение важнее ранее заданного вопроса» в коде нет — это
+    держится на модели и промпте. Единственная гарантия, которая есть в коде: ни
+    один из «held»-гейтов (client_refused/is_non_answer), которые придерживают
+    ответ и мешают модели свободно отработать возражение, не должен принимать
+    ценовое возражение за отказ или переспрос. Тест фиксирует именно это —
+    регрессия здесь незаметна: гейт возьмёт возражение под «held», и модель
+    вместо отработки возражения снова спросит имя."""
+
+    OBJECTION = "а не, дорого"
+
+    def test_price_objection_is_recognised_as_an_objection(self):
+        assert is_price_objection(self.OBJECTION) is True
+
+    def test_price_objection_is_not_a_refusal(self):
+        """Если бы это ловилось как отказ, held=True развернул бы отработку
+        отказа («что именно не подошло?») вместо отработки цены."""
+        assert client_refused(self.OBJECTION) is False
+
+    def test_price_objection_is_not_a_non_answer(self):
+        """Если бы это ловилось как переспрос, held=True вернул бы модель к
+        уже заданному вопросу об имени, а не к возражению."""
+        assert is_non_answer(self.OBJECTION) is False

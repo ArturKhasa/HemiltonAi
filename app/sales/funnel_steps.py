@@ -822,6 +822,28 @@ async def payment_option_chosen(db: AsyncSession, dialog_id: int, client_text: s
     return bool(last and _ASKS_PAYMENT_CHOICE_RE.search(last))
 
 
+async def payment_choice_pending(db: AsyncSession, dialog_id: int, client_text: str) -> bool:
+    """Мы только что спросили способ оплаты, а ответ клиента не про это.
+
+    Без этой проверки шаг можно перескочить: клиент написал что-то мимо вопроса
+    (не отказ, не переспрос, не выбор варианта — их держат другие гейты), а
+    следующая реплика всё равно просит ФИО и телефон получателя (скрин ОП,
+    04.09: «Там выше был вопрос про способы оплаты... не дождались ответа, сразу
+    данные запросили»). Держим шаг, пока клиент прямо не выберет вариант.
+
+    Свой встречный вопрос («а скидка есть?») сюда не попадает — это не
+    блокирующая ситуация, а обычное уточнение, реплика на него отвечает и идёт
+    дальше своим чередом.
+    """
+    last = await _last_outgoing(db, dialog_id)
+    if not last or not _ASKS_PAYMENT_CHOICE_RE.search(last):
+        return False
+    text = (client_text or "").strip()
+    if not text or "?" in text:
+        return False
+    return not _PAYMENT_CHOICE_RE.search(text)
+
+
 async def checkout_presented(db: AsyncSession, dialog_id: int) -> bool:
     """Сумма заказа и способы оплаты уже показаны — счёт выставлять можно."""
     return any(

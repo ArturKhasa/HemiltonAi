@@ -17,6 +17,7 @@ from app.sales.funnel_steps import (
     find_design_fixed_script,
     find_payment_link_script,
     find_praise_script,
+    payment_choice_pending,
     payment_option_chosen,
 )
 
@@ -241,6 +242,68 @@ class TestPaymentOptionChosen:
         ))
         await db.commit()
         assert not await payment_option_chosen(db, funnel["dialog"].id, "давайте 500")
+
+
+class TestPaymentChoicePending:
+    """Скрин ОП, 04.09 (PLAN-2026-09-04-pravki-OP.md, пункт E): спросили способ
+    оплаты, клиент ответил не про это — а следующая реплика всё равно ушла
+    запросом ФИО и телефона. Вопрос про оплату должен придержать шаг.
+
+    Функция сама по себе не различает отказ/возражение/прочее мимо темы — она
+    только фиксирует факт «наш последний вопрос был про способ оплаты, а ответ
+    клиента под известный вариант не подходит». Разбор, что это было — отказ,
+    возражение или обычная реплика не по теме, — уже на стороне вызывающего
+    кода (app.ai.runner: client_refused/is_non_answer/is_price_objection свой
+    смысл в held считают отдельно, чтобы не дублировать чужую работу здесь)."""
+
+    async def _ask_choice(self, db, funnel):
+        db.add(Message(
+            dialog_id=funnel["dialog"].id, role=MessageRole.ai,
+            text="Удобно оплатить всю сумму сразу с подарком или сначала 500 рублей?",
+        ))
+        await db.commit()
+
+    async def test_pending_when_reply_is_beside_the_point(self, db, funnel):
+        await self._ask_choice(db, funnel)
+        assert await payment_choice_pending(db, funnel["dialog"].id, "хочу чёрный цвет")
+
+    @pytest.mark.parametrize("answer", ["500", "давайте 500", "частями", "всю сумму сразу", "второй"])
+    async def test_not_pending_once_client_chose(self, db, funnel, answer):
+        await self._ask_choice(db, funnel)
+        assert not await payment_choice_pending(db, funnel["dialog"].id, answer)
+
+    async def test_own_question_is_not_pending(self, db, funnel):
+        """Встречный вопрос — не блокирующая ситуация, а обычное уточнение."""
+        await self._ask_choice(db, funnel)
+        assert not await payment_choice_pending(db, funnel["dialog"].id, "а скидка есть?")
+
+    async def test_not_pending_without_our_question(self, db, funnel):
+        db.add(Message(
+            dialog_id=funnel["dialog"].id, role=MessageRole.ai, text="Какой цвет выберем?",
+        ))
+        await db.commit()
+        assert not await payment_choice_pending(db, funnel["dialog"].id, "72 размер")
+
+    async def test_not_pending_on_empty_reply(self, db, funnel):
+        await self._ask_choice(db, funnel)
+        assert not await payment_choice_pending(db, funnel["dialog"].id, "")
+
+
+class TestPaymentPendingExcludesObjection:
+    """app.ai.runner собирает payment_pending поверх payment_choice_pending и
+    сам исключает ценовое возражение («дорого») — иначе retry заставил бы
+    модель просто переспросить способ оплаты вместо отработки возражения
+    (пункт F: возражение приоритетнее ранее заданного вопроса). Здесь тестируем
+    именно это исключение, а не саму payment_choice_pending."""
+
+    def test_price_objection_is_excluded_from_the_gate(self):
+        import inspect
+
+        from app.ai import runner
+
+        src = inspect.getsource(runner.run_ai)
+        assert "is_price_objection(text)" in src
+        assert "payment_pending = (" in src
 
 
 class TestCheckoutPresented:

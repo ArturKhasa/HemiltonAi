@@ -379,8 +379,9 @@ async def _escalate(db: AsyncSession, dialog: Dialog, reason: str) -> None:
     if status:
         dialog.current_status_id = status.id
     logger.info("ping: диалог %s передан менеджеру — %s", dialog.id, reason)
-    from app.notify import notify_curator
-    await notify_curator(dialog.id, reason)
+    # Уведомление в ТГ по пинговым эскалациям выключено 04.09 по просьбе ОП
+    # (PLAN-2026-09-04-pravki-OP.md, пункт A): в чат должны идти только уведы
+    # про способы оплаты (notify_hot), статус/пометка в панели остаются как были.
 
 
 async def _process_state(db: AsyncSession, state: DialogPingState, now) -> None:
