@@ -416,12 +416,34 @@ _SLOT_REPEAT_RETRY_INSTRUCTION = (
     "и закончи ход ДРУГИМ вопросом по текущему шагу воронки."
 )
 
+_KNOWN_SLOT_RETRY_INSTRUCTION = (
+    "[Служебное] Ты спрашиваешь то, что клиент уже сказал: смотри блок [Уже "
+    "собрано]. Не переспрашивай известное — назови этот факт как решённый и "
+    "закончи ход вопросом про СЛЕДУЮЩИЙ незакрытый шаг заказа."
+)
+
 _DEFERRED_OFFER_RETRY_INSTRUCTION = (
     "[Служебное] Подарок и сегодняшняя скидка действуют только при оплате в день "
     "обращения — на другой день обещать их нельзя. Клиент переносит оплату: не "
     "подтверждай подарок и цену на завтра, а предложи бронь — она фиксирует и "
     "цену, и подарок к нужной дате."
 )
+
+
+def asks_known_slot(reply: str, slots: dict[str, str]) -> str | None:
+    """Реплика спрашивает о том, что клиент уже сказал, либо None.
+
+    Диалог 82260, 04.09: клиент назвал Екатеринбург, через две реплики ИИ снова
+    спросил «В какой город нужна доставка?», а ещё через две сам написал «в
+    Екатеринбург доставляем Почтой России». Факты у модели перед глазами блоком
+    [Уже собрано] — вопрос о заполненном слоте это не забывчивость, а сбой хода.
+
+    Прежняя проверка (repeats_slot_request) ловила только НЕзаполненный слот,
+    спрошенный третий раз подряд: она про назойливость, эта — про уже данный
+    ответ.
+    """
+    slot = asked_slot(reply or "")
+    return slot if slot and slot_is_filled(slot, slots or {}) else None
 
 
 def repeats_slot_request(
@@ -615,21 +637,26 @@ _FALLBACK_QUESTION = "Что и где разместим на изделии?"
 def _ensure_question(parts, slots: dict[str, str], ctx: str, manager_texts=None):
     """Дописать вопрос к последней реплике хода, если его нет ни в одной.
 
-    Слот, о котором мы только что спрашивали, второй раз не берём. Список городов
-    в коде знает 125 названий, и на «Шелехов» слот города не заполнялся — вопрос
-    про доставку дописывался к каждому ходу, клиент отвечал на него трижды
-    (диалог 83237, замечание РОПа 03.09: «прям спамит им бесконечно»). Даже когда
-    слот не распознан, повторять один и тот же вопрос подряд нельзя.
+    Слот, о котором мы уже спрашивали, второй раз не берём. Список городов в коде
+    знает 125 названий, и на «Шелехов» слот города не заполнялся — вопрос про
+    доставку дописывался к каждому ходу, клиент отвечал на него трижды (диалог
+    83237, замечание РОПа 03.09: «прям спамит им бесконечно»). Заполнять слот
+    ответом клиента как есть нельзя: на боевых данных так записались «Ненужно»,
+    «Покажите ассортимент ваших товаров» и «Пару» — последнее ИИ тут же вернул
+    клиенту как «По Пару доставляем СДЭКом». Поэтому слот не выдумываем, а просто
+    не спрашиваем второй раз.
     """
     if not parts or any(_questions_in(p.text or "") for p in parts):
         return parts
-    just_asked = {
-        asked_slot(t) for t in (manager_texts or [])[-_SLOT_REPEAT_LIMIT:] if t
-    }
+    # Не «последние два сообщения», а вся видимая история: один и тот же вопрос,
+    # дописанный кодом дважды за диалог, клиент читает как то, что его не
+    # слушают. Если клиент на него не ответил, спросит модель своими словами —
+    # у неё вся переписка перед глазами.
+    already_asked = {asked_slot(t) for t in (manager_texts or []) if t}
     question = next(
         (
             q for slot, q in _SLOT_QUESTIONS
-            if not slots.get(slot) and slot not in just_asked
+            if not slots.get(slot) and slot not in already_asked
         ),
         _FALLBACK_QUESTION,
     )
@@ -1372,6 +1399,7 @@ async def run_ai(
         both_gifts = promises_both_gifts(output.reply_text)
         deferred_offer = promises_offer_another_day(output.reply_text)
         repeated_slot = repeats_slot_request(output.reply_text, manager_history_texts, slots)
+        known_slot = asks_known_slot(output.reply_text, slots)
         # Третья сверка «Всё верно?» подряд. Клиент дважды ответил не про неё —
         # значит его занимает другое, и повтор он читает как то, что его не слышат.
         repeated_confirmation = (
@@ -1389,7 +1417,7 @@ async def run_ai(
         if (
             not dup_match and not requote and not no_question and not ignores_refusal
             and not repeated_chunk and not bad_payment_order and not both_gifts
-            and not deferred_offer and not repeated_slot
+            and not deferred_offer and not repeated_slot and not known_slot
             and not repeated_confirmation and not mockup_claim
             and not hedged_delivery and not lets_go and not center_placement
         ) or dup_attempt == 2:
@@ -1422,6 +1450,12 @@ async def run_ai(
                 ctx, repeated_slot,
             )
             correction = _SLOT_REPEAT_RETRY_INSTRUCTION
+        elif known_slot:
+            logger.warning(
+                "[%s] вопрос про уже известное — retrying | slot=%s | известно=%r",
+                ctx, known_slot, slots.get(known_slot),
+            )
+            correction = _KNOWN_SLOT_RETRY_INSTRUCTION
         elif hedged_delivery:
             logger.warning(
                 "[%s] стоимость доставки названа обтекаемо — retrying | reply_head=%r",

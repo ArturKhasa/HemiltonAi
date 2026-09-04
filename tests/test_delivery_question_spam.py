@@ -18,8 +18,8 @@
 """
 import pytest
 
-from app.ai.runner import ReplyPart, _ensure_question
-from app.sales.order_slots import city_from_reply, city_named_explicitly, collect_slots
+from app.ai.runner import ReplyPart, _ensure_question, asks_known_slot
+from app.sales.order_slots import city_named_explicitly, collect_slots
 
 ASK_CITY = "В какой город нужна будет доставка?"
 ASK_CONTACTS = (
@@ -29,10 +29,6 @@ ASK_CONTACTS = (
 
 
 class TestCityOutsideTheList:
-    def test_small_town_named_in_reply(self):
-        """«Шелехов» — 45 тысяч жителей, ни в одном списке в коде его нет."""
-        assert city_from_reply("Шелехов") == "Шелехов"
-
     @pytest.mark.parametrize("text,expected", [
         ("Город Шелехов", "Шелехов"),
         ("г. Шелехов", "Шелехов"),
@@ -42,46 +38,27 @@ class TestCityOutsideTheList:
     ])
     def test_city_named_by_the_word(self, text, expected):
         """Слово «город» рядом с названием ставит клиент сам — спутать не с чем,
-        поэтому работает даже в одном сообщении с ФИО и телефоном."""
+        поэтому работает даже в одном сообщении с ФИО и телефоном. Шелехова нет
+        ни в одном списке в коде: 45 тысяч жителей."""
         assert city_named_explicitly(text) == expected
 
     @pytest.mark.parametrize("text", [
-        "Почтой России",
-        "СДЭК",
-        "Доставка сколько стоит?",
-        "89500708618",
-        "Пункт выдачи на Ленина",
-        "Мне нужно два свитшота с гербом и надписью на спине побольше",
+        "Ненужно",
+        "Покажите ассортимент ваших товаров",
+        "Пару",
+        "Вышивка нитками",
         "Начать",
-        "+",
-        "Напишу позже",
-        "Пока не знаю",
-        "Подумаю",
-        "?",
+        "Почтой России",
     ])
-    def test_not_a_city(self, text):
-        """Способ доставки, телефон, встречный вопрос и длинная фраза городом
-        не считаются."""
-        assert city_from_reply(text) is None
-
-    def test_colour_is_not_a_city(self):
-        """Диалог 83109: код дописал вопрос про доставку к ходу про цвет, и
-        ответ «Черный» пришёл сразу после него."""
-        assert city_from_reply("Черный") is None
-
-    def test_region_counts_as_an_answer(self):
-        """Клиент вправе ответить областью — вопрос он всё равно закрыл."""
-        assert city_from_reply("Забайкальский край") == "Забайкальский край"
+    def test_free_answer_is_not_taken_as_a_city(self, text):
+        """Ответ на вопрос про доставку слотом НЕ становится: на боевых данных
+        так записались «Ненужно», «Покажите ассортимент ваших товаров» и «Пару»
+        — последнее ИИ вернул клиенту как «По Пару доставляем СДЭКом». Выдуманный
+        за клиента факт хуже лишнего вопроса."""
+        assert "city" not in collect_slots([("manager", ASK_CITY), ("client", text)])
 
 
 class TestCollectSlots:
-    def test_city_from_the_answer_to_our_question(self):
-        slots = collect_slots([
-            ("manager", ASK_CITY),
-            ("client", "Шелехов"),
-        ])
-        assert slots["city"] == "Шелехов"
-
     def test_city_in_one_message_with_contacts(self):
         """Диалог 83237: ФИО, телефон и город одной репликой."""
         slots = collect_slots([
@@ -102,7 +79,7 @@ class TestCollectSlots:
         assert "city" not in slots
 
     def test_colour_answer_after_a_stray_city_question(self):
-        """Тот же диалог целиком: города в нём нет, а цвет есть."""
+        """Диалог 83109: код дописал вопрос про доставку к ходу про цвет."""
         slots = collect_slots([
             ("manager", "Комплект из толстовки и жилетки - 8 980 ₽. " + ASK_CITY),
             ("client", "Черный"),
@@ -119,8 +96,8 @@ class TestEnsureQuestion:
     def _parts(self, text):
         return [ReplyPart(text=text, image_urls=[], message=None)]
 
-    def test_does_not_repeat_the_question_asked_a_turn_earlier(self):
-        """Даже если слот не распознан, один и тот же вопрос подряд не повторяем."""
+    def test_does_not_repeat_a_question_already_asked(self):
+        """Слот не распознан, но вопрос уже задавали — второй раз не дописываем."""
         parts = _ensure_question(
             self._parts("Данные приняла: Кадникова Ольга Владимировна, Шелехов."),
             {},
@@ -129,6 +106,17 @@ class TestEnsureQuestion:
         )
         assert ASK_CITY not in parts[0].text
         assert "?" in parts[0].text
+
+    def test_looks_at_the_whole_history_not_just_the_last_turns(self):
+        """Диалог 83237: между двумя вопросами про доставку прошло полтора часа
+        и десяток реплик."""
+        parts = _ensure_question(
+            self._parts("Зафиксировала размер!"),
+            {},
+            "test",
+            [ASK_CITY] + [f"Реплика {i}" for i in range(8)],
+        )
+        assert ASK_CITY not in parts[0].text
 
     def test_asks_the_city_when_it_was_not_asked_before(self):
         parts = _ensure_question(
@@ -149,3 +137,26 @@ class TestEnsureQuestion:
         original = "Какой цвет выберем?"
         parts = _ensure_question(self._parts(original), {}, "test", [])
         assert parts[0].text == original
+
+
+class TestAsksKnownSlot:
+    """Диалог 82260: клиент назвал Екатеринбург, через две реплики ИИ спросил
+    «В какой город нужна доставка?», а ещё через две сам написал «в Екатеринбург
+    доставляем». Вопрос о заполненном слоте — сбой хода, а не забывчивость."""
+
+    def test_asking_about_a_known_city(self):
+        assert asks_known_slot(ASK_CITY, {"city": "Екатеринбург"}) == "city"
+
+    def test_asking_about_an_unknown_city_is_fine(self):
+        assert asks_known_slot(ASK_CITY, {}) is None
+
+    def test_asking_about_known_contacts(self):
+        slots = {"recipient": "Кадникова Ольга Владимировна", "phone": "89500708618"}
+        assert asks_known_slot(ASK_CONTACTS, slots) == "recipient"
+
+    def test_half_of_the_contacts_is_not_enough(self):
+        """Скрипт спрашивает ФИО и телефон одной фразой — половины ответа мало."""
+        assert asks_known_slot(ASK_CONTACTS, {"recipient": "Кадникова Ольга"}) is None
+
+    def test_ordinary_reply_passes(self):
+        assert asks_known_slot("Какой цвет выберем?", {"city": "Казань"}) is None
