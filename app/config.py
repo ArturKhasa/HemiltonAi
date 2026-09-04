@@ -97,6 +97,15 @@ class Settings(BaseSettings):
     # Ignore dialogs silent longer than this — the moment to ping has passed.
     PING_DISCOVERY_MAX_AGE_HOURS: int = 24
 
+    # Сколько ждём после сообщения клиента, не допишет ли он ещё — прежде чем
+    # звать модель. Каждое новое сообщение перезапускает ожидание с себя (см.
+    # app.vk.webhook.handle_message_new), поэтому это не жёсткий потолок, а шаг
+    # «тишины», после которого отвечаем. Было 3 сек («дописал мысль за пару
+    # секунд»), подняли до 30 по просьбе ОП 04.09 (PLAN-2026-09-04-pravki-OP.md,
+    # пункт G) — клиенты часто шлют город/цвет/размер отдельными сообщениями в
+    # течение минуты, и на каждое уходил свой (дублирующийся) ответ.
+    CLIENT_TYPING_GRACE_SECONDS: float = 30.0
+
     AI_RUNNER_TIMEOUT: int = 180
 
     # Estimated tax/VAT applied to AI cost in analytics. 0.20 = +20%. 0 = disabled.

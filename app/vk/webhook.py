@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.providers import pick_ai_provider
+from app.config import settings
 from app.db.models import (
     AIRun, Client, Dialog, DialogPingState, DialogStatusConfig, DialogType,
     Message, MessageRole, VkGroup,
@@ -30,8 +31,9 @@ INITIAL_STATUS_NAME = "Поинтересовался"
 FOLLOW_UP_DELAY_SECONDS = 2.0
 
 # Сколько ждём, не допишет ли клиент. Рост и вес, имя и фамилию, город и цвет он
-# нередко шлёт двумя сообщениями подряд с интервалом в секунды.
-CLIENT_TYPING_GRACE_SECONDS = 3.0
+# нередко шлёт несколькими сообщениями подряд — не только за секунды, но и в
+# течение минуты. Значение в app.config.Settings (крутится без деплоя).
+CLIENT_TYPING_GRACE_SECONDS = settings.CLIENT_TYPING_GRACE_SECONDS
 
 
 @dataclass
