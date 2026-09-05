@@ -13,7 +13,7 @@ import pytest
 
 from app.db.models import Client, Dialog, DialogType, Message, MessageRole, Product, Script
 from app.sales.price_placeholder import format_price, render_price_placeholders
-from app.sales.prices import order_total
+from app.sales.prices import asks_price_only, order_total
 from app.vk.outgoing import mark_failed
 
 KIT = (
@@ -243,3 +243,39 @@ class TestTaggedCalculation:
         text = await render_price_placeholders(db, CHECKOUT, type_id=1, dialog=kit_client)
 
         assert text == f"Получается сумма заказа - {format_price(4990)}"
+
+
+class TestAsksPriceOnly:
+    """Гейт «первая цена — всегда полным прайс-скриптом» выбрасывает реплику
+    модели целиком (PLAN-2026-09-04-pravki-OP.md, пункт B). Поэтому срабатывать
+    он должен только там, где клиент кроме цены ничего не спрашивал: иначе
+    вместе с пересказом потеряется и ответ на второй вопрос."""
+
+    @pytest.mark.parametrize("text", [
+        # Обе реплики — со скринов ОП от 04.09 (диалоги Дмитрия и Алмы).
+        "А сколько они стоят ?",
+        "Сколько стоит?",
+        "сколько стоит свитшот",
+        "а сколько стоит худи с гербом?",
+        "Какая цена?",
+        "цена какая",
+        "Что по цене?",
+        "почём?",
+        "Стоимость",
+    ])
+    def test_pure_price_question(self, text):
+        assert asks_price_only(text) is True
+
+    @pytest.mark.parametrize("text", [
+        # Второй вопрос рядом с ценой — реплику модели забирать нельзя.
+        "сколько стоит и какие цвета есть?",
+        "А сколько стоит свитшот и за сколько дней сошьёте его мне?",
+        # Не вопрос о цене вовсе.
+        "Черный",
+        "Здравствуйте",
+        "А из какого материала толстовка?",
+        "дорого",
+        "",
+    ])
+    def test_not_a_pure_price_question(self, text):
+        assert asks_price_only(text) is False

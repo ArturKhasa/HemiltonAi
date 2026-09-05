@@ -61,7 +61,7 @@ from app.sales.product_photo import (
     reply_shows_photo,
 )
 from app.sales.price_placeholder import payment_link_configured, render_price_placeholders
-from app.sales.prices import order_amounts, prices_in as _prices_in
+from app.sales.prices import asks_price_only, order_amounts, prices_in as _prices_in
 from app.sales.stock import format_sold_out_block, sold_out_names
 from app.sales.status_names import MODEL_STATUSES
 from app.sales.funnel_steps import (
@@ -1965,7 +1965,17 @@ async def run_ai(
     # Шьём из плотной ткани...» вместо полного расчёта с фото и рассрочкой).
     # order_amounts, а не сырое совпадение «₽» — сумма доставки/брони (890₽,
     # 500₽) не в счёт, цена товара всегда четырёхзначная.
-    if not praise_point and not dialog.quoted_prices and order_amounts(reply_text):
+    #
+    # Подменяем ТОЛЬКО когда клиент спросил про цену и ни о чём больше: реплика
+    # модели тут выбрасывается целиком, и на «сколько стоит и какие цвета есть?»
+    # вместе с пересказом цены потерялся бы ответ про цвета. Соседний гейт выше
+    # закрывается тем же соображением — там условием `"?" not in text`.
+    if (
+        not praise_point
+        and not dialog.quoted_prices
+        and asks_price_only(text)
+        and order_amounts(reply_text)
+    ):
         _price = await find_price_script(db, type_id)
         if (
             _price is not None
