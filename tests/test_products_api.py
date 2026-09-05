@@ -11,18 +11,24 @@ from app.auth.service import hash_password
 from app.db.models import DialogType, Product, User, UserRole
 
 
-@pytest.fixture
-async def admin_headers(client, db):
-    db.add(User(
-        email="boss@test.io", password_hash=hash_password("pass1234"),
-        role=UserRole.admin,
-    ))
+async def _auth_headers(client, db, email, role):
+    db.add(User(email=email, password_hash=hash_password("pass1234"), role=role))
     await db.commit()
     resp = await client.post(
-        "/api/auth/login", json={"email": "boss@test.io", "password": "pass1234"},
+        "/api/auth/login", json={"email": email, "password": "pass1234"},
     )
     assert resp.status_code == 200
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+
+@pytest.fixture
+async def admin_headers(client, db):
+    return await _auth_headers(client, db, "boss@test.io", UserRole.admin)
+
+
+@pytest.fixture
+async def curator_headers(client, db):
+    return await _auth_headers(client, db, "cur@test.io", UserRole.curator)
 
 
 @pytest.fixture
@@ -57,6 +63,16 @@ class TestListProducts:
 
     async def test_anonymous_is_turned_away(self, client, matrix):
         assert (await client.get("/api/products/")).status_code == 401
+
+    async def test_curator_cannot_touch_the_matrix(self, client, matrix, curator_headers):
+        """Снятие позиции с продажи меняет то, что ИИ говорит всем клиентам, —
+        это админское действие, а не операторское."""
+        assert (await client.get(
+            "/api/products/", headers=curator_headers,
+        )).status_code == 403
+        assert (await client.patch(
+            "/api/products/1", json={"is_active": False}, headers=curator_headers,
+        )).status_code == 403
 
 
 class TestToggleProduct:
