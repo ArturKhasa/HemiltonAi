@@ -62,6 +62,7 @@ from app.sales.product_photo import (
 )
 from app.sales.price_placeholder import payment_link_configured, render_price_placeholders
 from app.sales.prices import order_amounts, prices_in as _prices_in
+from app.sales.stock import format_sold_out_block, sold_out_names
 from app.sales.status_names import MODEL_STATUSES
 from app.sales.funnel_steps import (
     delivered_outgoing_texts,
@@ -942,6 +943,16 @@ async def run_ai(
     if stage_block:
         dynamic_context.append(stage_block)
         logger.info("[%s] funnel stage injected | stage=%s", ctx, dialog.funnel_stage)
+
+    # Цвет, снятый с продажи галочкой «Активен» в товарной матрице. Поиск товара
+    # его и так не отдаёт, но сама модель об этом узнаёт, только если полезет
+    # искать: без этого блока она продолжает предлагать распроданный цвет
+    # (Лена, 04.09: «распродали один из цветов... ИИ до сих пор знает, что этот
+    # цвет у нас в наличии»). Пока в матрице всё активно — блока нет вовсе.
+    sold_out_block = format_sold_out_block(await sold_out_names(db, type_id))
+    if sold_out_block:
+        dynamic_context.append(sold_out_block)
+        logger.info("[%s] в контекст добавлен список снятых с продажи позиций", ctx)
 
     feedback_rules = await load_active_feedback_rules(db, type_id)
     if feedback_rules:

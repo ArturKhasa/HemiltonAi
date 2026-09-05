@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Script
+from app.sales.stock import sold_out_colors, sold_out_names
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,27 @@ async def palette_token(
     return None
 
 
+async def _sold_out_note(
+    db: AsyncSession, type_id: int | None, product: str | None,
+) -> str:
+    """Оговорка про распроданные цвета — или пустая строка, если всё в наличии.
+
+    Палитра лежит одной картинкой на все цвета сразу, подменить в ней цвет
+    нельзя. Поэтому цвет, снятый с продажи галочкой «Активен» в товарной
+    матрице, оговариваем текстом рядом с картинкой (Лена, 04.09: «распродали
+    один из цветов... как поставить цвет на стоп?»).
+    """
+    names = await sold_out_names(db, type_id)
+    if not names:
+        return ""
+    colors = sold_out_colors(names, bool(product and _HOODIE_RE.search(product)))
+    if not colors:
+        return ""
+    # Формулировка без склонения: цветов может быть и один, и пять, а падеж
+    # названия («чёрный» → «чёрного») кодом не вывести.
+    return f"Обратите внимание: сейчас нет в наличии — {', '.join(colors)}."
+
+
 async def with_palette(
     db: AsyncSession,
     text: str,
@@ -93,12 +115,21 @@ async def with_palette(
     product: str | None,
     ctx: str = "",
 ) -> str:
-    """Добавить палитру к вопросу о цвете, если её там нет."""
-    if not asks_color(text) or has_photo(text):
+    """Добавить к вопросу о цвете палитру (если её нет) и оговорку про наличие."""
+    if not asks_color(text):
         return text
+
+    result = text
+    note = await _sold_out_note(db, type_id, product)
+    if note:
+        result = f"{result.rstrip()}\n\n{note}"
+        logger.info("[%s] к вопросу про цвет добавлена оговорка о наличии", ctx)
+
+    if has_photo(text):
+        return result
     token = await palette_token(db, type_id, product)
     if not token:
         logger.warning("[%s] вопрос про цвет без палитры: скрипт цвета не найден", ctx)
-        return text
+        return result
     logger.info("[%s] к вопросу про цвет добавлена палитра", ctx)
-    return f"{text.rstrip()}\n\n{token}"
+    return f"{result.rstrip()}\n\n{token}"

@@ -5,7 +5,7 @@
 """
 import pytest
 
-from app.db.models import Script
+from app.db.models import Product, Script
 from app.sales.color_palette import asks_color, palette_token, with_palette
 
 SWEATSHIRT_PHOTO = "[photo-https://sun9-23.vkuserphoto.ru/s/v1/ig2/GsUPGBO.jpg?quality=95]"
@@ -91,6 +91,53 @@ class TestPalette:
     async def test_token_picked_per_product(self, color_scripts):
         assert await palette_token(color_scripts, 1, "свитшот") == SWEATSHIRT_PHOTO
         assert await palette_token(color_scripts, 1, "худи") == HOODIE_PHOTO
+
+    async def test_sold_out_color_is_spelled_out_next_to_the_rack(self, color_scripts):
+        """Палитра — одна картинка на все цвета, подменить в ней цвет нельзя.
+        Распроданный цвет (галочка «Активен» снята в матрице) оговариваем
+        текстом рядом с ней — Лена, 04.09."""
+        color_scripts.add(Product(id=1, type_id=1, name="Свитшот Черный", is_active=False))
+        await color_scripts.flush()
+
+        result = await with_palette(
+            color_scripts, "Какой цвет свитшота выберем?", type_id=1, product=None,
+        )
+
+        assert "сейчас нет в наличии — черный" in result
+        assert SWEATSHIRT_PHOTO in result
+
+    async def test_hoodie_rack_does_not_mention_sweatshirt_colors(self, color_scripts):
+        color_scripts.add(Product(id=1, type_id=1, name="Свитшот Черный", is_active=False))
+        await color_scripts.flush()
+
+        result = await with_palette(
+            color_scripts, "А цвет какой выберем?", type_id=1, product="худи",
+        )
+
+        assert "нет в наличии" not in result
+        assert HOODIE_PHOTO in result
+
+    async def test_nothing_added_while_everything_is_in_stock(self, color_scripts):
+        color_scripts.add(Product(id=1, type_id=1, name="Свитшот Черный", is_active=True))
+        await color_scripts.flush()
+
+        result = await with_palette(
+            color_scripts, "Какой цвет свитшота выберем?", type_id=1, product=None,
+        )
+
+        assert "наличи" not in result
+        assert result == f"Какой цвет свитшота выберем?\n\n{SWEATSHIRT_PHOTO}"
+
+    async def test_note_reaches_a_reply_that_already_has_the_rack(self, color_scripts):
+        """Токен палитры модель иногда переносит сама — оговорка нужна и тогда."""
+        color_scripts.add(Product(id=1, type_id=1, name="Свитшот Черный", is_active=False))
+        await color_scripts.flush()
+        reply = f"Какой цвет свитшота выберем?\n\n{SWEATSHIRT_PHOTO}"
+
+        result = await with_palette(color_scripts, reply, type_id=1, product=None)
+
+        assert "сейчас нет в наличии — черный" in result
+        assert result.count(SWEATSHIRT_PHOTO) == 1
 
     async def test_hoodie_palette_only_when_the_client_said_hoodie(self, color_scripts):
         """«Толстовка» — это свитшот.
