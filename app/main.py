@@ -105,6 +105,7 @@ from app.api.max import router as max_webhook_router
 from app.api.max_bots import router as max_bots_router
 from app.api.feedback import router as feedback_router
 from app.api.ref_tags import router as ref_tags_router
+from app.api.products import router as products_router
 from app.api.media import router as media_router
 
 app.include_router(auth_router, prefix="/api/auth")
@@ -119,6 +120,7 @@ app.include_router(vk_groups_router, prefix="/api")
 app.include_router(max_bots_router, prefix="/api")
 app.include_router(feedback_router, prefix="/api")
 app.include_router(ref_tags_router, prefix="/api")
+app.include_router(products_router, prefix="/api")
 app.include_router(media_router, prefix="/api")
 # Вебхук ВК без /api-префикса: адрес в настройках Callback API — /webhook/vk.
 app.include_router(vk_webhook_router)

@@ -499,6 +499,73 @@
         </div>
         <p v-if="maxError" class="px-4 py-3 text-xs text-red-500 border-t">{{ maxError }}</p>
       </div>
+
+      <!-- ===== Products (товарная матрица) section ===== -->
+      <div v-else-if="activeSection === 'products'" class="bg-white rounded-xl shadow-sm border overflow-hidden">
+        <div class="px-4 py-3 flex justify-between items-center border-b bg-gray-50">
+          <div class="flex flex-col gap-0.5">
+            <span class="text-sm text-gray-500">
+              {{ products.length }} позиций, снято с продажи: {{ soldOutCount }}
+            </span>
+            <span class="text-xs text-gray-400">
+              Снимите «В наличии» — ИИ перестанет предлагать позицию, скажет,
+              что её сейчас нет, и оговорит это рядом с картинкой-палитрой.
+              Менять фото в скриптах для этого не нужно.
+            </span>
+          </div>
+          <button
+            @click="loadProducts"
+            :disabled="productsLoading"
+            class="text-sm px-3 py-2 rounded-lg border text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+          >{{ productsLoading ? 'Обновление…' : 'Обновить' }}</button>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="bg-gray-50 text-left border-b">
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium">Позиция</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-32">Цена</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-32">Со скидкой</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-32">Минимальная</th>
+                <th class="px-4 py-3 text-xs text-gray-500 font-medium w-28">В наличии</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              <tr v-if="productsLoading">
+                <td colspan="5" class="px-4 py-10 text-center text-gray-400">Загрузка...</td>
+              </tr>
+              <tr v-else-if="products.length === 0">
+                <td colspan="5" class="px-4 py-10 text-center text-gray-400">Матрица пуста</td>
+              </tr>
+              <tr
+                v-else
+                v-for="p in products"
+                :key="p.id"
+                :class="['hover:bg-gray-50 transition-colors', p.is_active ? '' : 'bg-red-50/40']"
+              >
+                <td class="px-4 py-3">
+                  <span :class="p.is_active ? 'text-gray-800' : 'text-gray-400 line-through'">{{ p.name }}</span>
+                  <span v-if="!p.is_active" class="ml-2 text-[11px] text-red-500 font-medium">снято с продажи</span>
+                </td>
+                <td class="px-4 py-3 text-gray-700">{{ money(p.price) }}</td>
+                <td class="px-4 py-3 text-gray-500">{{ money(p.discount_price) }}</td>
+                <td class="px-4 py-3 text-gray-500">{{ money(p.min_price) }}</td>
+                <td class="px-4 py-3">
+                  <input
+                    type="checkbox"
+                    :checked="p.is_active"
+                    :disabled="productToggling === p.id"
+                    @change="toggleProductActive(p)"
+                    class="rounded w-4 h-4 cursor-pointer disabled:opacity-50"
+                  />
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-if="productsError" class="px-4 py-3 text-xs text-red-500 border-t">{{ productsError }}</p>
+      </div>
     </div>
 
     <!-- Create/Edit MAX bot Modal -->
@@ -913,6 +980,7 @@ const SECTIONS = [
   { id: 'ref-tags', label: 'Реф-метки' },
   { id: 'vk-groups', label: 'Группы ВК' },
   { id: 'max-bots', label: 'Боты MAX' },
+  { id: 'products', label: 'Товары' },
 ]
 const activeSection = ref('scripts')
 
@@ -1595,6 +1663,57 @@ async function doDeleteMaxBot() {
   }
 }
 
+// ===== Товарная матрица =====
+//
+// Экрана у матрицы не было вовсе: её заводили выгрузкой и правили в базе.
+// Понадобился он ради одной задачи — снять цвет с продажи (Лена, 04.09:
+// «распродали один из цветов... как поставить цвет на стоп?»). Поэтому здесь
+// только список и галочка: заводить и удалять позиции по-прежнему нельзя,
+// цены подставляются по названию, и случайно удалённая строка их уронит.
+const products = ref([])
+const productsLoading = ref(false)
+const productsError = ref('')
+const productToggling = ref(null)
+
+const soldOutCount = computed(() => products.value.filter(p => !p.is_active).length)
+
+function money(value) {
+  if (value === null || value === undefined || value === '') return '—'
+  const n = Number(value)
+  return Number.isFinite(n) ? `${n.toLocaleString('ru-RU')} ₽` : '—'
+}
+
+async function loadProducts() {
+  productsLoading.value = true
+  productsError.value = ''
+  try {
+    const res = await api.get('/products/')
+    products.value = res.data
+  } catch (e) {
+    productsError.value = e.response?.data?.detail || 'Не удалось загрузить товары'
+    products.value = []
+  } finally {
+    productsLoading.value = false
+  }
+}
+
+async function toggleProductActive(p) {
+  productToggling.value = p.id
+  productsError.value = ''
+  try {
+    const res = await api.patch(`/products/${p.id}`, { is_active: !p.is_active })
+    const i = products.value.findIndex(x => x.id === p.id)
+    if (i !== -1) products.value[i] = res.data
+  } catch (e) {
+    productsError.value = e.response?.data?.detail || 'Не удалось переключить позицию'
+    // Галочка привязана к данным с бэка — перечитываем, чтобы она не осталась
+    // в положении, до которого дело не дошло.
+    await loadProducts()
+  } finally {
+    productToggling.value = null
+  }
+}
+
 onMounted(async () => {
   // Метки после скриптов: экран показывает тексты приветствий, а они из scripts.
   await load()
@@ -1603,10 +1722,11 @@ onMounted(async () => {
   loadMaxBots()
 })
 
-// Админка часто остаётся открытой во вкладке часами. Перечитываем ботов при
-// переходе в их раздел: созданные с другого устройства или после рестарта
-// сервиса не пропадут из старого локального состояния страницы.
+// Админка часто остаётся открытой во вкладке часами. Перечитываем ботов и
+// товары при переходе в их раздел: изменённые с другого устройства или после
+// рестарта сервиса не пропадут из старого локального состояния страницы.
 watch(activeSection, (section) => {
   if (section === 'max-bots') loadMaxBots()
+  if (section === 'products') loadProducts()
 })
 </script>
