@@ -7,6 +7,7 @@
 import asyncio
 import logging
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
@@ -34,6 +35,10 @@ FOLLOW_UP_DELAY_SECONDS = 2.0
 # нередко шлёт несколькими сообщениями подряд — не только за секунды, но и в
 # течение минуты. Значение в app.config.Settings (крутится без деплоя).
 CLIENT_TYPING_GRACE_SECONDS = settings.CLIENT_TYPING_GRACE_SECONDS
+
+# Как часто переотправлять «печатает…»: мессенджеры гасят индикатор через
+# несколько секунд, одной отправки на всё ожидание не хватает.
+TYPING_REFRESH_SECONDS = 5.0
 
 
 @dataclass
@@ -381,6 +386,62 @@ async def conversation_is_new(
     return True
 
 
+async def _send_typing_once(
+    platform: str, access_token: str, address: int, group_id: int | None,
+) -> None:
+    """Отправить индикатор «печатает» в тот мессенджер, откуда пришёл клиент.
+
+    Принимает голые значения, а не ORM-объекты: вызов живёт в фоновой задаче,
+    которая крутится параллельно прогону модели, и трогать оттуда объекты чужой
+    сессии нельзя — ленивая подгрузка из другого таска роняет саму сессию.
+    """
+    if platform == "max":
+        from app.max.client import send_typing as max_send_typing
+        await max_send_typing(access_token, address)
+        return
+    from app.vk.sender import send_typing as vk_send_typing
+    await vk_send_typing(access_token, address, group_id)
+
+
+@asynccontextmanager
+async def typing_indicator(group: VkGroup, client: Client, ctx: str = ""):
+    """Держать «печатает…» всё время, пока готовим ответ.
+
+    Мессенджеры гасят индикатор через несколько секунд, поэтому его мало
+    отправить один раз — фоновая задача повторяет его, пока идёт ожидание и
+    прогон модели. Сам индикатор ошибок не поднимает (см. senders), но и вся
+    обвязка на всякий случай молчаливая: ответ клиенту важнее украшения.
+    """
+    platform = platform_of(group)
+    token = group.access_token
+    # Адрес индикатора: в MAX это chat_id (он запоминается на первом сообщении
+    # диалога), в ВК — сам пользователь. Значения снимаем здесь, пока объекты
+    # живые и под рукой: в фоновой задаче сессии уже не будет.
+    address = client.max_chat_id if platform == "max" else client.vk_user_id
+    group_id = group.group_id
+
+    if not token or not address:
+        yield
+        return
+
+    async def _keep_alive() -> None:
+        while True:
+            await _send_typing_once(platform, token, int(address), group_id)
+            await asyncio.sleep(TYPING_REFRESH_SECONDS)
+
+    task = asyncio.create_task(_keep_alive())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.info("[%s] индикатор «печатает» завершился с ошибкой: %s", ctx, exc)
+
+
 async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMessage) -> None:
     """Входящее сообщение пользователя: сохранить, запустить ИИ, отправить ответ."""
     client = await _get_or_create_client(
@@ -494,21 +555,25 @@ async def handle_message_new(db: AsyncSession, group: VkGroup, msg: VkIncomingMe
             logger.info("[%s] ai paused (operator took over) — message saved, no AI run", ctx)
             return
 
-        # Клиент часто дробит ответ: «1.80», следом «64». Прогон стартовал по
-        # первому сообщению, второе пришло, пока он шёл, — и клиенту прилетело
-        # «Какой у Вас вес?» на вес, который он только что назвал (диалог 150,
-        # 09:57). Ждём короткую паузу и уступаем ход последнему сообщению: оно
-        # запустит свой прогон и увидит обе реплики сразу.
-        await asyncio.sleep(CLIENT_TYPING_GRACE_SECONDS)
-        await db.refresh(dialog)
-        if dialog.ai_paused:
-            logger.info("[%s] ai paused during grace period — no AI run", ctx)
-            return
-        if await superseded_by_newer_message(db, dialog.id, client_message.id):
-            logger.info("[%s] newer client message arrived — this turn yields", ctx)
-            return
+        # «Печатает…» на всё время ожидания и прогона: с паузой в 30 секунд
+        # ответ идёт полторы-две минуты, и немой чат лид читает как «меня
+        # игнорируют» (Лена, 04.09).
+        async with typing_indicator(group, client, ctx):
+            # Клиент часто дробит ответ: «1.80», следом «64». Прогон стартовал по
+            # первому сообщению, второе пришло, пока он шёл, — и клиенту прилетело
+            # «Какой у Вас вес?» на вес, который он только что назвал (диалог 150,
+            # 09:57). Ждём короткую паузу и уступаем ход последнему сообщению: оно
+            # запустит свой прогон и увидит обе реплики сразу.
+            await asyncio.sleep(CLIENT_TYPING_GRACE_SECONDS)
+            await db.refresh(dialog)
+            if dialog.ai_paused:
+                logger.info("[%s] ai paused during grace period — no AI run", ctx)
+                return
+            if await superseded_by_newer_message(db, dialog.id, client_message.id):
+                logger.info("[%s] newer client message arrived — this turn yields", ctx)
+                return
 
-        await _reply_with_ai(db, group, dialog, client_message, ctx)
+            await _reply_with_ai(db, group, dialog, client_message, ctx)
 
 
 async def _reply_with_ai(

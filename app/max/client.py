@@ -139,6 +139,25 @@ async def list_subscriptions(token: str) -> list[dict]:
     return data.get("subscriptions") or []
 
 
+async def send_typing(token: str, chat_id: int) -> None:
+    """Показать «печатает…» в чате MAX — та же задача, что и в ВК.
+
+    В отличие от ВК, здесь эндпоинт живьём не проверен: писать в чат живого
+    клиента ради проверки нельзя, а тестового диалога в MAX под рукой нет.
+    Поэтому вызов сделан по документации Bot API и обёрнут в проглатывание
+    ошибок: не поддержит — тихо ляжет строкой в лог, ответ клиенту от этого не
+    пострадает. Если в логах будет ровно это — значит, у MAX индикатора нет,
+    и строку можно убрать.
+    """
+    try:
+        await _request(
+            token, "POST", f"/chats/{chat_id}/actions",
+            json={"action": "typing_on"},
+        )
+    except Exception as exc:
+        logger.info("MAX «печатает» не ушло | chat_id=%s: %s", chat_id, exc)
+
+
 async def get_messages(token: str, chat_id: int, count: int = 10) -> list[dict]:
     """Последние сообщения диалога или группового чата MAX.
 

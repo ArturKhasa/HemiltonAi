@@ -314,6 +314,27 @@ async def fetch_user_name(access_token: str, vk_user_id: int) -> tuple[str | Non
     return first or None, last or None
 
 
+async def send_typing(access_token: str, vk_user_id: int, group_id: int | None = None) -> None:
+    """Показать клиенту «печатает…» в диалоге ВК.
+
+    Нужен из-за паузы перед ответом: ИИ ждёт 30 секунд, не допишет ли клиент,
+    и ещё столько же думает — полторы-две минуты немого чата лид читает как
+    «меня игнорируют». Лена, 04.09: «Пока ИИ думает 30 секунд, можно включить
+    видимость, что сообщество печатает в это время?».
+
+    ВК гасит индикатор через несколько секунд, поэтому его надо переотправлять
+    (см. app.vk.webhook.typing_indicator). Ошибку не пробрасываем: индикатор —
+    украшение, из-за него ответ клиенту падать не должен.
+    """
+    params: dict = {"user_id": vk_user_id, "type": "typing"}
+    if group_id:
+        params["group_id"] = group_id
+    try:
+        await vk_api_call(access_token, "messages.setActivity", params)
+    except Exception as exc:
+        logger.info("«печатает» не ушло | vk_user_id=%s: %s", vk_user_id, exc)
+
+
 async def verify_attachments_delivered(
     db: AsyncSession, group: VkGroup, message_id: int | None, attachment: str,
 ) -> bool:

@@ -54,11 +54,25 @@ def no_max_network(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_typing_indicator(monkeypatch):
+    """Индикатор «печатает» в тестах не отправляем — сети в наборе быть не должно.
+
+    Гейт стоит на самой отправке, а не на обвязке: фоновая задача, которая его
+    повторяет, продолжает жить и в тестах — заодно проверяется, что она никому
+    не мешает. Тест самого индикатора подменяет отправку сам.
+    """
+    async def _no_typing(platform, access_token, address, group_id):
+        return None
+
+    monkeypatch.setattr("app.vk.webhook._send_typing_once", _no_typing)
+
+
+@pytest.fixture(autouse=True)
 def no_typing_grace(monkeypatch):
     """Пауза «не допишет ли клиент» в тестах нулевая.
 
-    В проде она три секунды (см. webhook.CLIENT_TYPING_GRACE_SECONDS) и на живом
-    трафике незаметна, а в наборе тестов складывалась в лишнюю минуту ожидания.
+    В проде она тридцать секунд (`Settings.CLIENT_TYPING_GRACE_SECONDS`) — ждём,
+    не допишет ли клиент, — а в наборе тестов сложилась бы в часы ожидания.
     Тест, который проверяет саму паузу, снимает эту подмену.
     """
     monkeypatch.setattr("app.vk.webhook.CLIENT_TYPING_GRACE_SECONDS", 0)
