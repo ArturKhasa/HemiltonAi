@@ -107,3 +107,49 @@ async def test_other_dialog_type_is_not_borrowed(db):
     await db.flush()
     picked = await tagged_variant(db, await db.get(Script, 1), {"sweetgold"})
     assert picked.id == 1
+
+
+class TestPriceGateKeepsTheKitPrice:
+    """Гейт «первая цена — всегда полным прайс-скриптом» (правка ОП от 04.09,
+    пункт B) обязан брать расчёт под метку, а не общий.
+
+    08.09 06:31 на проде он этого не делал: клиенту с меткой комплекта
+    `hood141` подменил расчёт 519 (свитшот + жилетка, 8 980 ₽) на общий 367
+    (5 990 ₽). Цены разошлись, защита от смены цены сняла реплику целиком, и
+    клиент остался без ответа на ходу (диалог 60937). Это ровно та жалоба РОП
+    от 03.09 — «клиент пришёл за комплектом, ИИ отправляет ему цену на один
+    свитшот», — которую гейт едва не вернул.
+    """
+
+    @pytest.fixture
+    async def kit(self, db):
+        db.add_all([
+            Script(id=367, is_active=True, type_id=1, funnel_stage="pricing",
+                   condition=COND, phrase_text="Стоимость - 5 990 ₽"),
+            Script(id=519, is_active=True, type_id=1, funnel_stage="pricing",
+                   condition="Комплект", marketing_tag="hood141",
+                   variant_of_script_id=367,
+                   phrase_text="Комплект из двух изделий со скидкой - 8 980 ₽"),
+        ])
+        await db.flush()
+        return db
+
+    async def test_kit_client_keeps_the_kit_calculation(self, kit):
+        """То, что подставит гейт клиенту с меткой комплекта."""
+        picked = await tagged_variant(kit, await kit.get(Script, 367), {"hood141"})
+
+        assert picked.id == 519
+        assert "8 980" in picked.phrase_text
+
+    async def test_model_choosing_the_kit_script_is_left_alone(self, kit):
+        """Модель выбрала 519 сама — гейт обязан отступить: 519 это вариант
+        расчёта (variant_of_script_id=367), а не посторонний скрипт."""
+        picked = await tagged_variant(kit, await kit.get(Script, 367), {"hood141"})
+        already_price = 519 in {picked.id, picked.variant_of_script_id}
+
+        assert already_price is True
+
+    async def test_client_without_the_tag_still_gets_the_plain_price(self, kit):
+        picked = await tagged_variant(kit, await kit.get(Script, 367), set())
+
+        assert picked.id == 367

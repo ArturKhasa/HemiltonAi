@@ -1977,10 +1977,30 @@ async def run_ai(
         and order_amounts(reply_text)
     ):
         _price = await find_price_script(db, type_id)
+        if _price is not None:
+            # Расчёт бывает разным: на метке комплекта это свитшот + жилетка за
+            # 8 980 ₽ (скрипт 519), а не общий свитшот за 5 990 ₽. Берём версию
+            # под клиента ровно так же, как её берёт связка ниже, — иначе гейт
+            # своими руками возвращает жалобу РОП от 03.09 «клиент пришёл за
+            # комплектом, ИИ отправляет ему цену на один свитшот». На проде это
+            # и случилось: 08.09 06:31 подмена 519 → 367 разошлась с ценами, и
+            # защита от смены цены сняла реплику целиком — клиент остался без
+            # ответа на ходу (диалог 60937).
+            _price = await tagged_variant(
+                db, _price,
+                set(getattr(client, "marketing_tags", None) or []),
+                pair=bool(slots.get("pair")),
+            )
+        # Модель выбрала сам расчёт (или его версию под метку) — вмешиваться не
+        # во что: гейт стоит против НЕ прайсовых скриптов вроде #482 и против
+        # пересказа своими словами.
+        _already_price = _price is not None and output.source_script_id in {
+            _price.id, getattr(_price, "variant_of_script_id", None),
+        }
         if (
             _price is not None
             and (_price.phrase_text or "").strip()
-            and output.source_script_id != _price.id
+            and not _already_price
         ):
             logger.info(
                 "[%s] первая цена в диалоге ушла не тем скриптом (%s) — "
