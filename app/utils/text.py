@@ -332,3 +332,46 @@ def person_label(name: str | None, email: str | None) -> str | None:
     if email:
         return email.split("@")[0]
     return None
+
+
+# Один вопрос за реплику. Правило ОП от 11.08 («ии всегда дожидается ответ на
+# вопрос, потом задаёт следующий») живёт в app.ai.runner для ходов диалога, где
+# режет лишние вопросы по частям хода. Пингам нужна та же логика, но на одном
+# тексте: пинг — это всегда одно сообщение, и адаптированный моделью текст
+# приходит цельной строкой.
+_QUESTION_RE = re.compile(r"[^.!?\n]*\?")
+_QUESTION_HAS_LETTER_RE = re.compile(r"[а-яёa-z]", re.I)
+
+
+def questions_in(text: str) -> list[str]:
+    """Вопросы текста — по тексту БЕЗ токенов вложений.
+
+    Внутри ссылки на CDN живёт свой «вопрос»: она заканчивается
+    «…RoMf.jpg?quality=95&as=…», и шаблон вопроса вытаскивает из неё хвост
+    «jpg?». Буквы там тоже есть, поэтому одной проверки на букву мало — токены
+    надо убрать до поиска, иначе вырезание «второго вопроса» рвёт ссылку
+    пополам и картинка пропадает (диалог 75800, 20.08).
+    """
+    from app.utils.media import strip_attachment_tokens
+
+    return [
+        q for q in _QUESTION_RE.findall(strip_attachment_tokens(text or ""))
+        if _QUESTION_HAS_LETTER_RE.search(q)
+    ]
+
+
+def keep_one_question(text: str) -> tuple[str, list[str]]:
+    """Оставить в тексте первый вопрос, остальные снять.
+
+    Возвращает (текст, снятые вопросы) — снятые нужны вызывающему для лога.
+    """
+    found = questions_in(text or "")
+    if len(found) < 2:
+        return text, []
+    extra = found[1:]
+    trimmed = text
+    for q in extra:
+        trimmed = trimmed.replace(q, "")
+    trimmed = re.sub(r"[ \t]{2,}", " ", trimmed)
+    trimmed = re.sub(r"\n{3,}", "\n\n", trimmed).strip()
+    return trimmed, extra

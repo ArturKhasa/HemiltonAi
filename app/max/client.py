@@ -156,6 +156,11 @@ async def send_typing(token: str, chat_id: int) -> None:
         )
     except Exception as exc:
         logger.info("MAX «печатает» не ушло | chat_id=%s: %s", chat_id, exc)
+        return
+    # Успех тоже пишем в лог, иначе «сработало» и «ни разу не вызывалось»
+    # выглядят в логах одинаково — тишиной, и подтвердить работу индикатора в
+    # MAX нечем (эндпоинт взят из документации, живьём не проверялся).
+    logger.info("MAX «печатает» ушло | chat_id=%s", chat_id)
 
 
 async def get_messages(token: str, chat_id: int, count: int = 10) -> list[dict]:

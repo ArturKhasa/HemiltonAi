@@ -20,7 +20,7 @@ from app.sales.order_slots import collect_slots
 from app.utils.media import carry_over_attachments
 from app.utils.time import msk_now
 from app.ai.triggers import CURATOR_STATUS_NAME
-from app.utils.text import normalize_dashes, strip_foreign_name
+from app.utils.text import keep_one_question, normalize_dashes, strip_foreign_name
 from app.vk.outgoing import delivered_only, mark_delivered, was_delivered
 from app.messaging import MessagesForbiddenError, dialogs_on_inactive_channels, send_to_dialog
 from app.vk.spintax import resolve_spintax
@@ -247,6 +247,20 @@ async def _send_ping(
         if stripped != custom_text:
             logger.info("ping: stripped repeated name | dialog=%s", state.dialog_id)
             custom_text = stripped
+        # Один вопрос за реплику — то же правило ОП от 11.08, что и в ходах
+        # диалога. В ходах его держит app.ai.runner._keep_one_question, а пинги
+        # шли мимо: за 06-08.09 два вопроса были в 62 пингах из 4088 (1,5%),
+        # против 0,1% в обычных ходах. Пинг адаптирует модель, и она любит
+        # добавить второй вопрос к тексту шага: «Вы выбираете для себя или в
+        # подарок? И подскажите, что сейчас больше останавливает — дизайн или
+        # стоимость?».
+        one_question, dropped = keep_one_question(custom_text)
+        if dropped:
+            logger.info(
+                "ping: снят второй вопрос | dialog=%s | %r",
+                state.dialog_id, dropped[0].strip()[:60],
+            )
+            custom_text = one_question
 
     phrase_template = (rule.phrase_text or "").strip()
 
